@@ -1975,7 +1975,7 @@ Acceptance criteria:
 - endpoints with strong usages do not;
 - allow-unused suppresses diagnostics.
 
-### T-028 — Implement cross-language rename
+### T-028 — Implement cross-language rename [done]
 
 Goal: support bidirectional API refactors.
 

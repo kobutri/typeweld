@@ -276,6 +276,34 @@ impl<W: Write> LspServer<W> {
                     }
                 }
             }
+            "textDocument/prepareRename" => {
+                if let Some(id) = message.id {
+                    if let Some(rename) = self.cross_language_prepare_rename(&message.params)? {
+                        self.write_response(id, rename)?;
+                    } else if is_rust_message(method, &message.params) {
+                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                    } else if self.is_typescript_message(method, &message.params) {
+                        self.forward_request_to_typescript(method, message.params, id)?;
+                    } else {
+                        self.write_response(id, Value::Null)?;
+                    }
+                }
+            }
+            "textDocument/rename" => {
+                if let Some(id) = message.id {
+                    match self.cross_language_rename(&message.params) {
+                        Ok(Some(edit)) => self.write_response(id, edit)?,
+                        Ok(None) if is_rust_message(method, &message.params) => {
+                            self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                        }
+                        Ok(None) if self.is_typescript_message(method, &message.params) => {
+                            self.forward_request_to_typescript(method, message.params, id)?;
+                        }
+                        Ok(None) => self.write_response(id, json!({ "changes": {} }))?,
+                        Err(error) => self.write_error(id, -32_602, error)?,
+                    }
+                }
+            }
             _ => {
                 if is_rust_message(method, &message.params) {
                     match message.id {
@@ -518,6 +546,35 @@ impl<W: Write> LspServer<W> {
         };
         Ok(graph.hover(&query, workspace))
     }
+
+    fn cross_language_prepare_rename(&self, params: &Value) -> Result<Option<Value>, String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(None);
+        };
+        let Some(query) = TextPositionQuery::from_lsp_params(params) else {
+            return Ok(None);
+        };
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        Ok(graph.prepare_rename(&query, workspace))
+    }
+
+    fn cross_language_rename(&self, params: &Value) -> Result<Option<Value>, String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(None);
+        };
+        let Some(query) = TextPositionQuery::from_lsp_params(params) else {
+            return Ok(None);
+        };
+        let Some(new_name) = params.get("newName").and_then(Value::as_str) else {
+            return Err("rename requires `newName`".to_owned());
+        };
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        graph.rename(&query, new_name, workspace)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -632,6 +689,79 @@ impl SymbolGraph {
 
         None
     }
+
+    fn prepare_rename(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Option<Value> {
+        let (symbol, location) = self.rename_symbol_at(query, workspace)?;
+        Some(json!({
+            "range": location.range,
+            "placeholder": symbol.rename_placeholder(),
+        }))
+    }
+
+    fn rename(
+        &self,
+        query: &TextPositionQuery,
+        new_name: &str,
+        workspace: &WorkspaceConfig,
+    ) -> Result<Option<Value>, String> {
+        let Some((symbol, _)) = self.rename_symbol_at(query, workspace) else {
+            return Ok(None);
+        };
+        validate_rename_name(new_name)?;
+        if symbol
+            .metadata
+            .reserved_names
+            .iter()
+            .any(|reserved| reserved == new_name)
+        {
+            return Err(format!(
+                "rename `{new_name}` conflicts with an existing API symbol"
+            ));
+        }
+
+        let mut changes = serde_json::Map::new();
+        for location in symbol.rename_locations() {
+            let Some(uri) = location.resolved_uri(workspace) else {
+                continue;
+            };
+            changes
+                .entry(uri)
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("change entry is an array")
+                .push(json!({
+                    "range": location.range,
+                    "newText": new_name,
+                }));
+        }
+
+        Ok(Some(json!({ "changes": changes })))
+    }
+
+    fn rename_symbol_at<'a>(
+        &'a self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Option<(&'a LinkedSymbol, &'a GraphLocation)> {
+        for symbol in &self.symbols {
+            if symbol.rust.is_renamable() && symbol.rust.matches(query, workspace) {
+                return Some((symbol, &symbol.rust));
+            }
+            if let Some(location) = symbol
+                .typescript
+                .iter()
+                .find(|location| location.is_renamable() && location.matches(query, workspace))
+            {
+                return Some((symbol, location));
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -677,6 +807,22 @@ impl LinkedSymbol {
 
         lines.join("\n\n")
     }
+
+    fn rename_placeholder(&self) -> String {
+        self.metadata
+            .rename_placeholder
+            .clone()
+            .or_else(|| self.metadata.ts_path.last().cloned())
+            .or_else(|| self.metadata.rust_path.last().cloned())
+            .or_else(|| self.id.split(':').next_back().map(str::to_owned))
+            .unwrap_or_else(|| self.id.clone())
+    }
+
+    fn rename_locations(&self) -> impl Iterator<Item = &GraphLocation> {
+        std::iter::once(&self.rust)
+            .chain(self.typescript.iter())
+            .filter(|location| location.is_renamable())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -689,6 +835,8 @@ struct SymbolMetadata {
     rust_path: Vec<String>,
     ts_path: Vec<String>,
     usage_count: Option<u64>,
+    rename_placeholder: Option<String>,
+    reserved_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -699,6 +847,7 @@ struct GraphLocation {
     range: GraphRange,
     #[serde(default)]
     generated: bool,
+    renamable: Option<bool>,
 }
 
 impl GraphLocation {
@@ -725,6 +874,10 @@ impl GraphLocation {
                 path_to_file_uri(&path)
             })
         })
+    }
+
+    fn is_renamable(&self) -> bool {
+        self.renamable.unwrap_or(!self.generated)
     }
 }
 
@@ -1108,6 +1261,24 @@ fn dedupe_locations(locations: Vec<Value>, workspace: &WorkspaceConfig) -> Value
     }
 
     Value::Array(deduped)
+}
+
+fn validate_rename_name(new_name: &str) -> Result<(), String> {
+    let mut chars = new_name.chars();
+    let Some(first) = chars.next() else {
+        return Err("rename target cannot be empty".to_owned());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!(
+            "rename target `{new_name}` must start with a letter or underscore"
+        ));
+    }
+    if chars.any(|character| !(character == '_' || character.is_ascii_alphanumeric())) {
+        return Err(format!(
+            "rename target `{new_name}` must be a Rust/TypeScript identifier"
+        ));
+    }
+    Ok(())
 }
 
 fn document_uris(value: &Value) -> BTreeSet<String> {
@@ -1746,6 +1917,190 @@ mod tests {
         assert!(output.contains("crate::users::get_user"));
         assert!(output.contains("Usage count"));
         assert!(output.contains("pending"));
+    }
+
+    #[test]
+    fn prepares_and_builds_cross_language_rename_edit() {
+        let root = test_root("rename");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [
+                        {
+                            "uri": usage_uri,
+                            "range": {
+                                "start": { "line": 2, "character": 4 },
+                                "end": { "line": 2, "character": 11 }
+                            }
+                        },
+                        {
+                            "uri": generated_uri,
+                            "generated": true,
+                            "range": {
+                                "start": { "line": 4, "character": 15 },
+                                "end": { "line": 4, "character": 22 }
+                            }
+                        }
+                    ],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "renamePlaceholder": "getUser",
+                        "reservedNames": ["deleteUser"]
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/prepareRename",
+                "params": {
+                    "textDocument": { "uri": usage_uri },
+                    "position": { "line": 2, "character": 6 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 10, "character": 12 },
+                    "newName": "fetchUser"
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("\"placeholder\":\"getUser\""));
+        assert!(output.contains("\"id\":3"));
+        assert!(output.contains(&rust_uri));
+        assert!(output.contains(&usage_uri));
+        assert!(!output.contains(&generated_uri));
+        assert_eq!(output.matches("\"newText\":\"fetchUser\"").count(), 2);
+        assert!(!output.contains("/users/{id}\\\",\\\"newText"));
+    }
+
+    #[test]
+    fn rejects_cross_language_rename_conflicts() {
+        let root = test_root("rename-conflict");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [],
+                    "metadata": {
+                        "reservedNames": ["deleteUser"]
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 10, "character": 12 },
+                    "newName": "deleteUser"
+                }
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("\"error\""));
+        assert!(output.contains("conflicts with an existing API symbol"));
     }
 
     fn framed(value: &Value) -> String {
