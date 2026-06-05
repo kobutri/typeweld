@@ -1,0 +1,5 @@
+error: unsupported serde rename_all rule `lowercase`
+ --> tests/ui/api_type_unsupported_rename_all.rs:2:22
+  |
+2 | #[serde(rename_all = "lowercase")]
+  |                      ^^^^^^^^^^^

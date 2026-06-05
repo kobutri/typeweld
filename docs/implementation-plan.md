@@ -1547,7 +1547,7 @@ Acceptance criteria:
 - enums preserve variant source ranges;
 - unsupported enum forms produce clear diagnostics.
 
-### T-006 — Implement Serde rename lowering
+### T-006 — Implement Serde rename lowering [done]
 
 Goal: make field names match the wire contract.
 
