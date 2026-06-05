@@ -263,6 +263,19 @@ impl<W: Write> LspServer<W> {
                     }
                 }
             }
+            "textDocument/hover" => {
+                if let Some(id) = message.id {
+                    if let Some(hover) = self.cross_language_hover(&message.params)? {
+                        self.write_response(id, hover)?;
+                    } else if is_rust_message(method, &message.params) {
+                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                    } else if self.is_typescript_message(method, &message.params) {
+                        self.forward_request_to_typescript(method, message.params, id)?;
+                    } else {
+                        self.write_response(id, Value::Null)?;
+                    }
+                }
+            }
             _ => {
                 if is_rust_message(method, &message.params) {
                     match message.id {
@@ -492,6 +505,19 @@ impl<W: Write> LspServer<W> {
             .cloned()
             .unwrap_or_default())
     }
+
+    fn cross_language_hover(&self, params: &Value) -> Result<Option<Value>, String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(None);
+        };
+        let Some(query) = TextPositionQuery::from_lsp_params(params) else {
+            return Ok(None);
+        };
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        Ok(graph.hover(&query, workspace))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -579,6 +605,33 @@ impl SymbolGraph {
 
         None
     }
+
+    fn hover(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> Option<Value> {
+        for symbol in &self.symbols {
+            let matched_range = if symbol.rust.matches(query, workspace) {
+                Some(symbol.rust.range)
+            } else {
+                symbol
+                    .typescript
+                    .iter()
+                    .find(|location| location.matches(query, workspace))
+                    .map(|location| location.range)
+            };
+            let Some(range) = matched_range else {
+                continue;
+            };
+
+            return Some(json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": symbol.hover_markdown(workspace),
+                },
+                "range": range,
+            }));
+        }
+
+        None
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -586,11 +639,56 @@ impl SymbolGraph {
 struct LinkedSymbol {
     #[allow(dead_code)]
     id: String,
-    #[allow(dead_code)]
     kind: String,
     rust: GraphLocation,
     #[serde(default)]
     typescript: Vec<GraphLocation>,
+    #[serde(default)]
+    metadata: SymbolMetadata,
+}
+
+impl LinkedSymbol {
+    fn hover_markdown(&self, workspace: &WorkspaceConfig) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("**API {}** `{}`", self.kind, self.id));
+
+        if let (Some(method), Some(route)) = (&self.metadata.method, &self.metadata.route) {
+            lines.push(format!("Route: `{method} {route}`"));
+        }
+        if let Some(effect_signature) = &self.metadata.effect_signature {
+            lines.push(format!("Effect: `{effect_signature}`"));
+        }
+        if !self.metadata.errors.is_empty() {
+            lines.push(format!("Errors: `{}`", self.metadata.errors.join(" | ")));
+        }
+        if !self.metadata.rust_path.is_empty() {
+            lines.push(format!("Rust: `{}`", self.metadata.rust_path.join("::")));
+        } else if let Some(uri) = self.rust.resolved_uri(workspace) {
+            lines.push(format!("Rust source: `{uri}`"));
+        }
+        if !self.metadata.ts_path.is_empty() {
+            lines.push(format!("TypeScript: `{}`", self.metadata.ts_path.join(".")));
+        }
+        let usage_count = self
+            .metadata
+            .usage_count
+            .map_or_else(|| "pending".to_owned(), |count| count.to_string());
+        lines.push(format!("Usage count: `{usage_count}`"));
+
+        lines.join("\n\n")
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SymbolMetadata {
+    method: Option<String>,
+    route: Option<String>,
+    effect_signature: Option<String>,
+    errors: Vec<String>,
+    rust_path: Vec<String>,
+    ts_path: Vec<String>,
+    usage_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1555,6 +1653,99 @@ mod tests {
         assert!(output.contains(&rust_uri));
         assert_eq!(output.matches(&usage_uri).count(), 1);
         assert!(!output.contains(&generated_uri));
+    }
+
+    #[test]
+    fn augments_hover_with_api_metadata() {
+        let root = test_root("hover");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let ts_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [{
+                        "uri": ts_uri,
+                        "generated": true,
+                        "range": {
+                            "start": { "line": 4, "character": 15 },
+                            "end": { "line": 4, "character": 22 }
+                        }
+                    }],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "effectSignature": "Effect.Effect<User, ApiClientError | GetUserError, ServerApi>",
+                        "errors": ["GetUserError"],
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"]
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 4, "character": 18 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("GET /users/{id}"));
+        assert!(output.contains("Effect.Effect"));
+        assert!(output.contains("crate::users::get_user"));
+        assert!(output.contains("Usage count"));
+        assert!(output.contains("pending"));
     }
 
     fn framed(value: &Value) -> String {

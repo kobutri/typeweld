@@ -1918,7 +1918,7 @@ Acceptance criteria:
 - generated-file references are hidden by default;
 - duplicate references are removed.
 
-### T-025 — Implement hover augmentation
+### T-025 — Implement hover augmentation [done]
 
 Goal: show combined Rust/API/Effect metadata.
 
