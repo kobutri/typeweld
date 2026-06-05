@@ -1,6 +1,9 @@
 //! Effect v4 TypeScript generator backend.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use api_ir::{
     ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
@@ -203,6 +206,119 @@ pub fn render_layer(contract: &ApiContract) -> String {
     output.push_str("}\n");
 
     trim_trailing_blank_lines(output)
+}
+
+/// In-memory representation of the hidden generated TypeScript package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedPackage {
+    pub package_dir: PathBuf,
+    pub files: Vec<GeneratedFile>,
+    pub tsconfig_paths: TsconfigPaths,
+}
+
+/// A generated file path relative to [`GeneratedPackage::package_dir`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedFile {
+    pub path: String,
+    pub contents: String,
+}
+
+/// TypeScript path mapping metadata for a generated API package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TsconfigPaths {
+    pub package_name: String,
+    pub package_dir: PathBuf,
+}
+
+/// Builds the generated package files and resolver metadata without writing them.
+#[must_use]
+pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> GeneratedPackage {
+    let package_dir = generated_package_dir(target_dir, &contract.package_name);
+    let files = vec![
+        GeneratedFile {
+            path: "package.json".to_owned(),
+            contents: render_package_json(contract),
+        },
+        GeneratedFile {
+            path: "index.ts".to_owned(),
+            contents: render_package_index(contract),
+        },
+        GeneratedFile {
+            path: "schemas.ts".to_owned(),
+            contents: render_schemas(contract),
+        },
+        GeneratedFile {
+            path: "errors.ts".to_owned(),
+            contents: render_errors(contract),
+        },
+        GeneratedFile {
+            path: "endpoints.ts".to_owned(),
+            contents: render_endpoints(contract),
+        },
+        GeneratedFile {
+            path: "layer.ts".to_owned(),
+            contents: render_layer(contract),
+        },
+        GeneratedFile {
+            path: "tsconfig.paths.json".to_owned(),
+            contents: render_tsconfig_paths(&TsconfigPaths {
+                package_name: contract.package_name.clone(),
+                package_dir: package_dir.clone(),
+            }),
+        },
+    ];
+
+    GeneratedPackage {
+        tsconfig_paths: TsconfigPaths {
+            package_name: contract.package_name.clone(),
+            package_dir: package_dir.clone(),
+        },
+        package_dir,
+        files,
+    }
+}
+
+/// Cache path convention for hidden generated packages.
+#[must_use]
+pub fn generated_package_dir(target_dir: &Path, package_name: &str) -> PathBuf {
+    target_dir
+        .join("api-contract")
+        .join("effect-v4")
+        .join("packages")
+        .join(sanitize_package_dir_name(package_name))
+}
+
+/// Renders the generated package manifest.
+#[must_use]
+pub fn render_package_json(contract: &ApiContract) -> String {
+    format!(
+        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }}\n}}\n",
+        name = ts_string(&contract.package_name)
+    )
+}
+
+/// Renders the generated public package barrel.
+#[must_use]
+pub fn render_package_index(contract: &ApiContract) -> String {
+    let mut output = render_package_banner(contract);
+    output.push_str("export * from \"./schemas\"\n");
+    output.push_str("export * from \"./errors\"\n");
+    output.push_str("export * from \"./endpoints\"\n");
+    output.push_str("export * from \"./layer\"\n");
+    output
+}
+
+/// Renders the `compilerOptions.paths` snippet for importing the hidden package.
+#[must_use]
+pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
+    let package_dir = normalize_path(&paths.package_dir);
+    format!(
+        "{{\n  \"compilerOptions\": {{\n    \"paths\": {{\n      {package_name}: [\n        {index_path}\n      ],\n      {package_glob}: [\n        {package_dir_glob}\n      ]\n    }}\n  }}\n}}\n",
+        package_name = ts_string(&paths.package_name),
+        index_path = ts_string(&format!("{package_dir}/index.ts")),
+        package_glob = ts_string(&format!("{}/*", paths.package_name)),
+        package_dir_glob = ts_string(&format!("{package_dir}/*")),
+    )
 }
 
 fn render_type_def(type_def: &TypeDef) -> String {
@@ -833,6 +949,23 @@ fn ts_string(value: &str) -> String {
     output
 }
 
+fn sanitize_package_dir_name(package_name: &str) -> String {
+    package_name
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || char == '-' || char == '_' || char == '.' {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn to_pascal_case(value: &str) -> String {
     let mut output = String::new();
     let mut uppercase_next = true;
@@ -861,6 +994,8 @@ fn trim_trailing_blank_lines(mut output: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use api_ir::{
         ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant, Field,
         HttpMethod, HttpStatus, Optionality, Primitive, RequestShape, ResponseShape, RoutePattern,
@@ -1245,6 +1380,86 @@ export type UserEncoded = typeof User.Encoded
         assert!(rendered.contains(
             "  export const mock = (service: Service): Layer.Layer<ServerApi, never, never> =>"
         ));
+    }
+
+    #[test]
+    fn renders_generated_package_manifest_and_index() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            ..ApiContract::default()
+        };
+
+        assert_eq!(
+            render_package_json(&contract),
+            r#"{
+  "name": "@workspace/server-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./schemas": "./schemas.ts",
+    "./errors": "./errors.ts",
+    "./endpoints": "./endpoints.ts",
+    "./layer": "./layer.ts"
+  }
+}
+"#
+        );
+        assert_eq!(
+            render_package_index(&contract),
+            r#"// Generated API package for @workspace/server-api
+export * from "./schemas"
+export * from "./errors"
+export * from "./endpoints"
+export * from "./layer"
+"#
+        );
+    }
+
+    #[test]
+    fn renders_generated_package_with_cache_path_and_tsconfig_mapping() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            ..ApiContract::default()
+        };
+
+        let package = render_generated_package(&contract, Path::new("target"));
+
+        assert_eq!(
+            package.package_dir,
+            Path::new("target")
+                .join("api-contract")
+                .join("effect-v4")
+                .join("packages")
+                .join("_workspace_server-api")
+        );
+        assert_eq!(
+            package
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "package.json",
+                "index.ts",
+                "schemas.ts",
+                "errors.ts",
+                "endpoints.ts",
+                "layer.ts",
+                "tsconfig.paths.json"
+            ]
+        );
+
+        let paths = render_tsconfig_paths(&package.tsconfig_paths);
+        assert!(paths.contains("\"@workspace/server-api\": ["));
+        assert!(paths
+            .contains("\"target/api-contract/effect-v4/packages/_workspace_server-api/index.ts\""));
+        assert!(paths.contains("\"@workspace/server-api/*\": ["));
+        assert!(
+            paths.contains("\"target/api-contract/effect-v4/packages/_workspace_server-api/*\"")
+        );
     }
 
     fn simple_type(name: &str) -> TypeDef {

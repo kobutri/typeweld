@@ -1742,7 +1742,7 @@ Acceptance criteria:
 - service methods internally require `never`;
 - TS examples compose with `Effect.provide`.
 
-### T-016 — Implement generated package resolver
+### T-016 — Implement generated package resolver [done]
 
 Goal: make TS projects import hidden generated packages.
 
