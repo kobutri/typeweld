@@ -27,6 +27,8 @@ pub struct ApiLsConfig {
     pub effect_language_service_plugin: Option<String>,
     pub generated_cache_dir: PathBuf,
     pub symbol_graph: PathBuf,
+    pub usage_index: PathBuf,
+    pub unused_endpoint_lints: UsageLintLevel,
     pub log_file: Option<PathBuf>,
 }
 
@@ -44,9 +46,21 @@ impl Default for ApiLsConfig {
             effect_language_service_plugin: Some("@effect/language-service".to_owned()),
             generated_cache_dir: PathBuf::from("target/api-contract/effect-v4/packages"),
             symbol_graph: PathBuf::from("target/api-contract/rust-ts-symbols.json"),
+            usage_index: PathBuf::from("target/api-contract/graph/effect-usage-index.json"),
+            unused_endpoint_lints: UsageLintLevel::Warn,
             log_file: None,
         }
     }
+}
+
+/// Unused endpoint diagnostic policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UsageLintLevel {
+    Off,
+    #[default]
+    Warn,
+    Deny,
 }
 
 /// External language-server command configuration.
@@ -74,6 +88,7 @@ pub struct WorkspaceConfig {
     pub config: ApiLsConfig,
     pub generated_cache_dir: PathBuf,
     pub symbol_graph: PathBuf,
+    pub usage_index: PathBuf,
 }
 
 /// Discovers the workspace root and loads optional `api-ls` configuration.
@@ -210,6 +225,7 @@ impl<W: Write> LspServer<W> {
             "initialized" => {
                 self.forward_notification_to_rust_analyzer(method, message.params)?;
                 self.forward_notification_to_typescript(method, Value::Null)?;
+                self.publish_unused_endpoint_diagnostics()?;
             }
             "shutdown" => {
                 if let Some(id) = message.id {
@@ -575,6 +591,34 @@ impl<W: Write> LspServer<W> {
         };
         graph.rename(&query, new_name, workspace)
     }
+
+    fn publish_unused_endpoint_diagnostics(&mut self) -> Result<(), String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(());
+        };
+        if matches!(workspace.config.unused_endpoint_lints, UsageLintLevel::Off) {
+            return Ok(());
+        }
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(());
+        };
+        let Some(index) = EffectUsageIndex::load(&workspace.usage_index)? else {
+            return Ok(());
+        };
+        let diagnostics = graph.unused_endpoint_diagnostics(&index, workspace);
+
+        for (uri, diagnostics) in diagnostics {
+            self.write_notification(
+                "textDocument/publishDiagnostics",
+                json!({
+                    "uri": uri,
+                    "diagnostics": diagnostics,
+                }),
+            )?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -742,6 +786,43 @@ impl SymbolGraph {
         Ok(Some(json!({ "changes": changes })))
     }
 
+    fn unused_endpoint_diagnostics(
+        &self,
+        index: &EffectUsageIndex,
+        workspace: &WorkspaceConfig,
+    ) -> Vec<(String, Vec<Value>)> {
+        let mut by_uri = Vec::<(String, Vec<Value>)>::new();
+
+        for symbol in &self.symbols {
+            if symbol.kind != "endpoint" || symbol.metadata.allow_unused {
+                continue;
+            }
+            if index.strong_usage_count(&symbol.id) > 0 {
+                continue;
+            }
+            let Some(uri) = symbol.rust.resolved_uri(workspace) else {
+                continue;
+            };
+            let diagnostic = symbol.unused_endpoint_diagnostic(workspace);
+            if let Some((_, diagnostics)) = by_uri.iter_mut().find(|(item_uri, _)| item_uri == &uri)
+            {
+                diagnostics.push(diagnostic);
+            } else {
+                by_uri.push((uri, vec![diagnostic]));
+            }
+        }
+
+        by_uri.sort_by(|left, right| left.0.cmp(&right.0));
+        for (_, diagnostics) in &mut by_uri {
+            diagnostics.sort_by(|left, right| {
+                diagnostic_start(left)
+                    .cmp(&diagnostic_start(right))
+                    .then_with(|| diagnostic_message(left).cmp(&diagnostic_message(right)))
+            });
+        }
+        by_uri
+    }
+
     fn rename_symbol_at<'a>(
         &'a self,
         query: &TextPositionQuery,
@@ -823,6 +904,30 @@ impl LinkedSymbol {
             .chain(self.typescript.iter())
             .filter(|location| location.is_renamable())
     }
+
+    fn unused_endpoint_diagnostic(&self, workspace: &WorkspaceConfig) -> Value {
+        let method = self.metadata.method.as_deref().unwrap_or("UNKNOWN");
+        let route = self.metadata.route.as_deref().unwrap_or("<unknown route>");
+        let accessor = if self.metadata.ts_path.is_empty() {
+            "<unknown accessor>".to_owned()
+        } else {
+            self.metadata.ts_path.join(".")
+        };
+        let severity = match workspace.config.unused_endpoint_lints {
+            UsageLintLevel::Off | UsageLintLevel::Warn => 2,
+            UsageLintLevel::Deny => 1,
+        };
+
+        json!({
+            "range": self.rust.range,
+            "severity": severity,
+            "code": "api::unused_endpoint",
+            "source": "api-ls",
+            "message": format!(
+                "endpoint is exported but has no strong TypeScript usages\nroute: {method} {route}\ngenerated accessor: {accessor}\nhelp: call it from Effect code, mark #[api(allow_unused)], or remove it"
+            ),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -835,8 +940,42 @@ struct SymbolMetadata {
     rust_path: Vec<String>,
     ts_path: Vec<String>,
     usage_count: Option<u64>,
+    allow_unused: bool,
     rename_placeholder: Option<String>,
     reserved_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct EffectUsageIndex {
+    #[serde(default)]
+    endpoints: Vec<EndpointUsageSummary>,
+}
+
+impl EffectUsageIndex {
+    fn load(path: &Path) -> Result<Option<Self>, String> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read usage index `{}`: {error}", path.display()))?;
+        serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("failed to parse usage index `{}`: {error}", path.display()))
+    }
+
+    fn strong_usage_count(&self, endpoint_id: &str) -> u64 {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+            .map_or(0, |endpoint| endpoint.strong)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct EndpointUsageSummary {
+    endpoint_id: String,
+    #[serde(default)]
+    strong: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1170,6 +1309,7 @@ fn resolve_workspace_config(
 ) -> WorkspaceConfig {
     let generated_cache_dir = absolutize_from(&root, &config.generated_cache_dir);
     let symbol_graph = absolutize_from(&root, &config.symbol_graph);
+    let usage_index = absolutize_from(&root, &config.usage_index);
 
     WorkspaceConfig {
         root,
@@ -1177,6 +1317,7 @@ fn resolve_workspace_config(
         config,
         generated_cache_dir,
         symbol_graph,
+        usage_index,
     }
 }
 
@@ -1261,6 +1402,25 @@ fn dedupe_locations(locations: Vec<Value>, workspace: &WorkspaceConfig) -> Value
     }
 
     Value::Array(deduped)
+}
+
+fn diagnostic_start(diagnostic: &Value) -> GraphPosition {
+    diagnostic
+        .get("range")
+        .and_then(|range| range.get("start"))
+        .and_then(|start| serde_json::from_value(start.clone()).ok())
+        .unwrap_or(GraphPosition {
+            line: u32::MAX,
+            character: u32::MAX,
+        })
+}
+
+fn diagnostic_message(diagnostic: &Value) -> String {
+    diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn validate_rename_name(new_name: &str) -> Result<(), String> {
@@ -1429,6 +1589,13 @@ mod tests {
             config.root.join("target/custom-cache")
         );
         assert_eq!(config.symbol_graph, config.root.join("target/symbols.json"));
+        assert_eq!(
+            config.usage_index,
+            config
+                .root
+                .join("target/api-contract/graph/effect-usage-index.json")
+        );
+        assert_eq!(config.config.unused_endpoint_lints, UsageLintLevel::Warn);
         assert_eq!(config.config.rust_analyzer.command, "ra-test");
         assert_eq!(
             config.config.typescript.command,
@@ -2103,6 +2270,127 @@ mod tests {
         assert!(output.contains("conflicts with an existing API symbol"));
     }
 
+    #[test]
+    fn publishes_unused_endpoint_diagnostics_from_usage_index() {
+        let root = test_root("unused-diagnostics");
+        fs::create_dir_all(root.join("target/api-contract/graph")).expect("create usage dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [
+                    endpoint_symbol(
+                        "endpoint:unused",
+                        &rust_uri,
+                        10,
+                        "GET",
+                        "/unused",
+                        ["api", "unused"],
+                        false,
+                    ),
+                    endpoint_symbol(
+                        "endpoint:used",
+                        &rust_uri,
+                        20,
+                        "GET",
+                        "/used",
+                        ["api", "used"],
+                        false,
+                    ),
+                    endpoint_symbol(
+                        "endpoint:allowed",
+                        &rust_uri,
+                        30,
+                        "POST",
+                        "/admin/reindex",
+                        ["admin", "reindex"],
+                        true,
+                    )
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+        fs::write(
+            root.join("target/api-contract/graph/effect-usage-index.json"),
+            json!({
+                "package_name": "@workspace/server-api",
+                "endpoints": [
+                    { "endpoint_id": "endpoint:unused", "accessor_path": ["api", "unused"], "strong": 0 },
+                    { "endpoint_id": "endpoint:used", "accessor_path": ["api", "used"], "strong": 1 },
+                    { "endpoint_id": "endpoint:allowed", "accessor_path": ["admin", "reindex"], "strong": 0 }
+                ],
+                "usages": []
+            })
+            .to_string(),
+        )
+        .expect("write usage index");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"method\":\"textDocument/publishDiagnostics\""));
+        assert!(output.contains("api::unused_endpoint"));
+        assert!(output.contains("GET /unused"));
+        assert!(output.contains("api.unused"));
+        assert!(!output.contains("GET /used"));
+        assert!(!output.contains("/admin/reindex"));
+        assert!(output.contains("\"severity\":2"));
+    }
+
+    #[test]
+    fn unused_endpoint_diagnostics_support_deny_and_off_modes() {
+        let deny_root = test_root("unused-deny");
+        write_unused_endpoint_workspace(&deny_root, "deny");
+        let deny_output = run_initialized_workspace(&deny_root);
+
+        assert!(deny_output.contains("\"severity\":1"));
+        assert!(deny_output.contains("GET /unused"));
+
+        let off_root = test_root("unused-off");
+        write_unused_endpoint_workspace(&off_root, "off");
+        let off_output = run_initialized_workspace(&off_root);
+
+        assert!(!off_output.contains("api::unused_endpoint"));
+        assert!(!off_output.contains("GET /unused"));
+    }
+
     fn framed(value: &Value) -> String {
         let body = serde_json::to_string(value).expect("serialize message");
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -2113,6 +2401,114 @@ mod tests {
         let path = env::temp_dir().join(format!("api-ls-{name}-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         path
+    }
+
+    fn endpoint_symbol(
+        id: &str,
+        rust_uri: &str,
+        line: u32,
+        method: &str,
+        route: &str,
+        ts_path: [&str; 2],
+        allow_unused: bool,
+    ) -> Value {
+        json!({
+            "id": id,
+            "kind": "endpoint",
+            "rust": {
+                "uri": rust_uri,
+                "range": {
+                    "start": { "line": line, "character": 9 },
+                    "end": { "line": line, "character": 17 }
+                }
+            },
+            "typescript": [],
+            "metadata": {
+                "method": method,
+                "route": route,
+                "tsPath": ts_path,
+                "allowUnused": allow_unused
+            }
+        })
+    }
+
+    fn write_unused_endpoint_workspace(root: &Path, lint_level: &str) {
+        fs::create_dir_all(root.join("target/api-contract/graph")).expect("create usage dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            format!(
+                "{{\"rustAnalyzer\":{{\"command\":\"\"}},\"typescript\":{{\"command\":\"\"}},\"unusedEndpointLints\":{}}}\n",
+                serde_json::to_string(lint_level).expect("serialize lint level")
+            ),
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [
+                    endpoint_symbol(
+                        "endpoint:unused",
+                        &rust_uri,
+                        10,
+                        "GET",
+                        "/unused",
+                        ["api", "unused"],
+                        false,
+                    )
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+        fs::write(
+            root.join("target/api-contract/graph/effect-usage-index.json"),
+            json!({
+                "package_name": "@workspace/server-api",
+                "endpoints": [
+                    { "endpoint_id": "endpoint:unused", "accessor_path": ["api", "unused"], "strong": 0 }
+                ],
+                "usages": []
+            })
+            .to_string(),
+        )
+        .expect("write usage index");
+    }
+
+    fn run_initialized_workspace(root: &Path) -> String {
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        String::from_utf8(output).expect("utf8 output")
     }
 
     const MOCK_BACKEND: &str = r#"

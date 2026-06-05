@@ -1956,7 +1956,7 @@ Acceptance criteria:
 - floating Effects do not count as strong;
 - import-only references do not count as strong.
 
-### T-027 — Implement unused endpoint LSP diagnostics
+### T-027 — Implement unused endpoint LSP diagnostics [done]
 
 Goal: surface unused endpoint warnings in Rust source.
 
@@ -2170,7 +2170,7 @@ Can begin early with mocked symbol graphs.
 Can begin after generated endpoint accessors and symbol graph exist.
 
 - T-026 [done]
-- T-027
+- T-027 [done]
 - T-031
 
 ### Track F — Testing/docs/tooling
