@@ -8,9 +8,15 @@ version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "api"
+path = "src/main.rs"
+
 [dependencies]
+api-core = { path = "../api-core" }
 api-ir = { path = "../api-ir" }
+cargo_metadata = "0.19"
+serde_json = "1.0"
 
 [lints]
 workspace = true
-

@@ -1624,7 +1624,7 @@ Acceptance criteria:
 - router composition produces Rust references;
 - missing endpoint symbols fail compilation.
 
-### T-010 — Build first `api-collector`
+### T-010 — Build first `api-collector` [done]
 
 Goal: produce API IR files from a crate.
 
