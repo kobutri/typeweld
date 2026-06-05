@@ -24,6 +24,7 @@ const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
 pub struct ApiLsConfig {
     pub rust_analyzer: BackendCommand,
     pub typescript: BackendCommand,
+    pub effect_language_service_plugin: Option<String>,
     pub generated_cache_dir: PathBuf,
     pub symbol_graph: PathBuf,
     pub log_file: Option<PathBuf>,
@@ -40,6 +41,7 @@ impl Default for ApiLsConfig {
                 command: "typescript-language-server".to_owned(),
                 args: vec!["--stdio".to_owned()],
             },
+            effect_language_service_plugin: Some("@effect/language-service".to_owned()),
             generated_cache_dir: PathBuf::from("target/api-contract/effect-v4/packages"),
             symbol_graph: PathBuf::from("target/api-contract/rust-ts-symbols.json"),
             log_file: None,
@@ -126,6 +128,7 @@ struct LspServer<W> {
     writer: W,
     workspace: Option<WorkspaceConfig>,
     rust_analyzer: Option<BackendProcess>,
+    typescript: Option<BackendProcess>,
     shutdown_requested: bool,
 }
 
@@ -135,6 +138,7 @@ impl<W: Write> LspServer<W> {
             writer,
             workspace: None,
             rust_analyzer: None,
+            typescript: None,
             shutdown_requested: false,
         }
     }
@@ -163,20 +167,38 @@ impl<W: Write> LspServer<W> {
                 };
                 match initialize_workspace(&message.params) {
                     Ok(workspace) => {
-                        let backend_result =
+                        let rust_backend_result =
                             BackendProcess::start("rust-analyzer", &workspace.config.rust_analyzer)
                                 .and_then(|mut backend| {
                                     backend.initialize(message.params.clone())?;
                                     Ok(backend)
                                 });
+                        let typescript_params =
+                            typescript_initialize_params(&message.params, &workspace);
+                        let typescript_backend_result =
+                            BackendProcess::start("typescript", &workspace.config.typescript)
+                                .and_then(|mut backend| {
+                                    backend.initialize(typescript_params)?;
+                                    Ok(backend)
+                                });
                         self.workspace = Some(workspace);
-                        match backend_result {
+                        match rust_backend_result {
                             Ok(backend) => self.rust_analyzer = Some(backend),
                             Err(error) => self.write_notification(
                                 "window/logMessage",
                                 json!({
                                     "type": 3,
                                     "message": format!("api-ls rust-analyzer backend unavailable: {error}"),
+                                }),
+                            )?,
+                        }
+                        match typescript_backend_result {
+                            Ok(backend) => self.typescript = Some(backend),
+                            Err(error) => self.write_notification(
+                                "window/logMessage",
+                                json!({
+                                    "type": 3,
+                                    "message": format!("api-ls TypeScript backend unavailable: {error}"),
                                 }),
                             )?,
                         }
@@ -187,11 +209,15 @@ impl<W: Write> LspServer<W> {
             }
             "initialized" => {
                 self.forward_notification_to_rust_analyzer(method, message.params)?;
+                self.forward_notification_to_typescript(method, Value::Null)?;
             }
             "shutdown" => {
                 if let Some(id) = message.id {
                     self.shutdown_requested = true;
                     if let Some(backend) = &mut self.rust_analyzer {
+                        backend.shutdown();
+                    }
+                    if let Some(backend) = &mut self.typescript {
                         backend.shutdown();
                     }
                     self.write_response(id, Value::Null)?;
@@ -201,7 +227,15 @@ impl<W: Write> LspServer<W> {
                 if let Some(backend) = &mut self.rust_analyzer {
                     backend.exit();
                 }
+                if let Some(backend) = &mut self.typescript {
+                    backend.exit();
+                }
                 return Ok(self.shutdown_requested);
+            }
+            "api-ls/generatedPackageFile" => {
+                if let Some(id) = message.id {
+                    self.read_generated_package_file(message.params, id)?;
+                }
             }
             _ => {
                 if is_rust_message(method, &message.params) {
@@ -211,6 +245,15 @@ impl<W: Write> LspServer<W> {
                         }
                         None => {
                             self.forward_notification_to_rust_analyzer(method, message.params)?;
+                        }
+                    }
+                } else if self.is_typescript_message(method, &message.params) {
+                    match message.id {
+                        Some(id) => {
+                            self.forward_request_to_typescript(method, message.params, id)?;
+                        }
+                        None => {
+                            self.forward_notification_to_typescript(method, message.params)?;
                         }
                     }
                 } else if let Some(id) = message.id {
@@ -287,6 +330,77 @@ impl<W: Write> LspServer<W> {
             backend.forward_notification(method, params)?;
         }
         Ok(())
+    }
+
+    fn forward_request_to_typescript(
+        &mut self,
+        method: &str,
+        params: Value,
+        id: Value,
+    ) -> Result<(), String> {
+        match &mut self.typescript {
+            Some(backend) => backend.forward_request(method, params, id, &mut self.writer),
+            None => self.write_error(
+                id,
+                -32_003,
+                "TypeScript backend is not available".to_owned(),
+            ),
+        }
+    }
+
+    fn forward_notification_to_typescript(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        if let Some(backend) = &mut self.typescript {
+            backend.forward_notification(method, params)?;
+        }
+        Ok(())
+    }
+
+    fn read_generated_package_file(&mut self, params: Value, id: Value) -> Result<(), String> {
+        let Some(workspace) = &self.workspace else {
+            return self.write_error(id, -32_000, "api-ls is not initialized".to_owned());
+        };
+        let Some(path) = generated_file_path(&params, workspace) else {
+            return self.write_error(
+                id,
+                -32_602,
+                "generated package file must be inside the generated cache".to_owned(),
+            );
+        };
+        match fs::read_to_string(&path) {
+            Ok(text) => self.write_response(
+                id,
+                json!({
+                    "uri": path_to_file_uri(&path),
+                    "text": text,
+                }),
+            ),
+            Err(error) => self.write_error(
+                id,
+                -32_602,
+                format!(
+                    "failed to read generated package file `{}`: {error}",
+                    path.display()
+                ),
+            ),
+        }
+    }
+
+    fn is_typescript_message(&self, method: &str, params: &Value) -> bool {
+        method.starts_with("typescript/")
+            || document_uris(params)
+                .iter()
+                .any(|uri| is_typescript_uri(uri) || self.is_generated_package_uri(uri))
+    }
+
+    fn is_generated_package_uri(&self, uri: &str) -> bool {
+        let Some(workspace) = &self.workspace else {
+            return false;
+        };
+        file_uri_to_path(uri).is_some_and(|path| path.starts_with(&workspace.generated_cache_dir))
     }
 }
 
@@ -446,6 +560,21 @@ fn initialize_workspace(params: &Value) -> Result<WorkspaceConfig, String> {
     discover_workspace_config(root_hint.as_deref(), &cwd)
 }
 
+fn typescript_initialize_params(params: &Value, workspace: &WorkspaceConfig) -> Value {
+    let mut params = params.clone();
+    params["initializationOptions"]["hostInfo"] = json!("api-ls");
+    params["initializationOptions"]["generatedPackageCacheDir"] =
+        json!(workspace.generated_cache_dir.to_string_lossy());
+    params["initializationOptions"]["generatedPackageTsconfig"] = json!(workspace
+        .generated_cache_dir
+        .join("tsconfig.paths.json")
+        .to_string_lossy());
+    if let Some(plugin) = &workspace.config.effect_language_service_plugin {
+        params["initializationOptions"]["plugins"] = json!([{ "name": plugin }]);
+    }
+    params
+}
+
 fn initialize_result() -> Value {
     let capabilities = ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF16),
@@ -528,6 +657,40 @@ fn is_rust_message(method: &str, params: &Value) -> bool {
             uri.strip_prefix("file://")
                 .is_some_and(|path| path.ends_with(".rs"))
         })
+}
+
+fn is_typescript_uri(uri: &str) -> bool {
+    let Some(path) = uri.strip_prefix("file://") else {
+        return false;
+    };
+    [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+}
+
+fn generated_file_path(params: &Value, workspace: &WorkspaceConfig) -> Option<PathBuf> {
+    let path = params
+        .get("uri")
+        .and_then(Value::as_str)
+        .and_then(file_uri_to_path)
+        .or_else(|| {
+            params
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        workspace.generated_cache_dir.join(path)
+    };
+
+    path.starts_with(&workspace.generated_cache_dir)
+        .then_some(path)
+}
+
+fn path_to_file_uri(path: &Path) -> String {
+    format!("file://{}", path.to_string_lossy())
 }
 
 fn document_uris(value: &Value) -> BTreeSet<String> {
@@ -822,6 +985,78 @@ mod tests {
         assert!(output.contains("\"uri\":\"file:///mock-definition.rs\""));
     }
 
+    #[test]
+    fn proxies_typescript_requests_and_serves_generated_files() {
+        let root = test_root("typescript-proxy");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::write(root.join("package.json"), "{}\n").expect("write package manifest");
+        fs::write(
+            generated_cache_dir.join("index.ts"),
+            "export const generated = true\n",
+        )
+        .expect("write generated file");
+        let backend = root.join("mock_backend.py");
+        fs::write(&backend, MOCK_BACKEND).expect("write backend");
+        fs::write(
+            root.join(".api-ls.json"),
+            format!(
+                "{{\"rustAnalyzer\":{{\"command\":\"\"}},\"typescript\":{{\"command\":\"python3\",\"args\":[{}]}}}}",
+                serde_json::to_string(&backend.to_string_lossy()).expect("serialize path")
+            ),
+        )
+        .expect("write config");
+        let ts_uri = format!("{}/src/client.ts", path_to_file_uri(&root));
+        let generated_uri = path_to_file_uri(&generated_cache_dir.join("index.ts"));
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 0, "character": 10 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "api-ls/generatedPackageFile",
+                "params": { "uri": generated_uri }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("\"uri\":\"file:///mock-definition.rs\""));
+        assert!(output.contains("\"id\":3"));
+        assert!(output.contains("export const generated = true"));
+    }
+
     fn framed(value: &Value) -> String {
         let body = serde_json::to_string(value).expect("serialize message");
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -832,11 +1067,6 @@ mod tests {
         let path = env::temp_dir().join(format!("api-ls-{name}-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         path
-    }
-
-    fn path_to_file_uri(path: &Path) -> String {
-        let path = path.to_string_lossy();
-        format!("file://{path}")
     }
 
     const MOCK_BACKEND: &str = r#"

@@ -1860,7 +1860,7 @@ Acceptance criteria:
 - normal Rust diagnostics appear;
 - rust-analyzer crashes are handled gracefully.
 
-### T-022 — Proxy TypeScript/Effect server through gateway
+### T-022 — Proxy TypeScript/Effect server through gateway [done]
 
 Goal: preserve TS and Effect language features.
 
