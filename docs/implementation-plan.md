@@ -1880,7 +1880,7 @@ Acceptance criteria:
 - Effect diagnostics appear;
 - generated packages are visible to TS backend.
 
-### T-023 — Implement cross-language definition
+### T-023 — Implement cross-language definition [done]
 
 Goal: redirect TS definitions to Rust.
 

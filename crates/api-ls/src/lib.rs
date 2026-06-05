@@ -237,6 +237,19 @@ impl<W: Write> LspServer<W> {
                     self.read_generated_package_file(message.params, id)?;
                 }
             }
+            "textDocument/definition" => {
+                if let Some(id) = message.id {
+                    if let Some(locations) = self.cross_language_definition(&message.params)? {
+                        self.write_response(id, locations)?;
+                    } else if is_rust_message(method, &message.params) {
+                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                    } else if self.is_typescript_message(method, &message.params) {
+                        self.forward_request_to_typescript(method, message.params, id)?;
+                    } else {
+                        self.write_response(id, Value::Null)?;
+                    }
+                }
+            }
             _ => {
                 if is_rust_message(method, &message.params) {
                     match message.id {
@@ -401,6 +414,151 @@ impl<W: Write> LspServer<W> {
             return false;
         };
         file_uri_to_path(uri).is_some_and(|path| path.starts_with(&workspace.generated_cache_dir))
+    }
+
+    fn cross_language_definition(&self, params: &Value) -> Result<Option<Value>, String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(None);
+        };
+        let Some(query) = TextPositionQuery::from_lsp_params(params) else {
+            return Ok(None);
+        };
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        Ok(graph.definition(&query, workspace))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolGraph {
+    symbols: Vec<LinkedSymbol>,
+}
+
+impl SymbolGraph {
+    fn load(path: &Path) -> Result<Option<Self>, String> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let contents = fs::read_to_string(path).map_err(|error| {
+            format!("failed to read symbol graph `{}`: {error}", path.display())
+        })?;
+        serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("failed to parse symbol graph `{}`: {error}", path.display()))
+    }
+
+    fn definition(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> Option<Value> {
+        for symbol in &self.symbols {
+            if symbol.rust.matches(query, workspace) {
+                let locations = symbol
+                    .typescript
+                    .iter()
+                    .filter(|location| !location.generated)
+                    .map(|location| location.to_lsp_location(workspace))
+                    .collect::<Vec<_>>();
+                if !locations.is_empty() {
+                    return Some(Value::Array(locations));
+                }
+            }
+
+            if symbol
+                .typescript
+                .iter()
+                .any(|location| location.matches(query, workspace))
+            {
+                return Some(symbol.rust.to_lsp_location(workspace));
+            }
+        }
+
+        None
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedSymbol {
+    #[allow(dead_code)]
+    id: String,
+    #[allow(dead_code)]
+    kind: String,
+    rust: GraphLocation,
+    #[serde(default)]
+    typescript: Vec<GraphLocation>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphLocation {
+    uri: Option<String>,
+    file: Option<PathBuf>,
+    range: GraphRange,
+    #[serde(default)]
+    generated: bool,
+}
+
+impl GraphLocation {
+    fn matches(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
+        self.resolved_uri(workspace)
+            .is_some_and(|uri| same_uri(&uri, &query.uri) && self.range.contains(query.position))
+    }
+
+    fn to_lsp_location(&self, workspace: &WorkspaceConfig) -> Value {
+        json!({
+            "uri": self.resolved_uri(workspace).unwrap_or_default(),
+            "range": self.range,
+        })
+    }
+
+    fn resolved_uri(&self, workspace: &WorkspaceConfig) -> Option<String> {
+        self.uri.clone().or_else(|| {
+            self.file.as_ref().map(|file| {
+                let path = if file.is_absolute() {
+                    file.clone()
+                } else {
+                    workspace.root.join(file)
+                };
+                path_to_file_uri(&path)
+            })
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct GraphRange {
+    start: GraphPosition,
+    end: GraphPosition,
+}
+
+impl GraphRange {
+    fn contains(self, position: GraphPosition) -> bool {
+        self.start <= position && position <= self.end
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct GraphPosition {
+    line: u32,
+    character: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TextPositionQuery {
+    uri: String,
+    position: GraphPosition,
+}
+
+impl TextPositionQuery {
+    fn from_lsp_params(params: &Value) -> Option<Self> {
+        Some(Self {
+            uri: params.get("textDocument")?.get("uri")?.as_str()?.to_owned(),
+            position: GraphPosition {
+                line: u32::try_from(params.get("position")?.get("line")?.as_u64()?).ok()?,
+                character: u32::try_from(params.get("position")?.get("character")?.as_u64()?)
+                    .ok()?,
+            },
+        })
     }
 }
 
@@ -691,6 +849,13 @@ fn generated_file_path(params: &Value, workspace: &WorkspaceConfig) -> Option<Pa
 
 fn path_to_file_uri(path: &Path) -> String {
     format!("file://{}", path.to_string_lossy())
+}
+
+fn same_uri(left: &str, right: &str) -> bool {
+    match (file_uri_to_path(left), file_uri_to_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn document_uris(value: &Value) -> BTreeSet<String> {
@@ -1055,6 +1220,89 @@ mod tests {
         assert!(output.contains("\"uri\":\"file:///mock-definition.rs\""));
         assert!(output.contains("\"id\":3"));
         assert!(output.contains("export const generated = true"));
+    }
+
+    #[test]
+    fn redirects_generated_typescript_definition_to_rust_source() {
+        let root = test_root("cross-definition");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let ts_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [{
+                        "uri": ts_uri,
+                        "generated": true,
+                        "range": {
+                            "start": { "line": 4, "character": 15 },
+                            "end": { "line": 4, "character": 22 }
+                        }
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 4, "character": 18 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains(&rust_uri));
+        assert!(output.contains("\"line\":10"));
+        assert!(!output.contains("\"id\":2,\"error\""));
     }
 
     fn framed(value: &Value) -> String {
