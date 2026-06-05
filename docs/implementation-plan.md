@@ -2016,7 +2016,7 @@ Acceptance criteria:
 - stream errors are in the stream error channel;
 - LSP navigation works for stream endpoints.
 
-### T-030 — Implement SSE runtime and Axum adapter
+### T-030 — Implement SSE runtime and Axum adapter [done]
 
 Goal: make server streams executable.
 

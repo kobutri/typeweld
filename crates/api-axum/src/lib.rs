@@ -1,6 +1,6 @@
 //! Axum integration adapter.
 
-use std::{convert::Infallible, ops::Deref};
+use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 
 use api_core::{
     ir::{HttpMethod, HttpStatus},
@@ -9,10 +9,14 @@ use api_core::{
 use axum::{
     extract::{FromRequest, FromRequestParts},
     http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, Sse as AxumSse},
+        IntoResponse, Response,
+    },
     routing::{delete, get, patch, post, put, MethodRouter},
     Router,
 };
+use futures_util::{Stream, StreamExt};
 use serde::Serialize;
 
 /// Axum router builder paired with an explicit API module.
@@ -102,6 +106,13 @@ pub struct Created<T>(pub T);
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NoContent;
 
+/// Server-sent event stream response.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Sse<T, S = T> {
+    stream: S,
+    _item: PhantomData<fn() -> T>,
+}
+
 /// Route path extractor for endpoint handlers.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Path<T>(pub T);
@@ -144,6 +155,21 @@ impl<T> Created<T> {
     }
 }
 
+impl<T, S> Sse<T, S> {
+    #[must_use]
+    pub fn new(stream: S) -> Self {
+        Self {
+            stream,
+            _item: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
+}
+
 impl<T> Path<T> {
     #[must_use]
     pub fn into_inner(self) -> T {
@@ -178,6 +204,14 @@ impl<T> Deref for Created<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl<T, S> Deref for Sse<T, S> {
+    type Target = S;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
     }
 }
 
@@ -256,6 +290,25 @@ where
 impl IntoResponse for NoContent {
     fn into_response(self) -> Response {
         StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl<T, S, E> IntoResponse for Sse<T, S>
+where
+    S: Stream<Item = Result<T, E>> + Send + 'static,
+    T: Serialize,
+    E: ApiError + Serialize,
+{
+    fn into_response(self) -> Response {
+        let events = self.stream.map(|item| match item {
+            Ok(item) => Event::default().json_data(item),
+            Err(error) => Event::default().event("api-error").json_data(ErrorFrame {
+                status: error.status().0,
+                body: error,
+            }),
+        });
+
+        AxumSse::new(events).into_response()
     }
 }
 
@@ -338,6 +391,12 @@ impl<T> From<Infallible> for DomainError<T> {
     }
 }
 
+#[derive(Serialize)]
+struct ErrorFrame<E> {
+    status: u16,
+    body: E,
+}
+
 #[cfg(test)]
 mod tests {
     use api_core::{ir::HttpMethod, ApiType};
@@ -414,6 +473,20 @@ mod tests {
             filter: String::new(),
             name: body.name,
         })
+    }
+
+    type UserEventStream =
+        futures_util::stream::Iter<std::array::IntoIter<Result<User, GetUserError>, 2>>;
+
+    async fn user_events() -> Sse<User, UserEventStream> {
+        Sse::new(futures_util::stream::iter([
+            Ok(User {
+                id: 1,
+                filter: String::new(),
+                name: "Ada".to_owned(),
+            }),
+            Err(GetUserError::NotFound { id: 2 }),
+        ]))
     }
 
     #[derive(Clone, Debug, Deserialize)]
@@ -509,5 +582,37 @@ mod tests {
             std::str::from_utf8(&body).expect("utf8"),
             r#"{"id":7,"filter":"","name":"Grace"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn serializes_sse_items_and_domain_errors() {
+        let app = router(ApiModule::new("events"))
+            .route(
+                Endpoint::new(HttpMethod::Get, "/events"),
+                method_router(HttpMethod::Get, user_events),
+            )
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/events")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = std::str::from_utf8(&body).expect("utf8");
+
+        assert!(body.contains(r#"data: {"id":1,"filter":"","name":"Ada"}"#));
+        assert!(body.contains("event: api-error"));
+        assert!(body.contains(r#"data: {"status":404,"body":{"_tag":"NotFound","id":2}}"#));
     }
 }
