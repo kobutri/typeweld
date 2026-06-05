@@ -1,8 +1,10 @@
 //! Effect v4 TypeScript generator backend.
 
+use std::collections::BTreeSet;
+
 use api_ir::{
-    ApiContract, EnumShape, EnumVariant, ExternalType, Field, Optionality, Primitive, StructShape,
-    TypeDef, TypeRef, TypeShape,
+    ApiContract, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field, Optionality,
+    Primitive, SourceRange, StructShape, TypeDef, TypeRef, TypeShape,
 };
 
 #[must_use]
@@ -31,12 +33,257 @@ pub fn render_schemas(contract: &ApiContract) -> String {
     trim_trailing_blank_lines(output)
 }
 
+/// Renders schema-backed domain and generated client errors.
+#[must_use]
+pub fn render_errors(contract: &ApiContract) -> String {
+    let mut output = render_package_banner(contract);
+    output.push_str("import { Schema } from \"effect\"\n");
+
+    let schema_imports = collect_error_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        output.push_str("import { ");
+        output.push_str(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"./schemas\"\n");
+    }
+    output.push('\n');
+
+    output.push_str(&render_client_errors());
+
+    let mut errors = contract.errors.iter().collect::<Vec<_>>();
+    errors.sort_by(|left, right| {
+        left.ts_name
+            .cmp(&right.ts_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    for error in errors {
+        output.push('\n');
+        output.push_str(&render_error_def(error));
+    }
+
+    trim_trailing_blank_lines(output)
+}
+
 fn render_type_def(type_def: &TypeDef) -> String {
     let schema = render_type_shape(&type_def.shape, type_def);
     format!(
         "export const {name} = {schema}\nexport type {name} = typeof {name}.Type\nexport type {name}Encoded = typeof {name}.Encoded\n",
         name = type_def.ts_name,
     )
+}
+
+fn collect_error_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    contract
+        .errors
+        .iter()
+        .flat_map(|error| error.variants.iter())
+        .flat_map(|variant| variant.fields.iter())
+        .filter_map(|field| {
+            primitive_from_type_ref(&field.type_ref)
+                .is_none()
+                .then(|| field.type_ref.name.clone())
+        })
+        .collect()
+}
+
+fn render_client_errors() -> String {
+    let client_errors = [
+        (
+            "NetworkError",
+            "NetworkError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optional(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "TimeoutError",
+            "TimeoutError",
+            vec![
+                ("message", "Schema.String"),
+                ("timeoutMs", "Schema.optional(Schema.Number)"),
+            ],
+        ),
+        (
+            "EncodeError",
+            "EncodeError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optional(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "DecodeError",
+            "DecodeError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optional(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "UnexpectedStatusError",
+            "UnexpectedStatusError",
+            vec![
+                ("message", "Schema.String"),
+                ("status", "Schema.Number"),
+                ("body", "Schema.optional(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "RemoteProtocolError",
+            "RemoteProtocolError",
+            vec![
+                ("message", "Schema.String"),
+                ("body", "Schema.optional(Schema.Unknown)"),
+            ],
+        ),
+    ];
+
+    let mut output = String::new();
+    for (class_name, tag, fields) in &client_errors {
+        output.push_str(&render_tagged_error_class(class_name, tag, &fields));
+        output.push('\n');
+    }
+    output.push_str("export type ApiClientError =\n");
+    output.push_str(
+        &client_errors
+            .iter()
+            .map(|(class_name, _, _)| format!("  | {class_name}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    output.push('\n');
+    output
+}
+
+fn render_error_def(error: &ErrorDef) -> String {
+    let mut output = String::new();
+
+    for variant in &error.variants {
+        output.push_str(&render_error_variant(error, variant));
+        output.push('\n');
+    }
+
+    output.push_str(&format!("export type {} =\n", error.ts_name));
+    if error.variants.is_empty() {
+        output.push_str("  never\n");
+    } else {
+        output.push_str(
+            &error
+                .variants
+                .iter()
+                .map(|variant| format!("  | {}", error_variant_class_name(error, variant)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        output.push('\n');
+    }
+
+    output.push('\n');
+    output.push_str(&render_error_status_metadata(error));
+    output.push('\n');
+    output.push_str(&render_error_symbol_metadata(error));
+
+    output
+}
+
+fn render_error_variant(error: &ErrorDef, variant: &ErrorVariant) -> String {
+    let fields = variant
+        .fields
+        .iter()
+        .map(|field| (field.ts_name.as_str(), render_field_schema(field)))
+        .collect::<Vec<_>>();
+    let fields = fields
+        .iter()
+        .map(|(name, schema)| (*name, schema.as_str()))
+        .collect::<Vec<_>>();
+
+    render_tagged_error_class(
+        &error_variant_class_name(error, variant),
+        &variant.tag,
+        &fields,
+    )
+}
+
+fn render_tagged_error_class(class_name: &str, tag: &str, fields: &[(&str, &str)]) -> String {
+    let mut output = format!(
+        "export class {class_name} extends Schema.TaggedErrorClass<{class_name}>()(\n  {},\n",
+        ts_string(tag)
+    );
+
+    if fields.is_empty() {
+        output.push_str("  {}\n");
+    } else {
+        output.push_str("  {\n");
+        for (field_name, schema) in fields {
+            output.push_str("    ");
+            output.push_str(&render_property_key(field_name));
+            output.push_str(": ");
+            output.push_str(schema);
+            output.push_str(",\n");
+        }
+        output.push_str("  }\n");
+    }
+
+    output.push_str(") {}\n");
+    output
+}
+
+fn render_error_status_metadata(error: &ErrorDef) -> String {
+    let mut output = format!("export const {}Status = {{\n", error.ts_name);
+    for variant in &error.variants {
+        output.push_str("  ");
+        output.push_str(&render_property_key(&variant.tag));
+        output.push_str(": ");
+        output.push_str(&variant.status.0.to_string());
+        output.push_str(",\n");
+    }
+    output.push_str("} as const\n");
+    output
+}
+
+fn render_error_symbol_metadata(error: &ErrorDef) -> String {
+    let mut output = format!("export const {}Symbols = {{\n", error.ts_name);
+    for variant in &error.variants {
+        output.push_str("  ");
+        output.push_str(&render_property_key(&variant.tag));
+        output.push_str(": {\n");
+        output.push_str("    symbolId: ");
+        output.push_str(&ts_string(variant.id.as_str()));
+        output.push_str(",\n    rustName: ");
+        output.push_str(&ts_string(&variant.rust_name));
+        output.push_str(",\n    source: ");
+        output.push_str(&render_source_range(&variant.source, 4));
+        output.push_str(",\n  },\n");
+    }
+    output.push_str("} as const\n");
+    output
+}
+
+fn render_source_range(source: &SourceRange, indent: usize) -> String {
+    format!(
+        "{{\n{indent}  file: {file},\n{indent}  startLine: {start_line},\n{indent}  startColumn: {start_column},\n{indent}  endLine: {end_line},\n{indent}  endColumn: {end_column},\n{indent}}}",
+        indent = render_indent(indent),
+        file = ts_string(&source.file),
+        start_line = source.start_line,
+        start_column = source.start_column,
+        end_line = source.end_line,
+        end_column = source.end_column,
+    )
+}
+
+fn error_variant_class_name(error: &ErrorDef, variant: &ErrorVariant) -> String {
+    let prefix = error
+        .ts_name
+        .strip_suffix("Error")
+        .unwrap_or(&error.ts_name);
+    format!("{prefix}{}", variant.rust_name)
 }
 
 fn render_type_shape(shape: &TypeShape, owner: &TypeDef) -> String {
@@ -174,6 +421,40 @@ fn render_indent(width: usize) -> String {
     " ".repeat(width)
 }
 
+fn render_property_key(key: &str) -> String {
+    if is_identifier(key) {
+        key.to_owned()
+    } else {
+        ts_string(key)
+    }
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|char| char == '_' || char == '$' || char.is_ascii_alphanumeric())
+}
+
+fn ts_string(value: &str) -> String {
+    let mut output = "\"".to_owned();
+    for char in value.chars() {
+        match char {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            char => output.push(char),
+        }
+    }
+    output.push('"');
+    output
+}
+
 fn trim_trailing_blank_lines(mut output: String) -> String {
     while output.ends_with("\n\n") {
         output.pop();
@@ -184,8 +465,8 @@ fn trim_trailing_blank_lines(mut output: String) -> String {
 #[cfg(test)]
 mod tests {
     use api_ir::{
-        ApiContract, EnumShape, EnumVariant, Field, Optionality, Primitive, SourceRange,
-        StructShape, SymbolId, TypeDef, TypeRef, TypeShape,
+        ApiContract, EnumShape, EnumVariant, ErrorDef, ErrorVariant, Field, HttpStatus,
+        Optionality, Primitive, SourceRange, StructShape, SymbolId, TypeDef, TypeRef, TypeShape,
     };
 
     use super::*;
@@ -355,6 +636,76 @@ export type UserEncoded = typeof User.Encoded
         assert!(alpha < zed);
     }
 
+    #[test]
+    fn renders_domain_errors_with_status_and_symbol_metadata() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            errors: vec![ErrorDef {
+                id: symbol("error", &["GetUserError"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "GetUserError".to_owned(),
+                ],
+                rust_name: "GetUserError".to_owned(),
+                ts_name: "GetUserError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["GetUserError", "NotFound"]),
+                        rust_name: "NotFound".to_owned(),
+                        tag: "notFound".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                        source: source_file("src/users.rs", 42),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["GetUserError", "PermissionDenied"]),
+                        rust_name: "PermissionDenied".to_owned(),
+                        tag: "permission-denied".to_owned(),
+                        status: HttpStatus(403),
+                        fields: Vec::new(),
+                        source: source_file("src/users.rs", 47),
+                    },
+                ],
+                source: source_file("src/users.rs", 39),
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_errors(&contract);
+
+        assert!(rendered.contains("import { UserId } from \"./schemas\""));
+        assert!(rendered.contains(
+            "export class GetUserNotFound extends Schema.TaggedErrorClass<GetUserNotFound>()(\n  \"notFound\","
+        ));
+        assert!(rendered.contains("    id: UserId,"));
+        assert!(rendered.contains(
+            "export type GetUserError =\n  | GetUserNotFound\n  | GetUserPermissionDenied"
+        ));
+        assert!(rendered.contains("export const GetUserErrorStatus = {\n  notFound: 404,\n  \"permission-denied\": 403,\n} as const"));
+        assert!(rendered.contains("export const GetUserErrorSymbols = {"));
+        assert!(rendered.contains("file: \"src/users.rs\""));
+        assert!(rendered.contains("startLine: 42"));
+    }
+
+    #[test]
+    fn renders_generated_client_error_union() {
+        let rendered = render_errors(&ApiContract {
+            package_name: "example-api".to_owned(),
+            ..ApiContract::default()
+        });
+
+        assert!(rendered.contains(
+            "export class NetworkError extends Schema.TaggedErrorClass<NetworkError>()("
+        ));
+        assert!(rendered.contains(
+            "export class UnexpectedStatusError extends Schema.TaggedErrorClass<UnexpectedStatusError>()("
+        ));
+        assert!(rendered.contains(
+            "export type ApiClientError =\n  | NetworkError\n  | TimeoutError\n  | EncodeError\n  | DecodeError\n  | UnexpectedStatusError\n  | RemoteProtocolError"
+        ));
+    }
+
     fn simple_type(name: &str) -> TypeDef {
         TypeDef {
             id: symbol("type", &[name]),
@@ -389,12 +740,16 @@ export type UserEncoded = typeof User.Encoded
         SymbolId::from_parts(namespace, parts)
     }
 
-    const fn source() -> SourceRange {
+    fn source() -> SourceRange {
+        source_file("", 0)
+    }
+
+    fn source_file(file: &str, line: u32) -> SourceRange {
         SourceRange {
-            file: String::new(),
-            start_line: 0,
+            file: file.to_owned(),
+            start_line: line,
             start_column: 0,
-            end_line: 0,
+            end_line: line,
             end_column: 0,
         }
     }

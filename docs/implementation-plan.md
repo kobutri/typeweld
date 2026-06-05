@@ -1684,7 +1684,7 @@ Acceptance criteria:
 - generated names are deterministic;
 - decoded/encoded aliases are emitted for every exported type.
 
-### T-013 — Implement Effect error generator
+### T-013 — Implement Effect error generator [done]
 
 Goal: generate tagged schema-backed error classes/unions.
 
