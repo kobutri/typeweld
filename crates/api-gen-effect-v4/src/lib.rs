@@ -141,10 +141,12 @@ pub fn render_endpoints(contract: &ApiContract) -> String {
 pub fn render_layer(contract: &ApiContract) -> String {
     let mut output = render_package_banner(contract);
     output.push_str("import { Context, Layer, Effect } from \"effect\"\n");
+    output
+        .push_str("import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\"\n");
 
     let endpoint_namespaces = collect_endpoint_namespaces(contract);
     if !endpoint_namespaces.is_empty() {
-        output.push_str("import type { ");
+        output.push_str("import { ");
         output.push_str(
             &endpoint_namespaces
                 .iter()
@@ -157,7 +159,7 @@ pub fn render_layer(contract: &ApiContract) -> String {
 
     let schema_imports = collect_service_schema_imports(contract);
     if !schema_imports.is_empty() {
-        output.push_str("import type { ");
+        output.push_str("import { ");
         output.push_str(
             &schema_imports
                 .iter()
@@ -168,10 +170,23 @@ pub fn render_layer(contract: &ApiContract) -> String {
         output.push_str(" } from \"./schemas\"\n");
     }
 
-    let error_imports = collect_endpoint_error_imports(contract);
+    let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
+    if !error_metadata_imports.is_empty() {
+        output.push_str("import { ");
+        output.push_str(
+            &error_metadata_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"./errors\"\n");
+    }
+
+    let error_type_imports = collect_endpoint_error_imports(contract);
     output.push_str("import type { ");
     output.push_str(
-        &error_imports
+        &error_type_imports
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>()
@@ -186,7 +201,7 @@ pub fn render_layer(contract: &ApiContract) -> String {
     output.push_str("}\n\n");
 
     output.push_str(&format!(
-        "export class ServerApi extends Context.Tag({})<ServerApi, ServerApi.Service>() {{}}\n\n",
+        "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()({}) {{}}\n\n",
         ts_string(&format!("{}::ServerApi", contract.package_name))
     ));
 
@@ -194,15 +209,15 @@ pub fn render_layer(contract: &ApiContract) -> String {
     output.push_str(&render_service_interface(contract));
     output.push('\n');
     output.push_str(
-        "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi, never, never> => {\n",
+        "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> => {\n",
     );
-    output.push_str("    void config\n");
-    output.push_str("    return Layer.succeed(ServerApi, {} as Service)\n");
+    output.push_str("    const service: Service = {\n");
+    output.push_str(&render_fetch_service(contract));
+    output.push_str("    }\n");
+    output.push_str("    return Layer.succeed(ServerApi, ServerApi.of(service))\n");
     output.push_str("  }\n\n");
-    output.push_str(
-        "  export const mock = (service: Service): Layer.Layer<ServerApi, never, never> =>\n",
-    );
-    output.push_str("    Layer.succeed(ServerApi, service)\n");
+    output.push_str("  export const mock = (service: Service): Layer.Layer<ServerApi> =>\n");
+    output.push_str("    Layer.succeed(ServerApi, ServerApi.of(service))\n");
     output.push_str("}\n");
 
     trim_trailing_blank_lines(output)
@@ -292,7 +307,7 @@ pub fn generated_package_dir(target_dir: &Path, package_name: &str) -> PathBuf {
 #[must_use]
 pub fn render_package_json(contract: &ApiContract) -> String {
     format!(
-        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }}\n}}\n",
+        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@rust-ts-integration/effect-runtime\": \"0.0.0\",\n    \"effect\": \"^4.0.0-beta.78\"\n  }}\n}}\n",
         name = ts_string(&contract.package_name)
     )
 }
@@ -324,7 +339,7 @@ pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
 fn render_type_def(type_def: &TypeDef) -> String {
     let schema = render_type_shape(&type_def.shape, type_def);
     format!(
-        "export const {name} = {schema}\nexport type {name} = typeof {name}.Type\nexport type {name}Encoded = typeof {name}.Encoded\n",
+        "export const {name} = {schema}\nexport type {name} = Schema.Schema.Type<typeof {name}>\nexport type {name}Encoded = Schema.Codec.Encoded<typeof {name}>\n",
         name = type_def.ts_name,
     )
 }
@@ -336,6 +351,7 @@ fn collect_endpoint_namespaces(contract: &ApiContract) -> BTreeSet<String> {
 fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
     let mut imports = BTreeSet::new();
     for endpoint in &contract.endpoints {
+        collect_request_type_imports(&endpoint.request, &mut imports);
         collect_response_type_imports(&endpoint.response, &mut imports);
     }
     imports
@@ -367,6 +383,39 @@ fn render_service_method(endpoint: &Endpoint) -> String {
         args_name = endpoint_args_name(endpoint),
         success = render_response_type(&endpoint.response),
         error = render_endpoint_error_type(endpoint),
+    )
+}
+
+fn render_fetch_service(contract: &ApiContract) -> String {
+    let mut output = String::new();
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        output.push_str("      ");
+        output.push_str(&namespace);
+        output.push_str(": {\n");
+        for endpoint in endpoints {
+            output.push_str(&render_fetch_service_method(endpoint));
+        }
+        output.push_str("      },\n");
+    }
+
+    output
+}
+
+fn render_fetch_service_method(endpoint: &Endpoint) -> String {
+    let function_name = endpoint_function_name(endpoint);
+    let namespace = endpoint_namespace(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let success_decoder = render_success_decoder(&endpoint.response);
+    let error_decoder = render_domain_error_decoder(endpoint);
+    let success = render_response_type(&endpoint.response);
+    let error = render_endpoint_error_type(endpoint);
+
+    format!(
+        "        {function_name}: makeUnaryHttpClient<{namespace}.{args_name}, {success}, {error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
+        method = ts_string(endpoint.method.as_str()),
+        encoder = render_request_encoder(&endpoint.request, &format!("{namespace}.{args_name}")),
     )
 }
 
@@ -440,6 +489,16 @@ fn collect_endpoint_error_imports(contract: &ApiContract) -> BTreeSet<String> {
     imports
 }
 
+fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        for error in &endpoint.errors {
+            imports.insert(format!("{}SchemaByStatus", error.name));
+        }
+    }
+    imports
+}
+
 fn render_endpoint(endpoint: &Endpoint) -> String {
     let function_name = endpoint_function_name(endpoint);
     let args_name = endpoint_args_name(endpoint);
@@ -447,7 +506,7 @@ fn render_endpoint(endpoint: &Endpoint) -> String {
     let error = render_endpoint_error_type(endpoint);
 
     format!(
-        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): Effect.Effect<{success}, {error}, ServerApi> =>\n    Effect.flatMap(ServerApi, (api) => api.{namespace}.{function_name}(args))\n\n",
+        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): Effect.Effect<{success}, {error}, ServerApi> =>\n    ServerApi.use((api) => api.{namespace}.{function_name}(args))\n\n",
         args_interface = render_endpoint_args(endpoint),
         method = ts_string(endpoint.method.as_str()),
         path = ts_string(&endpoint.route.0),
@@ -541,6 +600,90 @@ fn render_ts_type_ref(type_ref: &TypeRef) -> String {
     }
 }
 
+fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
+    let mut lines = Vec::new();
+
+    if !request.path_params.is_empty() {
+        lines.push("path: {".to_owned());
+        for field in &request.path_params {
+            lines.push(format!(
+                "              {}: args.{},",
+                render_property_key(&field.wire_name),
+                render_property_key(&field.ts_name)
+            ));
+        }
+        lines.push("            },".to_owned());
+    }
+
+    if !request.query_params.is_empty() {
+        lines.push("query: {".to_owned());
+        for field in &request.query_params {
+            lines.push(format!(
+                "              {}: args.{},",
+                render_property_key(&field.wire_name),
+                render_property_key(&field.ts_name)
+            ));
+        }
+        lines.push("            },".to_owned());
+    }
+
+    if request.body.is_some() {
+        lines.push("body: args.body,".to_owned());
+    }
+
+    if lines.is_empty() {
+        "() => ({})".to_owned()
+    } else {
+        format!(
+            "(args: {args_type}) => ({{
+            {}
+          }})",
+            lines.join("\n            "),
+            args_type = args_type,
+        )
+    }
+}
+
+fn render_success_decoder(response: &ResponseShape) -> String {
+    match response {
+        ResponseShape::Empty => "() => Effect.void",
+        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+            return format!(
+                "(input) => makeUnaryHttpClient.decode(input, {})",
+                type_ref.name
+            );
+        }
+    }
+    .to_owned()
+}
+
+fn render_domain_error_decoder(endpoint: &Endpoint) -> String {
+    if endpoint.errors.is_empty() {
+        return "() => undefined".to_owned();
+    }
+
+    let mut output = "(status, input) => {\n".to_owned();
+    for error in &endpoint.errors {
+        output.push_str("            const ");
+        output.push_str(&error.name);
+        output.push_str("Schema = ");
+        output.push_str(&error.name);
+        output.push_str("SchemaByStatus[status as keyof typeof ");
+        output.push_str(&error.name);
+        output.push_str("SchemaByStatus]\n");
+        output.push_str("            if (");
+        output.push_str(&error.name);
+        output.push_str("Schema !== undefined) {\n");
+        output.push_str("              return makeUnaryHttpClient.decode(input, ");
+        output.push_str(&error.name);
+        output.push_str("Schema)\n");
+        output.push_str("            }\n");
+    }
+    output.push_str("            return undefined\n");
+    output.push_str("          }");
+    output
+}
+
 fn endpoint_namespace(endpoint: &Endpoint) -> String {
     endpoint
         .ts_path
@@ -593,7 +736,7 @@ fn render_client_errors() -> String {
             "NetworkError",
             vec![
                 ("message", "Schema.String"),
-                ("cause", "Schema.optional(Schema.Unknown)"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
             ],
         ),
         (
@@ -601,7 +744,7 @@ fn render_client_errors() -> String {
             "TimeoutError",
             vec![
                 ("message", "Schema.String"),
-                ("timeoutMs", "Schema.optional(Schema.Number)"),
+                ("timeoutMs", "Schema.optionalKey(Schema.Number)"),
             ],
         ),
         (
@@ -609,7 +752,7 @@ fn render_client_errors() -> String {
             "EncodeError",
             vec![
                 ("message", "Schema.String"),
-                ("cause", "Schema.optional(Schema.Unknown)"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
             ],
         ),
         (
@@ -617,7 +760,7 @@ fn render_client_errors() -> String {
             "DecodeError",
             vec![
                 ("message", "Schema.String"),
-                ("cause", "Schema.optional(Schema.Unknown)"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
             ],
         ),
         (
@@ -626,7 +769,7 @@ fn render_client_errors() -> String {
             vec![
                 ("message", "Schema.String"),
                 ("status", "Schema.Number"),
-                ("body", "Schema.optional(Schema.Unknown)"),
+                ("body", "Schema.optionalKey(Schema.Unknown)"),
             ],
         ),
         (
@@ -634,7 +777,7 @@ fn render_client_errors() -> String {
             "RemoteProtocolError",
             vec![
                 ("message", "Schema.String"),
-                ("body", "Schema.optional(Schema.Unknown)"),
+                ("body", "Schema.optionalKey(Schema.Unknown)"),
             ],
         ),
     ];
@@ -681,6 +824,10 @@ fn render_error_def(error: &ErrorDef) -> String {
 
     output.push('\n');
     output.push_str(&render_error_status_metadata(error));
+    output.push('\n');
+    output.push_str(&render_error_status_by_code_metadata(error));
+    output.push('\n');
+    output.push_str(&render_error_schema_by_status_metadata(error));
     output.push('\n');
     output.push_str(&render_error_symbol_metadata(error));
 
@@ -742,6 +889,32 @@ fn render_error_status_metadata(error: &ErrorDef) -> String {
     output
 }
 
+fn render_error_status_by_code_metadata(error: &ErrorDef) -> String {
+    let mut output = format!("export const {}StatusByCode = {{\n", error.ts_name);
+    for variant in &error.variants {
+        output.push_str("  ");
+        output.push_str(&variant.status.0.to_string());
+        output.push_str(": ");
+        output.push_str(&ts_string(&variant.tag));
+        output.push_str(",\n");
+    }
+    output.push_str("} as const\n");
+    output
+}
+
+fn render_error_schema_by_status_metadata(error: &ErrorDef) -> String {
+    let mut output = format!("export const {}SchemaByStatus = {{\n", error.ts_name);
+    for variant in &error.variants {
+        output.push_str("  ");
+        output.push_str(&variant.status.0.to_string());
+        output.push_str(": ");
+        output.push_str(&error_variant_class_name(error, variant));
+        output.push_str(",\n");
+    }
+    output.push_str("} as const\n");
+    output
+}
+
 fn render_error_symbol_metadata(error: &ErrorDef) -> String {
     let mut output = format!("export const {}Symbols = {{\n", error.ts_name);
     for variant in &error.variants {
@@ -796,11 +969,11 @@ fn render_type_shape(shape: &TypeShape, owner: &TypeDef) -> String {
                 .map(render_type_ref)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("Schema.Tuple({items})")
+            format!("Schema.Tuple([{items}])")
         }
         TypeShape::List(item) => format!("Schema.Array({})", render_type_ref(item)),
         TypeShape::Map { key, value } => format!(
-            "Schema.Record({{ key: {}, value: {} }})",
+            "Schema.Record({}, {})",
             render_type_ref(key),
             render_type_ref(value)
         ),
@@ -838,7 +1011,7 @@ fn render_enum(shape: &EnumShape, indent: usize) -> String {
         .map(|variant| render_enum_variant(variant, indent))
         .collect::<Vec<_>>();
 
-    format!("Schema.Union({})", variants.join(", "))
+    format!("Schema.Union([{}])", variants.join(", "))
 }
 
 fn render_enum_variant(variant: &EnumVariant, indent: usize) -> String {
@@ -869,7 +1042,7 @@ fn render_field_schema(field: &Field) -> String {
     let schema = render_type_ref(&field.type_ref);
     match field.optionality {
         Optionality::Required => schema,
-        Optionality::Optional => format!("Schema.optional({schema})"),
+        Optionality::Optional => format!("Schema.optionalKey({schema})"),
         Optionality::Nullable => format!("Schema.NullOr({schema})"),
     }
 }
@@ -902,11 +1075,14 @@ fn primitive_from_type_ref(type_ref: &TypeRef) -> Option<Primitive> {
 
 fn render_external(external: &ExternalType) -> String {
     if external.encoded_ts_name == external.decoded_ts_name {
-        format!("Schema.declare<{}>((value) => true)", external.ts_name)
+        format!(
+            "Schema.declare<{}>((value): value is {} => true)",
+            external.ts_name, external.ts_name
+        )
     } else {
         format!(
-            "Schema.declare<{}, {}>((value) => true)",
-            external.decoded_ts_name, external.encoded_ts_name
+            "Schema.declare<{}>((value): value is {} => true)",
+            external.decoded_ts_name, external.decoded_ts_name
         )
     }
 }
@@ -1045,10 +1221,10 @@ import { Schema } from "effect"
 export const User = Schema.Struct({
   id: UserId,
   displayName: Schema.String,
-  nickname: Schema.optional(Schema.String),
+  nickname: Schema.optionalKey(Schema.String),
 })
-export type User = typeof User.Type
-export type UserEncoded = typeof User.Encoded
+export type User = Schema.Schema.Type<typeof User>
+export type UserEncoded = Schema.Codec.Encoded<typeof User>
 "#
         );
     }
@@ -1110,7 +1286,7 @@ export type UserEncoded = typeof User.Encoded
             "export const UserId = Schema.String.pipe(Schema.brand(\"server::users::UserId\"))"
         ));
         assert!(rendered.contains(
-            "export const UserEvent = Schema.Union(Schema.Struct({ _tag: Schema.Literal(\"created\") }), Schema.Struct({\n  _tag: Schema.Literal(\"renamed\"),\n  displayName: Schema.String,\n}))"
+            "export const UserEvent = Schema.Union([Schema.Struct({ _tag: Schema.Literal(\"created\") }), Schema.Struct({\n  _tag: Schema.Literal(\"renamed\"),\n  displayName: Schema.String,\n})])"
         ));
     }
 
@@ -1130,7 +1306,7 @@ export type UserEncoded = typeof User.Encoded
 
         assert_eq!(
             render_type_shape(&owner.shape, &owner),
-            "Schema.Record({ key: Schema.String, value: User })"
+            "Schema.Record(Schema.String, User)"
         );
 
         let owner = TypeDef {
@@ -1290,7 +1466,7 @@ export type UserEncoded = typeof User.Encoded
             "  export const getUserRoute = {\n    method: \"GET\",\n    path: \"/users/{id}\",\n    transport: \"UnaryHttp\",\n  } as const"
         ));
         assert!(rendered.contains(
-            "  export const getUser = (\n    args: GetUserArgs\n  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>\n    Effect.flatMap(ServerApi, (api) => api.users.getUser(args))"
+            "  export const getUser = (\n    args: GetUserArgs\n  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>\n    ServerApi.use((api) => api.users.getUser(args))"
         ));
     }
 
@@ -1365,21 +1541,29 @@ export type UserEncoded = typeof User.Encoded
         let rendered = render_layer(&contract);
 
         assert!(rendered.contains("import { Context, Layer, Effect } from \"effect\""));
-        assert!(rendered.contains("import type { users } from \"./endpoints\""));
-        assert!(rendered.contains("import type { User } from \"./schemas\""));
+        assert!(rendered.contains(
+            "import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\""
+        ));
+        assert!(rendered.contains("import { users } from \"./endpoints\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
         assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
         assert!(rendered.contains(
-            "export class ServerApi extends Context.Tag(\"@workspace/server-api::ServerApi\")<ServerApi, ServerApi.Service>() {}"
+            "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()(\"@workspace/server-api::ServerApi\") {}"
         ));
         assert!(rendered.contains(
             "      readonly getUser: (args: users.GetUserArgs) => Effect.Effect<User, ApiClientError | GetUserError, never>"
         ));
         assert!(rendered.contains(
-            "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi, never, never> =>"
+            "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> =>"
         ));
         assert!(rendered.contains(
-            "  export const mock = (service: Service): Layer.Layer<ServerApi, never, never> =>"
+            "getUser: makeUnaryHttpClient<users.GetUserArgs, User, ApiClientError | GetUserError>(config,"
         ));
+        assert!(
+            rendered.contains("decodeSuccess: (input) => makeUnaryHttpClient.decode(input, User)")
+        );
+        assert!(rendered
+            .contains("  export const mock = (service: Service): Layer.Layer<ServerApi> =>"));
     }
 
     #[test]
@@ -1403,6 +1587,10 @@ export type UserEncoded = typeof User.Encoded
     "./errors": "./errors.ts",
     "./endpoints": "./endpoints.ts",
     "./layer": "./layer.ts"
+  },
+  "dependencies": {
+    "@rust-ts-integration/effect-runtime": "0.0.0",
+    "effect": "^4.0.0-beta.78"
   }
 }
 "#

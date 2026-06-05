@@ -1761,7 +1761,7 @@ Acceptance criteria:
 - no generated files need to be committed;
 - multiple TS projects can share the same generated package.
 
-### T-017 — Implement runtime fetch client
+### T-017 — Implement runtime fetch client [done]
 
 Goal: execute unary HTTP endpoints as Effects.
 

@@ -4,10 +4,16 @@
     "declaration": true,
     "declarationMap": true,
     "exactOptionalPropertyTypes": true,
+    "lib": [
+      "DOM",
+      "ES2022",
+      "ESNext.Disposable"
+    ],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": true,
     "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
     "strict": true,
     "target": "ES2022"
   },
@@ -21,4 +27,3 @@
     }
   ]
 }
-
