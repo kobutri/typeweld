@@ -1723,7 +1723,7 @@ Acceptance criteria:
 - Rust `Result<T, E>` maps to Effect error channel;
 - request path/query/body args are represented correctly.
 
-### T-015 — Implement generated `ServerApi` service and Layer declarations
+### T-015 — Implement generated `ServerApi` service and Layer declarations [done]
 
 Goal: expose a generated Effect service API.
 

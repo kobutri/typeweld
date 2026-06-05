@@ -133,12 +133,150 @@ pub fn render_endpoints(contract: &ApiContract) -> String {
     trim_trailing_blank_lines(output)
 }
 
+/// Renders the generated Effect service tag, service interface, and layer helpers.
+#[must_use]
+pub fn render_layer(contract: &ApiContract) -> String {
+    let mut output = render_package_banner(contract);
+    output.push_str("import { Context, Layer, Effect } from \"effect\"\n");
+
+    let endpoint_namespaces = collect_endpoint_namespaces(contract);
+    if !endpoint_namespaces.is_empty() {
+        output.push_str("import type { ");
+        output.push_str(
+            &endpoint_namespaces
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"./endpoints\"\n");
+    }
+
+    let schema_imports = collect_service_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        output.push_str("import type { ");
+        output.push_str(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"./schemas\"\n");
+    }
+
+    let error_imports = collect_endpoint_error_imports(contract);
+    output.push_str("import type { ");
+    output.push_str(
+        &error_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    output.push_str(" } from \"./errors\"\n\n");
+
+    output.push_str("export interface ServerApiConfig {\n");
+    output.push_str("  readonly baseUrl: string\n");
+    output.push_str("  readonly timeoutMs?: number\n");
+    output.push_str("  readonly fetch?: typeof fetch\n");
+    output.push_str("}\n\n");
+
+    output.push_str(&format!(
+        "export class ServerApi extends Context.Tag({})<ServerApi, ServerApi.Service>() {{}}\n\n",
+        ts_string(&format!("{}::ServerApi", contract.package_name))
+    ));
+
+    output.push_str("export namespace ServerApi {\n");
+    output.push_str(&render_service_interface(contract));
+    output.push('\n');
+    output.push_str(
+        "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi, never, never> => {\n",
+    );
+    output.push_str("    void config\n");
+    output.push_str("    return Layer.succeed(ServerApi, {} as Service)\n");
+    output.push_str("  }\n\n");
+    output.push_str(
+        "  export const mock = (service: Service): Layer.Layer<ServerApi, never, never> =>\n",
+    );
+    output.push_str("    Layer.succeed(ServerApi, service)\n");
+    output.push_str("}\n");
+
+    trim_trailing_blank_lines(output)
+}
+
 fn render_type_def(type_def: &TypeDef) -> String {
     let schema = render_type_shape(&type_def.shape, type_def);
     format!(
         "export const {name} = {schema}\nexport type {name} = typeof {name}.Type\nexport type {name}Encoded = typeof {name}.Encoded\n",
         name = type_def.ts_name,
     )
+}
+
+fn collect_endpoint_namespaces(contract: &ApiContract) -> BTreeSet<String> {
+    contract.endpoints.iter().map(endpoint_namespace).collect()
+}
+
+fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        collect_response_type_imports(&endpoint.response, &mut imports);
+    }
+    imports
+}
+
+fn render_service_interface(contract: &ApiContract) -> String {
+    let mut output = "  export interface Service {\n".to_owned();
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        output.push_str("    readonly ");
+        output.push_str(&namespace);
+        output.push_str(": {\n");
+        for endpoint in endpoints {
+            output.push_str(&render_service_method(endpoint));
+        }
+        output.push_str("    }\n");
+    }
+
+    output.push_str("  }\n");
+    output
+}
+
+fn render_service_method(endpoint: &Endpoint) -> String {
+    format!(
+        "      readonly {function_name}: (args: {namespace}.{args_name}) => Effect.Effect<{success}, {error}, never>\n",
+        function_name = endpoint_function_name(endpoint),
+        namespace = endpoint_namespace(endpoint),
+        args_name = endpoint_args_name(endpoint),
+        success = render_response_type(&endpoint.response),
+        error = render_endpoint_error_type(endpoint),
+    )
+}
+
+fn group_endpoints_by_namespace(contract: &ApiContract) -> Vec<(String, Vec<&Endpoint>)> {
+    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        endpoint_namespace(left)
+            .cmp(&endpoint_namespace(right))
+            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let mut grouped = Vec::<(String, Vec<&Endpoint>)>::new();
+    for endpoint in endpoints {
+        let namespace = endpoint_namespace(endpoint);
+        if grouped.last().map(|(name, _)| name.as_str()) != Some(namespace.as_str()) {
+            grouped.push((namespace, Vec::new()));
+        }
+        grouped
+            .last_mut()
+            .expect("namespace group exists")
+            .1
+            .push(endpoint);
+    }
+
+    grouped
 }
 
 fn collect_endpoint_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
@@ -1055,6 +1193,58 @@ export type UserEncoded = typeof User.Encoded
         assert!(rendered
             .contains("  export interface CreateUserArgs {\n    readonly body: CreateUser;\n  }"));
         assert!(rendered.contains("): Effect.Effect<void, ApiClientError, ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_server_api_service_and_layers() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_user"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_user".to_owned(),
+                ],
+                rust_name: "get_user".to_owned(),
+                ts_path: vec!["users".to_owned(), "getUser".to_owned()],
+                route: RoutePattern("/users/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                    query_params: Vec::new(),
+                    body: None,
+                },
+                response: ResponseShape::Json(type_ref("User")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["GetUserError"]),
+                    name: "GetUserError".to_owned(),
+                }],
+                source: source(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains("import { Context, Layer, Effect } from \"effect\""));
+        assert!(rendered.contains("import type { users } from \"./endpoints\""));
+        assert!(rendered.contains("import type { User } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains(
+            "export class ServerApi extends Context.Tag(\"@workspace/server-api::ServerApi\")<ServerApi, ServerApi.Service>() {}"
+        ));
+        assert!(rendered.contains(
+            "      readonly getUser: (args: users.GetUserArgs) => Effect.Effect<User, ApiClientError | GetUserError, never>"
+        ));
+        assert!(rendered.contains(
+            "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi, never, never> =>"
+        ));
+        assert!(rendered.contains(
+            "  export const mock = (service: Service): Layer.Layer<ServerApi, never, never> =>"
+        ));
     }
 
     fn simple_type(name: &str) -> TypeDef {
