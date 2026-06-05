@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 api-ir = { path = "../api-ir" }
 
+[dev-dependencies]
+api-test-fixtures = { path = "../api-test-fixtures" }
+
 [lints]
 workspace = true
-

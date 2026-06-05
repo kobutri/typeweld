@@ -1795,6 +1795,92 @@ export * from "./layer"
         );
     }
 
+    #[test]
+    fn fixture_generated_endpoints_snapshot_is_deterministic() {
+        let contract = api_test_fixtures::basic_contract();
+        let package = render_generated_package(&contract, Path::new("target"));
+        let endpoints = package
+            .files
+            .iter()
+            .find(|file| file.path == "endpoints.ts")
+            .expect("endpoints file");
+
+        assert_eq!(
+            package
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "package.json",
+                "index.ts",
+                "schemas.ts",
+                "errors.ts",
+                "endpoints.ts",
+                "layer.ts",
+                "tsconfig.paths.json"
+            ]
+        );
+        assert_eq!(
+            endpoints.contents,
+            r#"// Generated API package for @workspace/server-api
+import { Effect, Stream } from "effect"
+import { ServerApi } from "./layer"
+import type { CreateUserRequest, User, UserEvent } from "./schemas"
+import type { ApiClientError, GetUserError } from "./errors"
+
+export namespace events {
+  export interface WatchUsersArgs {}
+
+  export const watchUsersRoute = {
+    method: "GET",
+    path: "/users/events",
+    transport: "ServerSentEvents",
+  } as const
+
+  export const watchUsers = (
+    args: WatchUsersArgs
+  ): Stream.Stream<UserEvent, ApiClientError | GetUserError, ServerApi> =>
+    ServerApi.use((api) => api.events.watchUsers(args))
+
+}
+
+export namespace users {
+  export interface CreateUserArgs {
+    readonly body: CreateUserRequest;
+  }
+
+  export const createUserRoute = {
+    method: "POST",
+    path: "/users",
+    transport: "UnaryHttp",
+  } as const
+
+  export const createUser = (
+    args: CreateUserArgs
+  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>
+    ServerApi.use((api) => api.users.createUser(args))
+
+  export interface GetUserArgs {
+    readonly id: number;
+  }
+
+  export const getUserRoute = {
+    method: "GET",
+    path: "/users/{id}",
+    transport: "UnaryHttp",
+  } as const
+
+  export const getUser = (
+    args: GetUserArgs
+  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>
+    ServerApi.use((api) => api.users.getUser(args))
+
+}
+"#
+        );
+    }
+
     fn simple_type(name: &str) -> TypeDef {
         TypeDef {
             id: symbol("type", &[name]),

@@ -8,6 +8,8 @@ version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+api-ir = { path = "../api-ir" }
+
 [lints]
 workspace = true
-

@@ -2391,6 +2391,80 @@ mod tests {
         assert!(!off_output.contains("GET /unused"));
     }
 
+    #[test]
+    fn fixture_symbol_graph_drives_definition_and_hover_transcript() {
+        let root = test_root("fixture-transcript");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("app/src")).expect("create ts dir");
+        fs::create_dir_all(root.join("crates/server/src")).expect("create rust dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            r#"{"rustAnalyzer":{"command":""},"typescript":{"command":""}}"#,
+        )
+        .expect("write config");
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            api_test_fixtures::basic_symbol_graph_json(),
+        )
+        .expect("write symbol graph");
+
+        let ts_uri = path_to_file_uri(&root.join("app/src/client.ts"));
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 4, "character": 16 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 4, "character": 16 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("crates/server/src/users.rs"));
+        assert!(output.contains("\"line\":17"));
+        assert!(output.contains("\"character\":13"));
+        assert!(output.contains("\"id\":3"));
+        assert!(output.contains("**API endpoint** `fixture:endpoint:getUser`"));
+        assert!(output.contains("Route: `GET /users/{id}`"));
+        assert!(output.contains("TypeScript: `users.getUser`"));
+    }
+
     fn framed(value: &Value) -> String {
         let body = serde_json::to_string(value).expect("serialize message");
         format!("Content-Length: {}\r\n\r\n{body}", body.len())

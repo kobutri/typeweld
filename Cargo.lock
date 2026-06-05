@@ -50,6 +50,7 @@ name = "api-gen-effect-v4"
 version = "0.0.0"
 dependencies = [
  "api-ir",
+ "api-test-fixtures",
 ]
 
 [[package]]
@@ -64,6 +65,7 @@ dependencies = [
 name = "api-ls"
 version = "0.0.0"
 dependencies = [
+ "api-test-fixtures",
  "lsp-types",
  "serde",
  "serde_json",
@@ -83,6 +85,9 @@ dependencies = [
 [[package]]
 name = "api-test-fixtures"
 version = "0.0.0"
+dependencies = [
+ "api-ir",
+]
 
 [[package]]
 name = "arrayvec"

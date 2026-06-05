@@ -2177,7 +2177,7 @@ Can begin after generated endpoint accessors and symbol graph exist.
 
 Continuous.
 
-- T-032
+- T-032 [done]
 - T-033
 - T-034
 
