@@ -1462,7 +1462,7 @@ Acceptance criteria:
 - all placeholder npm packages typecheck;
 - CI runs the same commands as local development.
 
-### T-002 — Define `api-ir` core data model
+### T-002 — Define `api-ir` core data model [done]
 
 Goal: create serializable IR structs/enums.
 

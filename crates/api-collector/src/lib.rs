@@ -6,5 +6,6 @@ use api_ir::ApiContract;
 pub fn collect_empty_contract(package_name: impl Into<String>) -> ApiContract {
     ApiContract {
         package_name: package_name.into(),
+        ..ApiContract::default()
     }
 }
