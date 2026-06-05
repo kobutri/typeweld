@@ -1,16 +1,22 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
     "paths": {
+      "@rust-ts-integration/effect-runtime": [
+        "../../../npm/effect-runtime/src/index.ts"
+      ],
       "@workspace/server-api": [
         "../../../target/api-contract/effect-v4/packages/_workspace_server-api/index.ts"
       ],
       "@workspace/server-api/*": [
         "../../../target/api-contract/effect-v4/packages/_workspace_server-api/*"
+      ],
+      "effect": [
+        "../../../npm/node_modules/effect/dist/index.d.ts"
       ]
     }
   },

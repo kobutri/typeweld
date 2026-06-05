@@ -451,10 +451,10 @@ fn render_fetch_service_method(endpoint: &Endpoint) -> String {
     let success_decoder = render_success_decoder(&endpoint.response, helper);
     let error_decoder = render_domain_error_decoder(endpoint, helper);
     let success = render_response_type(&endpoint.response);
-    let error = render_endpoint_error_type(endpoint);
+    let domain_error = render_endpoint_domain_error_type(endpoint);
 
     format!(
-        "        {function_name}: {helper}<{namespace}.{args_name}, {success}, {error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
+        "        {function_name}: {helper}<{namespace}.{args_name}, {success}, {domain_error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
         method = ts_string(endpoint.method.as_str()),
         encoder = render_request_encoder(&endpoint.request, &format!("{namespace}.{args_name}")),
     )
@@ -633,15 +633,26 @@ fn render_endpoint_return_type(endpoint: &Endpoint, requirements: &str) -> Strin
 }
 
 fn render_endpoint_error_type(endpoint: &Endpoint) -> String {
+    let domain_error = render_endpoint_domain_error_type(endpoint);
+    if domain_error == "never" {
+        return "ApiClientError".to_owned();
+    }
+    format!("ApiClientError | {domain_error}")
+}
+
+fn render_endpoint_domain_error_type(endpoint: &Endpoint) -> String {
     let mut errors = endpoint
         .errors
         .iter()
         .map(|error| error.name.clone())
         .collect::<Vec<_>>();
-    errors.push("ApiClientError".to_owned());
     errors.sort();
     errors.dedup();
-    errors.join(" | ")
+    if errors.is_empty() {
+        "never".to_owned()
+    } else {
+        errors.join(" | ")
+    }
 }
 
 fn render_ts_type_ref(type_ref: &TypeRef) -> String {
@@ -712,6 +723,7 @@ fn render_domain_error_decoder(endpoint: &Endpoint, helper: &str) -> String {
         return "() => undefined".to_owned();
     }
 
+    let domain_error = render_endpoint_domain_error_type(endpoint);
     let mut output = "(status, input) => {\n".to_owned();
     for error in &endpoint.errors {
         output.push_str("            const ");
@@ -728,7 +740,9 @@ fn render_domain_error_decoder(endpoint: &Endpoint, helper: &str) -> String {
         output.push_str(helper);
         output.push_str(".decode(input, ");
         output.push_str(&error.name);
-        output.push_str("Schema)\n");
+        output.push_str("Schema) as Effect.Effect<");
+        output.push_str(&domain_error);
+        output.push_str(", ApiClientError>\n");
         output.push_str("            }\n");
     }
     output.push_str("            return undefined\n");
@@ -1658,11 +1672,13 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> =>"
         ));
         assert!(rendered.contains(
-            "getUser: makeUnaryHttpClient<users.GetUserArgs, User, ApiClientError | GetUserError>(config,"
+            "getUser: makeUnaryHttpClient<users.GetUserArgs, User, GetUserError>(config,"
         ));
         assert!(
             rendered.contains("decodeSuccess: (input) => makeUnaryHttpClient.decode(input, User)")
         );
+        assert!(rendered
+            .contains("return makeUnaryHttpClient.decode(input, GetUserErrorSchema) as Effect.Effect<GetUserError, ApiClientError>"));
         assert!(rendered
             .contains("  export const mock = (service: Service): Layer.Layer<ServerApi> =>"));
     }
@@ -1704,7 +1720,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             "      readonly events: (args: events.EventsArgs) => Stream.Stream<UserEvent, ApiClientError | EventError, never>"
         ));
         assert!(rendered.contains(
-            "events: makeSseClient<events.EventsArgs, UserEvent, ApiClientError | EventError>(config,"
+            "events: makeSseClient<events.EventsArgs, UserEvent, EventError>(config,"
         ));
         assert!(
             rendered.contains("decodeSuccess: (input) => makeSseClient.decode(input, UserEvent)")

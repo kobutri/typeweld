@@ -28,6 +28,16 @@ examples/monorepo-basic/
 
 ## 1. Inspect the Rust Contract
 
+The fastest confidence check is the verification script:
+
+```sh
+./examples/monorepo-basic/verify.sh
+```
+
+It runs the full loop: compile the Rust example, write contract JSON, generate
+the hidden package, scan TypeScript usages, validate generated files, and
+typecheck the TypeScript app against the generated package.
+
 Run the example binary:
 
 ```sh
@@ -108,6 +118,18 @@ cargo run -p api-collector --bin api -- check \
 
 If generated files are missing or stale, the command tells the developer to run
 `api gen` again.
+
+## 8. Typecheck The TypeScript App
+
+After generation, the app should typecheck against the generated package:
+
+```sh
+npm --prefix examples/monorepo-basic/app run typecheck
+```
+
+The script uses the repository's existing TypeScript install under `npm/`.
+That keeps this example self-contained inside the repo instead of requiring a
+separate `npm install` in `examples/monorepo-basic/app`.
 
 ## What To Notice
 

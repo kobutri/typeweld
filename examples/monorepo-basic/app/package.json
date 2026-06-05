@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "../../../npm/node_modules/.bin/tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@rust-ts-integration/effect-runtime": "0.0.0",
