@@ -125,6 +125,12 @@ impl Endpoint {
     }
 
     #[must_use]
+    pub fn ts_path(mut self, ts_path: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.ts_path = ts_path.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
     pub fn request(mut self, request: RequestShape) -> Self {
         self.request = request;
         self

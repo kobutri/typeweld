@@ -1937,7 +1937,7 @@ Acceptance criteria:
 - TS endpoint hover shows route and Rust source;
 - Rust endpoint hover shows generated TS accessor and Effect signature.
 
-### T-026 — Implement Effect usage scanner
+### T-026 — Implement Effect usage scanner [done]
 
 Goal: classify TS endpoint usages.
 
@@ -2169,7 +2169,7 @@ Can begin early with mocked symbol graphs.
 
 Can begin after generated endpoint accessors and symbol graph exist.
 
-- T-026
+- T-026 [done]
 - T-027
 - T-031
 

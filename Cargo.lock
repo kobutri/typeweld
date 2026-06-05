@@ -26,6 +26,7 @@ dependencies = [
  "api-core",
  "api-ir",
  "cargo_metadata",
+ "serde",
  "serde_json",
 ]
 
