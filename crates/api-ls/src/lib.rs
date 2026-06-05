@@ -1,9 +1,11 @@
 //! Language server gateway for Rust API contracts and generated TypeScript.
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
 use lsp_types::{
@@ -117,11 +119,13 @@ struct LspMessage {
     id: Option<Value>,
     method: Option<String>,
     params: Value,
+    raw: Value,
 }
 
 struct LspServer<W> {
     writer: W,
     workspace: Option<WorkspaceConfig>,
+    rust_analyzer: Option<BackendProcess>,
     shutdown_requested: bool,
 }
 
@@ -130,6 +134,7 @@ impl<W: Write> LspServer<W> {
         Self {
             writer,
             workspace: None,
+            rust_analyzer: None,
             shutdown_requested: false,
         }
     }
@@ -158,21 +163,57 @@ impl<W: Write> LspServer<W> {
                 };
                 match initialize_workspace(&message.params) {
                     Ok(workspace) => {
+                        let backend_result =
+                            BackendProcess::start("rust-analyzer", &workspace.config.rust_analyzer)
+                                .and_then(|mut backend| {
+                                    backend.initialize(message.params.clone())?;
+                                    Ok(backend)
+                                });
                         self.workspace = Some(workspace);
+                        match backend_result {
+                            Ok(backend) => self.rust_analyzer = Some(backend),
+                            Err(error) => self.write_notification(
+                                "window/logMessage",
+                                json!({
+                                    "type": 3,
+                                    "message": format!("api-ls rust-analyzer backend unavailable: {error}"),
+                                }),
+                            )?,
+                        }
                         self.write_response(id, initialize_result())?;
                     }
                     Err(error) => self.write_error(id, -32_602, error)?,
                 }
             }
+            "initialized" => {
+                self.forward_notification_to_rust_analyzer(method, message.params)?;
+            }
             "shutdown" => {
                 if let Some(id) = message.id {
                     self.shutdown_requested = true;
+                    if let Some(backend) = &mut self.rust_analyzer {
+                        backend.shutdown();
+                    }
                     self.write_response(id, Value::Null)?;
                 }
             }
-            "exit" => return Ok(self.shutdown_requested),
+            "exit" => {
+                if let Some(backend) = &mut self.rust_analyzer {
+                    backend.exit();
+                }
+                return Ok(self.shutdown_requested);
+            }
             _ => {
-                if let Some(id) = message.id {
+                if is_rust_message(method, &message.params) {
+                    match message.id {
+                        Some(id) => {
+                            self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                        }
+                        None => {
+                            self.forward_notification_to_rust_analyzer(method, message.params)?;
+                        }
+                    }
+                } else if let Some(id) = message.id {
                     self.write_error(
                         id,
                         -32_601,
@@ -196,6 +237,17 @@ impl<W: Write> LspServer<W> {
         )
     }
 
+    fn write_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
+        write_framed(
+            &mut self.writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }),
+        )
+    }
+
     fn write_error(&mut self, id: Value, code: i64, message: String) -> Result<(), String> {
         write_framed(
             &mut self.writer,
@@ -208,6 +260,161 @@ impl<W: Write> LspServer<W> {
                 },
             }),
         )
+    }
+
+    fn forward_request_to_rust_analyzer(
+        &mut self,
+        method: &str,
+        params: Value,
+        id: Value,
+    ) -> Result<(), String> {
+        match &mut self.rust_analyzer {
+            Some(backend) => backend.forward_request(method, params, id, &mut self.writer),
+            None => self.write_error(
+                id,
+                -32_003,
+                "rust-analyzer backend is not available".to_owned(),
+            ),
+        }
+    }
+
+    fn forward_notification_to_rust_analyzer(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        if let Some(backend) = &mut self.rust_analyzer {
+            backend.forward_notification(method, params)?;
+        }
+        Ok(())
+    }
+}
+
+struct BackendProcess {
+    name: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl BackendProcess {
+    fn start(name: &str, command: &BackendCommand) -> Result<Self, String> {
+        if command.command.is_empty() {
+            return Err("backend command is empty".to_owned());
+        }
+
+        let mut child = Command::new(&command.command)
+            .args(&command.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("failed to start `{}`: {error}", command.command))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("{name} stdin was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("{name} stdout was not piped"))?;
+
+        Ok(Self {
+            name: name.to_owned(),
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+        })
+    }
+
+    fn initialize(&mut self, params: Value) -> Result<(), String> {
+        let id = self.allocate_id();
+        self.write_request(id, "initialize", params)?;
+        self.read_until_response(id).map(|_| ())
+    }
+
+    fn forward_request(
+        &mut self,
+        method: &str,
+        params: Value,
+        client_id: Value,
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
+        let backend_id = self.allocate_id();
+        self.write_request(backend_id, method, params)?;
+
+        loop {
+            let message = read_message(&mut self.stdout)?
+                .ok_or_else(|| format!("{} exited while handling `{method}`", self.name))?;
+            if message.id.as_ref() == Some(&json!(backend_id)) {
+                let mut raw = message.raw;
+                raw["id"] = client_id;
+                write_framed(writer, &raw)?;
+                return Ok(());
+            }
+            if message.id.is_none() {
+                write_framed(writer, &message.raw)?;
+            }
+        }
+    }
+
+    fn forward_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
+        write_framed(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }),
+        )
+    }
+
+    fn shutdown(&mut self) {
+        let id = self.allocate_id();
+        if self.write_request(id, "shutdown", Value::Null).is_ok() {
+            let _ = self.read_until_response(id);
+        }
+    }
+
+    fn exit(&mut self) {
+        let _ = self.forward_notification("exit", Value::Null);
+    }
+
+    fn write_request(&mut self, id: u64, method: &str, params: Value) -> Result<(), String> {
+        write_framed(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+        )
+    }
+
+    fn read_until_response(&mut self, id: u64) -> Result<Value, String> {
+        loop {
+            let message = read_message(&mut self.stdout)?
+                .ok_or_else(|| format!("{} exited before responding", self.name))?;
+            if message.id.as_ref() == Some(&json!(id)) {
+                return Ok(message.raw);
+            }
+        }
+    }
+
+    const fn allocate_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+impl Drop for BackendProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -315,6 +522,39 @@ fn absolutize_from(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn is_rust_message(method: &str, params: &Value) -> bool {
+    method.starts_with("rust-analyzer/")
+        || document_uris(params).iter().any(|uri| {
+            uri.strip_prefix("file://")
+                .is_some_and(|path| path.ends_with(".rs"))
+        })
+}
+
+fn document_uris(value: &Value) -> BTreeSet<String> {
+    let mut uris = BTreeSet::new();
+    collect_document_uris(value, &mut uris);
+    uris
+}
+
+fn collect_document_uris(value: &Value, uris: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(uri) = object.get("uri").and_then(Value::as_str) {
+                uris.insert(uri.to_owned());
+            }
+            for value in object.values() {
+                collect_document_uris(value, uris);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_document_uris(value, uris);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     let path = uri.strip_prefix("file://")?;
     Some(PathBuf::from(percent_decode(path)))
@@ -389,6 +629,7 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<LspMessage>, String>
             .and_then(Value::as_str)
             .map(str::to_owned),
         params: value.get("params").cloned().unwrap_or(Value::Null),
+        raw: value,
     }))
 }
 
@@ -510,6 +751,77 @@ mod tests {
         assert!(output.contains(".api-ls.json"));
     }
 
+    #[test]
+    fn proxies_rust_requests_and_diagnostics_through_backend() {
+        let root = test_root("rust-proxy");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let backend = root.join("mock_backend.py");
+        fs::write(&backend, MOCK_BACKEND).expect("write backend");
+        fs::write(
+            root.join(".api-ls.json"),
+            format!(
+                "{{\"rustAnalyzer\":{{\"command\":\"python3\",\"args\":[{}]}}}}",
+                serde_json::to_string(&backend.to_string_lossy()).expect("serialize path")
+            ),
+        )
+        .expect("write config");
+        let rust_uri = format!("{}/src/lib.rs", path_to_file_uri(&root));
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": rust_uri,
+                        "languageId": "rust",
+                        "version": 1,
+                        "text": "fn main() {}"
+                    }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 0, "character": 3 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains("\"method\":\"textDocument/publishDiagnostics\""));
+        assert!(output.contains("\"message\":\"mock diagnostic\""));
+        assert!(output.contains("\"uri\":\"file:///mock-definition.rs\""));
+    }
+
     fn framed(value: &Value) -> String {
         let body = serde_json::to_string(value).expect("serialize message");
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -526,4 +838,63 @@ mod tests {
         let path = path.to_string_lossy();
         format!("file://{path}")
     }
+
+    const MOCK_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "textDocument/definition":
+        write_message({
+            "jsonrpc":"2.0",
+            "method":"textDocument/publishDiagnostics",
+            "params":{
+                "uri":message["params"]["textDocument"]["uri"],
+                "diagnostics":[{
+                    "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
+                    "severity":2,
+                    "source":"mock",
+                    "message":"mock diagnostic"
+                }]
+            }
+        })
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "uri":"file:///mock-definition.rs",
+                "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+            }]
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
 }

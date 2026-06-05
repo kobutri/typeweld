@@ -1841,7 +1841,7 @@ Acceptance criteria:
 - `initialize` and `shutdown` work;
 - config errors are reported clearly.
 
-### T-021 — Proxy rust-analyzer through gateway
+### T-021 — Proxy rust-analyzer through gateway [done]
 
 Goal: preserve Rust language features.
 
