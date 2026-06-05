@@ -1566,7 +1566,7 @@ Acceptance criteria:
 - field-level source links survive rename lowering;
 - snapshot tests cover common rename rules.
 
-### T-007 — Implement `#[derive(ApiError)]`
+### T-007 — Implement `#[derive(ApiError)]` [done]
 
 Goal: define public typed endpoint errors.
 

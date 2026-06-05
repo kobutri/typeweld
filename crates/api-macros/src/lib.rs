@@ -13,6 +13,15 @@ pub fn derive_api_type(input: TokenStream) -> TokenStream {
         .into()
 }
 
+#[proc_macro_derive(ApiError, attributes(api_error, serde))]
+pub fn derive_api_error(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    expand_api_error(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 #[proc_macro_attribute]
 pub fn api(_args: TokenStream, input: TokenStream) -> TokenStream {
     input
@@ -158,6 +167,148 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     })
 }
 
+fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = input.ident;
+    let rust_name = ident.to_string();
+    let container_serde = SerdeAttrs::from_attrs(&input.attrs)?;
+
+    let Data::Enum(data) = input.data else {
+        return Err(syn::Error::new_spanned(
+            ident,
+            "ApiError can only be derived for enums",
+        ));
+    };
+
+    let mut api_type_variants = Vec::new();
+    let mut error_variants = Vec::new();
+
+    for variant in &data.variants {
+        let variant_ident = &variant.ident;
+        let variant_name = variant_ident.to_string();
+        let status = ErrorAttrs::from_attrs(&variant.attrs, variant)?.status;
+        let variant_serde = SerdeAttrs::from_attrs(&variant.attrs)?;
+        let tag = variant_serde
+            .rename
+            .unwrap_or_else(|| apply_rename_rule(&variant_name, container_serde.rename_all));
+        let fields = match &variant.fields {
+            Fields::Unit => Vec::new(),
+            Fields::Named(fields) => named_field_defs(
+                &format!("{rust_name}::{variant_name}"),
+                fields.named.iter(),
+                None,
+            )?,
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new_spanned(
+                    variant,
+                    "ApiError variants must be unit or named-field variants",
+                ));
+            }
+        };
+
+        api_type_variants.push(quote! {
+            ::api_core::ir::EnumVariant {
+                id: {
+                    let owner = <Self as ::api_core::ApiType>::rust_path().join("::");
+                    ::api_core::ir::SymbolId::from_parts("enum_variant", &[&owner, #variant_name])
+                },
+                rust_name: #variant_name.to_owned(),
+                wire_name: #tag.to_owned(),
+                fields: vec![#(#fields),*],
+                source: ::api_core::ir::SourceRange {
+                    file: file!().to_owned(),
+                    start_line: line!(),
+                    start_column: column!(),
+                    end_line: line!(),
+                    end_column: column!(),
+                },
+            }
+        });
+
+        error_variants.push(quote! {
+            ::api_core::ir::ErrorVariant {
+                id: {
+                    let owner = <Self as ::api_core::ApiType>::rust_path().join("::");
+                    ::api_core::ir::SymbolId::from_parts("error_variant", &[&owner, #variant_name])
+                },
+                rust_name: #variant_name.to_owned(),
+                tag: #tag.to_owned(),
+                status: ::api_core::ir::HttpStatus(#status),
+                fields: vec![#(#fields),*],
+                source: ::api_core::ir::SourceRange {
+                    file: file!().to_owned(),
+                    start_line: line!(),
+                    start_column: column!(),
+                    end_line: line!(),
+                    end_column: column!(),
+                },
+            }
+        });
+    }
+
+    Ok(quote! {
+        impl ::api_core::ApiType for #ident {
+            const RUST_NAME: &'static str = #rust_name;
+
+            fn rust_path() -> Vec<String> {
+                let mut path = module_path!()
+                    .split("::")
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                path.push(Self::RUST_NAME.to_owned());
+                path
+            }
+
+            fn type_ref() -> ::api_core::ir::TypeRef {
+                let rust_path = <Self as ::api_core::ApiType>::rust_path();
+                let parts = rust_path.iter().map(String::as_str).collect::<Vec<_>>();
+
+                ::api_core::ir::TypeRef {
+                    id: ::api_core::ir::SymbolId::from_parts("type", &parts),
+                    name: Self::TS_NAME.to_owned(),
+                }
+            }
+
+            fn type_def() -> ::api_core::ir::TypeDef {
+                ::api_core::ir::TypeDef {
+                    id: <Self as ::api_core::ApiType>::type_ref().id,
+                    rust_path: <Self as ::api_core::ApiType>::rust_path(),
+                    rust_name: Self::RUST_NAME.to_owned(),
+                    ts_name: Self::TS_NAME.to_owned(),
+                    shape: ::api_core::ir::TypeShape::Enum(::api_core::ir::EnumShape {
+                        variants: vec![#(#api_type_variants),*],
+                    }),
+                    source: ::api_core::ir::SourceRange {
+                        file: file!().to_owned(),
+                        start_line: line!(),
+                        start_column: column!(),
+                        end_line: line!(),
+                        end_column: column!(),
+                    },
+                }
+            }
+        }
+
+        impl ::api_core::ApiError for #ident {
+            fn error_def() -> ::api_core::ir::ErrorDef {
+                ::api_core::ir::ErrorDef {
+                    id: <Self as ::api_core::ApiError>::error_ref().id,
+                    rust_path: <Self as ::api_core::ApiType>::rust_path(),
+                    rust_name: Self::RUST_NAME.to_owned(),
+                    ts_name: Self::TS_NAME.to_owned(),
+                    variants: vec![#(#error_variants),*],
+                    source: ::api_core::ir::SourceRange {
+                        file: file!().to_owned(),
+                        start_line: line!(),
+                        start_column: column!(),
+                        end_line: line!(),
+                        end_column: column!(),
+                    },
+                }
+            }
+        }
+    })
+}
+
 fn named_field_defs<'a>(
     owner_name: &str,
     fields: impl Iterator<Item = &'a syn::Field>,
@@ -253,6 +404,48 @@ struct SerdeAttrs {
     rename: Option<String>,
     rename_all: Option<RenameRule>,
     skip_serializing_if_option_none: bool,
+}
+
+#[derive(Default)]
+struct ErrorAttrs {
+    status: Option<u16>,
+}
+
+impl ErrorAttrs {
+    fn from_attrs(attrs: &[Attribute], variant: &syn::Variant) -> syn::Result<Self> {
+        let mut error = Self::default();
+
+        for attr in attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("api_error"))
+        {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("status") {
+                    let value: syn::LitInt = meta.value()?.parse()?;
+                    let status = value.base10_parse::<u16>()?;
+                    if !(400..=599).contains(&status) {
+                        return Err(syn::Error::new_spanned(
+                            value,
+                            "ApiError statuses must be in the 400..=599 range",
+                        ));
+                    }
+                    error.status = Some(status);
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            })?;
+        }
+
+        if error.status.is_none() {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "ApiError variants require #[api_error(status = ...)]",
+            ));
+        }
+
+        Ok(error)
+    }
 }
 
 impl SerdeAttrs {

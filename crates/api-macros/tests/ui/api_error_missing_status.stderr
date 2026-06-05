@@ -1,0 +1,5 @@
+error: ApiError variants require #[api_error(status = ...)]
+ --> tests/ui/api_error_missing_status.rs:3:5
+  |
+3 |     NotFound,
+  |     ^^^^^^^^

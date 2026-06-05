@@ -1,0 +1,5 @@
+error: ApiError statuses must be in the 400..=599 range
+ --> tests/ui/api_error_invalid_status.rs:3:26
+  |
+3 |     #[api_error(status = 200)]
+  |                          ^^^
