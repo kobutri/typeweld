@@ -431,6 +431,12 @@ dependencies = [
 [[package]]
 name = "monorepo-basic"
 version = "0.0.0"
+dependencies = [
+ "api-collector",
+ "api-core",
+ "api-macros",
+ "serde",
+]
 
 [[package]]
 name = "num-traits"

@@ -7,7 +7,10 @@ version.workspace = true
 publish = false
 
 [dependencies]
+api-collector = { path = "../../crates/api-collector" }
+api-core = { path = "../../crates/api-core" }
+api-macros = { path = "../../crates/api-macros" }
+serde = { version = "1.0", features = ["derive"] }
 
 [lints]
 workspace = true
-

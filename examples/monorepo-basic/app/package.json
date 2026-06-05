@@ -1,0 +1,15 @@
+{
+  "name": "monorepo-basic-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@rust-ts-integration/effect-runtime": "0.0.0",
+    "effect": "^4.0.0-beta.78"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
