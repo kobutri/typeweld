@@ -182,7 +182,7 @@ Each task has independent acceptance criteria. Tracks can be implemented increme
 
 ## Track A: compiler-backed contract collection
 
-### A1. Add transitive registration to `ApiType` and `ApiError`
+### A1. Add transitive registration to `ApiType` and `ApiError` [done]
 
 Goal: exported endpoints automatically register every reachable request, response, stream item, and error payload type.
 

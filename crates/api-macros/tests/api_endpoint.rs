@@ -61,3 +61,19 @@ fn api_endpoint_macro_emits_sse_metadata() {
     };
     assert_eq!(item.name, "User");
 }
+
+#[test]
+fn api_endpoint_macro_registers_reachable_types_and_errors() {
+    let mut registry = api_core::ContractRegistry::new();
+
+    __api_register_endpoint_get_user(&mut registry);
+    __api_register_endpoint_get_user(&mut registry);
+
+    let types = registry.type_defs();
+    let errors = registry.error_defs();
+
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].rust_name, "User");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].rust_name, "GetUserError");
+}

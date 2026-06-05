@@ -9,3 +9,22 @@ help: the trait `ApiError` is not implemented for `NotApiError`
    |
  8 | struct NotApiError;
    | ^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `NotApiError: ApiError` is not satisfied
+  --> tests/ui/api_endpoint_invalid_error.rs:11:43
+   |
+10 | #[api_macros::api(method = "GET", path = "/users")]
+   | --------------------------------------------------- required by a bound introduced by this call
+11 | async fn get_user() -> Result<Json<User>, NotApiError> {
+   |                                           ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `ApiError` is not implemented for `NotApiError`
+  --> tests/ui/api_endpoint_invalid_error.rs:8:1
+   |
+ 8 | struct NotApiError;
+   | ^^^^^^^^^^^^^^^^^^
+note: required by a bound in `ContractRegistry::register_error`
+  --> $WORKSPACE/crates/api-core/src/lib.rs
+   |
+   |     pub fn register_error<E: ApiError>(&mut self) {
+   |                              ^^^^^^^^ required by this bound in `ContractRegistry::register_error`

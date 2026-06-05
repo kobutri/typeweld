@@ -11,7 +11,7 @@
 //! shows the TypeScript half that imports the generated package.
 
 use api_collector::{collect_contract, contract_to_json, CollectorInput};
-use api_core::{api_module, ApiError, ApiModule, ApiType, Body, Json, Path};
+use api_core::{api_module, ApiModule, ApiType, Body, Json, Path};
 use serde::{Deserialize, Serialize};
 
 /// This is a DTO: a data type that crosses the Rust/TypeScript boundary.
@@ -120,10 +120,13 @@ fn create_user_endpoint() -> api_core::Endpoint {
 /// endpoint analysis. This avoids surprising "everything public is an API"
 /// behavior in larger workspaces.
 fn api() -> ApiModule {
-    api_module!(
+    let mut module = api_module!(
         name = "server",
         endpoints = [get_user_endpoint, create_user_endpoint]
-    )
+    );
+    __api_register_endpoint_get_user(module.registry_mut());
+    __api_register_endpoint_create_user(module.registry_mut());
+    module
 }
 
 fn main() {
@@ -134,8 +137,8 @@ fn main() {
     let contract = collect_contract(CollectorInput {
         package_name: "@workspace/server-api".to_owned(),
         root_module: api(),
-        types: vec![User::type_def(), CreateUserRequest::type_def()],
-        errors: vec![UserError::error_def()],
+        types: Vec::new(),
+        errors: Vec::new(),
     });
 
     eprintln!("Collected {} endpoint(s)", contract.endpoints.len());

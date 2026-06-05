@@ -1,5 +1,11 @@
 use api_core::{ApiError, ApiType};
 
+#[derive(api_macros::ApiType)]
+#[allow(dead_code)]
+struct ValidationIssue {
+    code: String,
+}
+
 #[derive(api_macros::ApiError)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -10,7 +16,7 @@ enum CreateUserError {
     Conflict { field_name: String },
     #[serde(rename = "validationFailed")]
     #[api_error(status = 422)]
-    Validation { message: String },
+    Validation { issue: ValidationIssue },
 }
 
 #[test]
@@ -43,4 +49,20 @@ fn api_error_derive_emits_payload_fields_and_type_metadata() {
     assert_eq!(error.variants[1].fields[0].type_ref.name, "String");
     assert!(CreateUserError::type_def().source.start_line > 0);
     assert_eq!(CreateUserError::error_ref().name, "CreateUserError");
+}
+
+#[test]
+fn api_error_registers_error_and_payload_types() {
+    let mut registry = api_core::ContractRegistry::new();
+
+    CreateUserError::register_error(&mut registry);
+    CreateUserError::register_error(&mut registry);
+
+    let errors = registry.error_defs();
+    let types = registry.type_defs();
+
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].rust_name, "CreateUserError");
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].rust_name, "ValidationIssue");
 }

@@ -93,14 +93,23 @@ pub struct EffectUsageIndex {
 
 #[must_use]
 pub fn collect_contract(input: CollectorInput) -> ApiContract {
-    let endpoints = input.root_module.endpoint_irs();
-    let type_index = input
-        .types
+    let CollectorInput {
+        package_name,
+        root_module,
+        types,
+        errors,
+    } = input;
+
+    let endpoints = root_module.endpoint_irs();
+    let mut registered_types = root_module.registry().type_defs();
+    registered_types.extend(types);
+    let type_index = registered_types
         .into_iter()
         .map(|type_def| (type_def.id.clone(), type_def))
         .collect::<BTreeMap<_, _>>();
-    let error_index = input
-        .errors
+    let mut registered_errors = root_module.registry().error_defs();
+    registered_errors.extend(errors);
+    let error_index = registered_errors
         .into_iter()
         .map(|error_def| (error_def.id.clone(), error_def))
         .collect::<BTreeMap<_, _>>();
@@ -164,7 +173,7 @@ pub fn collect_contract(input: CollectorInput) -> ApiContract {
     }
 
     ApiContract {
-        package_name: input.package_name,
+        package_name,
         endpoints,
         types,
         errors,
@@ -597,7 +606,7 @@ const fn is_identifier_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use api_core::{field, ir::*, ApiType, Endpoint};
+    use api_core::{field, ir::*, ApiType, ContractRegistry, Endpoint};
 
     use super::*;
 
@@ -645,6 +654,29 @@ mod tests {
         });
 
         assert_eq!(contract.endpoints.len(), 1);
+        assert_eq!(contract.types.len(), 1);
+        assert_eq!(contract.types[0].rust_name, "User");
+    }
+
+    #[test]
+    fn collector_uses_types_registered_on_module() {
+        let mut registry = ContractRegistry::new();
+        registry.register_type::<User>();
+        let module = ApiModule::new("users")
+            .with_endpoint(
+                Endpoint::new(HttpMethod::Get, "/users/{id}")
+                    .named(["crate", "get_user"])
+                    .response(ResponseShape::Json(User::type_ref())),
+            )
+            .with_registry(registry);
+
+        let contract = collect_contract(CollectorInput {
+            package_name: "@workspace/server-api".to_owned(),
+            root_module: module,
+            types: Vec::new(),
+            errors: Vec::new(),
+        });
+
         assert_eq!(contract.types.len(), 1);
         assert_eq!(contract.types[0].rust_name, "User");
     }

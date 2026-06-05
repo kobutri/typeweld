@@ -33,6 +33,13 @@ struct Profile {
 }
 
 #[derive(api_macros::ApiType)]
+#[allow(dead_code)]
+struct Team {
+    members: Vec<User>,
+    owner: Option<Profile>,
+}
+
+#[derive(api_macros::ApiType)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 enum RenamedEvent {
@@ -117,4 +124,20 @@ fn serde_rename_lowering_updates_variant_tags() {
 
     assert_eq!(shape.variants[0].wire_name, "user_created");
     assert_eq!(shape.variants[1].wire_name, "userRenamed");
+}
+
+#[test]
+fn derive_registers_nested_container_types_once() {
+    let mut registry = api_core::TypeRegistry::new();
+
+    Team::register_types(&mut registry);
+    Team::register_types(&mut registry);
+
+    let rust_names = registry
+        .type_defs()
+        .into_iter()
+        .map(|type_def| type_def.rust_name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rust_names, ["Team", "User", "Profile"]);
 }

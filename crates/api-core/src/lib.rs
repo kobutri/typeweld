@@ -50,6 +50,15 @@ pub trait ApiType {
             source: SourceRange::default(),
         }
     }
+
+    /// Register this type and every API type reachable from its shape.
+    ///
+    /// Primitive implementations intentionally override this as a no-op because
+    /// primitive refs are intrinsic to the IR and do not need exported type
+    /// definitions.
+    fn register_types(registry: &mut TypeRegistry) {
+        registry.insert(Self::type_def());
+    }
 }
 
 /// Declared, typed API error.
@@ -67,6 +76,188 @@ pub trait ApiError: ApiType {
 
     /// Full error definition when this error is exported in a contract.
     fn error_def() -> ErrorDef;
+
+    /// Register this error and every API type reachable from its payloads.
+    fn register_error(registry: &mut ContractRegistry) {
+        registry.insert_error(Self::error_def());
+    }
+}
+
+/// Ordered registry of exported API type definitions.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TypeRegistry {
+    order: Vec<SymbolId>,
+    types: BTreeMap<SymbolId, TypeDef>,
+}
+
+impl TypeRegistry {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            order: Vec::new(),
+            types: BTreeMap::new(),
+        }
+    }
+
+    /// Inserts a definition once, preserving first-registration order.
+    ///
+    /// Returns `true` when the definition was newly inserted. Recursive trait
+    /// implementations use that signal to avoid walking cyclic graphs forever.
+    pub fn insert(&mut self, type_def: TypeDef) -> bool {
+        let id = type_def.id.clone();
+        if self.types.contains_key(&id) {
+            return false;
+        }
+
+        self.order.push(id.clone());
+        self.types.insert(id, type_def);
+        true
+    }
+
+    pub fn register<T: ApiType>(&mut self) {
+        T::register_types(self);
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: &SymbolId) -> bool {
+        self.types.contains_key(id)
+    }
+
+    #[must_use]
+    pub fn type_defs(&self) -> Vec<TypeDef> {
+        self.order
+            .iter()
+            .filter_map(|id| self.types.get(id))
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn into_type_defs(self) -> Vec<TypeDef> {
+        let Self { order, mut types } = self;
+        order
+            .into_iter()
+            .filter_map(|id| types.remove(&id))
+            .collect()
+    }
+}
+
+/// Ordered registry of exported API error definitions.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ErrorRegistry {
+    order: Vec<SymbolId>,
+    errors: BTreeMap<SymbolId, ErrorDef>,
+}
+
+impl ErrorRegistry {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            order: Vec::new(),
+            errors: BTreeMap::new(),
+        }
+    }
+
+    /// Inserts an error definition once, preserving first-registration order.
+    pub fn insert(&mut self, error_def: ErrorDef) -> bool {
+        let id = error_def.id.clone();
+        if self.errors.contains_key(&id) {
+            return false;
+        }
+
+        self.order.push(id.clone());
+        self.errors.insert(id, error_def);
+        true
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: &SymbolId) -> bool {
+        self.errors.contains_key(id)
+    }
+
+    #[must_use]
+    pub fn error_defs(&self) -> Vec<ErrorDef> {
+        self.order
+            .iter()
+            .filter_map(|id| self.errors.get(id))
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn into_error_defs(self) -> Vec<ErrorDef> {
+        let Self { order, mut errors } = self;
+        order
+            .into_iter()
+            .filter_map(|id| errors.remove(&id))
+            .collect()
+    }
+}
+
+/// Combined registry used while collecting one API contract.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContractRegistry {
+    types: TypeRegistry,
+    errors: ErrorRegistry,
+}
+
+impl ContractRegistry {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            types: TypeRegistry::new(),
+            errors: ErrorRegistry::new(),
+        }
+    }
+
+    pub fn register_type<T: ApiType>(&mut self) {
+        T::register_types(&mut self.types);
+    }
+
+    pub fn register_error<E: ApiError>(&mut self) {
+        E::register_error(self);
+    }
+
+    pub fn insert_type(&mut self, type_def: TypeDef) -> bool {
+        self.types.insert(type_def)
+    }
+
+    pub fn insert_error(&mut self, error_def: ErrorDef) -> bool {
+        self.errors.insert(error_def)
+    }
+
+    #[must_use]
+    pub const fn types(&self) -> &TypeRegistry {
+        &self.types
+    }
+
+    #[must_use]
+    pub const fn errors(&self) -> &ErrorRegistry {
+        &self.errors
+    }
+
+    pub const fn types_mut(&mut self) -> &mut TypeRegistry {
+        &mut self.types
+    }
+
+    pub const fn errors_mut(&mut self) -> &mut ErrorRegistry {
+        &mut self.errors
+    }
+
+    #[must_use]
+    pub fn type_defs(&self) -> Vec<TypeDef> {
+        self.types.type_defs()
+    }
+
+    #[must_use]
+    pub fn error_defs(&self) -> Vec<ErrorDef> {
+        self.errors.error_defs()
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<TypeDef>, Vec<ErrorDef>) {
+        (self.types.into_type_defs(), self.errors.into_error_defs())
+    }
 }
 
 /// Framework-neutral endpoint descriptor.
@@ -212,6 +403,7 @@ pub struct Body<T>(pub T);
 pub struct ApiModule {
     pub name: String,
     pub endpoints: Vec<Endpoint>,
+    pub registry: ContractRegistry,
 }
 
 /// Reachability summary for exported endpoint collection.
@@ -227,6 +419,7 @@ impl ApiModule {
         Self {
             name: name.into(),
             endpoints: Vec::new(),
+            registry: ContractRegistry::new(),
         }
     }
 
@@ -234,6 +427,21 @@ impl ApiModule {
     pub fn with_endpoint(mut self, endpoint: Endpoint) -> Self {
         self.endpoints.push(endpoint);
         self
+    }
+
+    #[must_use]
+    pub fn with_registry(mut self, registry: ContractRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    #[must_use]
+    pub const fn registry(&self) -> &ContractRegistry {
+        &self.registry
+    }
+
+    pub const fn registry_mut(&mut self) -> &mut ContractRegistry {
+        &mut self.registry
     }
 
     #[must_use]
@@ -285,6 +493,10 @@ impl<T: ApiType> ApiType for Json<T> {
     fn type_def() -> TypeDef {
         T::type_def()
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for Created<T> {
@@ -302,6 +514,10 @@ impl<T: ApiType> ApiType for Created<T> {
     fn type_def() -> TypeDef {
         T::type_def()
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl ApiType for NoContent {
@@ -317,6 +533,8 @@ impl ApiType for NoContent {
             source: SourceRange::default(),
         }
     }
+
+    fn register_types(_registry: &mut TypeRegistry) {}
 }
 
 impl<T: ApiType> ApiType for Sse<T> {
@@ -333,6 +551,10 @@ impl<T: ApiType> ApiType for Sse<T> {
 
     fn type_def() -> TypeDef {
         T::type_def()
+    }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
     }
 }
 
@@ -351,6 +573,10 @@ impl<T: ApiType> ApiType for Path<T> {
     fn type_def() -> TypeDef {
         T::type_def()
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for Query<T> {
@@ -368,6 +594,10 @@ impl<T: ApiType> ApiType for Query<T> {
     fn type_def() -> TypeDef {
         T::type_def()
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for Body<T> {
@@ -384,6 +614,10 @@ impl<T: ApiType> ApiType for Body<T> {
 
     fn type_def() -> TypeDef {
         T::type_def()
+    }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
     }
 }
 
@@ -409,6 +643,8 @@ macro_rules! primitive_api_type {
                     source: SourceRange::default(),
                 }
             }
+
+            fn register_types(_registry: &mut TypeRegistry) {}
         }
     };
 }
@@ -445,6 +681,10 @@ impl ApiType for &str {
     fn type_def() -> TypeDef {
         <String as ApiType>::type_def()
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        <String as ApiType>::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for Option<T> {
@@ -472,6 +712,10 @@ impl<T: ApiType> ApiType for Option<T> {
             source: SourceRange::default(),
         }
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for Vec<T> {
@@ -494,6 +738,10 @@ impl<T: ApiType> ApiType for Vec<T> {
             shape: TypeShape::List(Box::new(T::type_ref())),
             source: SourceRange::default(),
         }
+    }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
     }
 }
 
@@ -525,6 +773,10 @@ impl<T: ApiType> ApiType for BTreeMap<String, T> {
             source: SourceRange::default(),
         }
     }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
 }
 
 impl<T: ApiType> ApiType for HashMap<String, T> {
@@ -554,6 +806,10 @@ impl<T: ApiType> ApiType for HashMap<String, T> {
             },
             source: SourceRange::default(),
         }
+    }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
     }
 }
 
@@ -744,6 +1000,18 @@ mod tests {
         assert_eq!(module.endpoints[0].rust_name, "get_user");
         assert_eq!(graph.endpoint_ids, vec![get_user().id]);
         assert_ne!(module.endpoints[0].id, delete_user().id);
+    }
+
+    #[test]
+    fn type_registry_preserves_first_registration_and_deduplicates() {
+        let mut registry = TypeRegistry::new();
+
+        registry.register::<User>();
+        registry.register::<User>();
+
+        let types = registry.type_defs();
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].rust_name, "User");
     }
 
     #[test]

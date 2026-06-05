@@ -42,12 +42,18 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let ident = input.ident;
     let rust_name = ident.to_string();
     let container_serde = SerdeAttrs::from_attrs(&input.attrs)?;
+    let mut register_types = Vec::new();
 
     let shape = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => {
-                let field_defs =
-                    named_field_defs(&rust_name, fields.named.iter(), container_serde.rename_all)?;
+                let field_metadata = named_field_metadata(
+                    &rust_name,
+                    fields.named.iter(),
+                    container_serde.rename_all,
+                )?;
+                let field_defs = field_metadata.defs;
+                register_types.extend(field_metadata.register_types);
 
                 quote! {
                     ::api_core::ir::TypeShape::Struct(::api_core::ir::StructShape {
@@ -57,6 +63,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 let field_ty = &fields.unnamed.first().expect("length checked").ty;
+                register_types.push(register_type_call(field_ty));
 
                 quote! {
                     ::api_core::ir::TypeShape::Newtype(Box::new(
@@ -84,11 +91,15 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     });
                     let variant_fields = match &variant.fields {
                         Fields::Unit => Vec::new(),
-                        Fields::Named(fields) => named_field_defs(
-                            &format!("{rust_name}::{variant_name}"),
-                            fields.named.iter(),
-                            None,
-                        )?,
+                        Fields::Named(fields) => {
+                            let field_metadata = named_field_metadata(
+                                &format!("{rust_name}::{variant_name}"),
+                                fields.named.iter(),
+                                None,
+                            )?;
+                            register_types.extend(field_metadata.register_types);
+                            field_metadata.defs
+                        }
                         Fields::Unnamed(_) => {
                             return Err(syn::Error::new_spanned(
                                 variant,
@@ -174,6 +185,12 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     },
                 }
             }
+
+            fn register_types(registry: &mut ::api_core::TypeRegistry) {
+                if registry.insert(<Self as ::api_core::ApiType>::type_def()) {
+                    #(#register_types)*
+                }
+            }
         }
     })
 }
@@ -193,6 +210,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     let mut api_type_variants = Vec::new();
     let mut error_variants = Vec::new();
     let mut status_arms = Vec::new();
+    let mut register_types = Vec::new();
 
     for variant in &data.variants {
         let variant_ident = &variant.ident;
@@ -204,11 +222,15 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             .unwrap_or_else(|| apply_rename_rule(&variant_name, container_serde.rename_all));
         let fields = match &variant.fields {
             Fields::Unit => Vec::new(),
-            Fields::Named(fields) => named_field_defs(
-                &format!("{rust_name}::{variant_name}"),
-                fields.named.iter(),
-                None,
-            )?,
+            Fields::Named(fields) => {
+                let field_metadata = named_field_metadata(
+                    &format!("{rust_name}::{variant_name}"),
+                    fields.named.iter(),
+                    None,
+                )?;
+                register_types.extend(field_metadata.register_types);
+                field_metadata.defs
+            }
             Fields::Unnamed(_) => {
                 return Err(syn::Error::new_spanned(
                     variant,
@@ -305,6 +327,12 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     },
                 }
             }
+
+            fn register_types(registry: &mut ::api_core::TypeRegistry) {
+                if registry.insert(<Self as ::api_core::ApiType>::type_def()) {
+                    #(#register_types)*
+                }
+            }
         }
 
         impl ::api_core::ApiError for #ident {
@@ -330,6 +358,13 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     },
                 }
             }
+
+            fn register_error(registry: &mut ::api_core::ContractRegistry) {
+                if registry.insert_error(<Self as ::api_core::ApiError>::error_def()) {
+                    let registry = registry.types_mut();
+                    #(#register_types)*
+                }
+            }
         }
     })
 }
@@ -344,13 +379,17 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 
     let fn_ident = &input.sig.ident;
     let metadata_ident = format_ident!("__api_endpoint_{fn_ident}");
+    let register_ident = format_ident!("__api_register_endpoint_{fn_ident}");
     let method = args.method_tokens()?;
     let transport = args.transport_tokens();
     let route_params = route_params(&args.path);
     let request = endpoint_request(&input.sig.inputs, &route_params)?;
+    let request_shape = request.shape;
+    let request_registrations = request.registrations;
     let endpoint_return = endpoint_return(&input.sig.output)?;
     let response = endpoint_return.response;
     let errors = endpoint_return.errors;
+    let return_registrations = endpoint_return.registrations;
     let allow_unused = args.allow_unused;
     let path = args.path;
 
@@ -359,7 +398,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 
         #[allow(non_snake_case)]
         pub fn #metadata_ident() -> ::api_core::Endpoint {
-            let request = #request;
+            let request = #request_shape;
             let mut rust_path = module_path!()
                 .split("::")
                 .collect::<Vec<_>>();
@@ -373,16 +412,29 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
                 .errors(vec![#(#errors),*])
                 .allow_unused(#allow_unused)
         }
+
+        #[allow(non_snake_case, unused_variables)]
+        pub fn #register_ident(registry: &mut ::api_core::ContractRegistry) {
+            let registry = registry;
+            #(#request_registrations)*
+            #(#return_registrations)*
+        }
     })
+}
+
+struct EndpointRequest {
+    shape: proc_macro2::TokenStream,
+    registrations: Vec<proc_macro2::TokenStream>,
 }
 
 fn endpoint_request(
     inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>,
     route_params: &[String],
-) -> syn::Result<proc_macro2::TokenStream> {
+) -> syn::Result<EndpointRequest> {
     let mut path_fields = Vec::new();
     let mut query_fields = Vec::new();
     let mut body = None;
+    let mut registrations = Vec::new();
     let mut seen_path_params = Vec::new();
 
     for input in inputs {
@@ -400,8 +452,10 @@ fn endpoint_request(
         if let Some(inner) = extractor_inner(input.ty.as_ref(), "Path") {
             seen_path_params.push(name.clone());
             path_fields.push(endpoint_field(&name, inner));
+            registrations.push(contract_register_type_call(inner));
         } else if let Some(inner) = extractor_inner(input.ty.as_ref(), "Query") {
             query_fields.push(endpoint_field(&name, inner));
+            registrations.push(contract_register_type_call(inner));
         } else if let Some(inner) = extractor_inner(input.ty.as_ref(), "Body") {
             if body.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -410,6 +464,7 @@ fn endpoint_request(
                 ));
             }
             body = Some(quote!(Some(<#inner as ::api_core::ApiType>::type_ref())));
+            registrations.push(contract_register_type_call(inner));
         }
     }
 
@@ -424,12 +479,75 @@ fn endpoint_request(
 
     let body = body.unwrap_or_else(|| quote!(None));
 
-    Ok(quote! {
-        ::api_core::ir::RequestShape {
-            path_params: vec![#(#path_fields),*],
-            query_params: vec![#(#query_fields),*],
-            body: #body,
-        }
+    Ok(EndpointRequest {
+        shape: quote! {
+            ::api_core::ir::RequestShape {
+                path_params: vec![#(#path_fields),*],
+                query_params: vec![#(#query_fields),*],
+                body: #body,
+            }
+        },
+        registrations,
+    })
+}
+
+fn contract_register_type_call(ty: &Type) -> proc_macro2::TokenStream {
+    quote! {
+        registry.register_type::<#ty>();
+    }
+}
+
+fn contract_register_error_call(ty: &Type) -> proc_macro2::TokenStream {
+    quote! {
+        registry.register_error::<#ty>();
+    }
+}
+
+fn register_type_call(ty: &Type) -> proc_macro2::TokenStream {
+    quote! {
+        <#ty as ::api_core::ApiType>::register_types(registry);
+    }
+}
+
+struct FieldMetadata {
+    defs: Vec<proc_macro2::TokenStream>,
+    register_types: Vec<proc_macro2::TokenStream>,
+}
+
+fn named_field_metadata<'a>(
+    owner_name: &str,
+    fields: impl Iterator<Item = &'a syn::Field>,
+    rename_all: Option<RenameRule>,
+) -> syn::Result<FieldMetadata> {
+    let mut defs = Vec::new();
+    let mut register_types = Vec::new();
+
+    for field in fields {
+        let field_ident = field
+            .ident
+            .as_ref()
+            .expect("named fields always have identifiers");
+        let field_name = field_ident.to_string();
+        let field_ty = &field.ty;
+        let serde = SerdeAttrs::from_attrs(&field.attrs)?;
+        let wire_name = serde
+            .rename
+            .unwrap_or_else(|| apply_rename_rule(&field_name, rename_all));
+        let optional = serde.skip_serializing_if_option_none;
+
+        defs.push(field_def(
+            owner_name,
+            &field_name,
+            &wire_name,
+            field_ty,
+            optional,
+        ));
+        register_types.push(register_type_call(field_ty));
+    }
+
+    Ok(FieldMetadata {
+        defs,
+        register_types,
     })
 }
 
@@ -459,6 +577,7 @@ fn endpoint_field(name: &str, ty: &Type) -> proc_macro2::TokenStream {
 struct EndpointReturn {
     response: proc_macro2::TokenStream,
     errors: Vec<proc_macro2::TokenStream>,
+    registrations: Vec<proc_macro2::TokenStream>,
 }
 
 fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
@@ -466,6 +585,7 @@ fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
         ReturnType::Default => Ok(EndpointReturn {
             response: quote!(::api_core::ir::ResponseShape::Empty),
             errors: Vec::new(),
+            registrations: Vec::new(),
         }),
         ReturnType::Type(_, ty) => return_for_type(ty),
     }
@@ -476,6 +596,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
         return Ok(EndpointReturn {
             response: quote!(::api_core::ir::ResponseShape::Empty),
             errors: Vec::new(),
+            registrations: Vec::new(),
         });
     }
 
@@ -485,6 +606,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
                 ::api_core::ir::ResponseShape::Json(<#inner as ::api_core::ApiType>::type_ref())
             },
             errors: Vec::new(),
+            registrations: vec![contract_register_type_call(inner)],
         });
     }
 
@@ -494,14 +616,18 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
                 ::api_core::ir::ResponseShape::Stream(<#inner as ::api_core::ApiType>::type_ref())
             },
             errors: Vec::new(),
+            registrations: vec![contract_register_type_call(inner)],
         });
     }
 
     if let Some((ok, err)) = result_types(ty) {
         let ok_return = return_for_type(ok)?;
+        let mut registrations = ok_return.registrations;
+        registrations.push(contract_register_error_call(err));
         return Ok(EndpointReturn {
             response: ok_return.response,
             errors: vec![quote!(<#err as ::api_core::ApiError>::error_ref())],
+            registrations,
         });
     }
 
@@ -655,36 +781,6 @@ impl ApiAttr {
     fn is_sse(&self) -> bool {
         self.method == "SSE"
     }
-}
-
-fn named_field_defs<'a>(
-    owner_name: &str,
-    fields: impl Iterator<Item = &'a syn::Field>,
-    rename_all: Option<RenameRule>,
-) -> syn::Result<Vec<proc_macro2::TokenStream>> {
-    fields
-        .map(|field| {
-            let field_ident = field
-                .ident
-                .as_ref()
-                .expect("named fields always have identifiers");
-            let field_name = field_ident.to_string();
-            let field_ty = &field.ty;
-            let serde = SerdeAttrs::from_attrs(&field.attrs)?;
-            let wire_name = serde
-                .rename
-                .unwrap_or_else(|| apply_rename_rule(&field_name, rename_all));
-            let optional = serde.skip_serializing_if_option_none;
-
-            Ok(field_def(
-                owner_name,
-                &field_name,
-                &wire_name,
-                field_ty,
-                optional,
-            ))
-        })
-        .collect()
 }
 
 fn field_def(
