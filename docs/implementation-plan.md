@@ -1528,7 +1528,7 @@ Acceptance criteria:
 - unsupported field types fail through trait obligations;
 - field metadata includes Rust field names.
 
-### T-005 — Implement `#[derive(ApiType)]` for newtypes and enums
+### T-005 — Implement `#[derive(ApiType)]` for newtypes and enums [done]
 
 Goal: support newtypes and enum wire shapes.
 

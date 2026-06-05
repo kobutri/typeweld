@@ -1,4 +1,6 @@
 #[derive(api_macros::ApiType)]
-struct UserId(i64);
+enum UserEvent {
+    Renamed(String),
+}
 
 fn main() {}

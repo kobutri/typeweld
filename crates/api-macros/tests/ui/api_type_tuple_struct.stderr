@@ -1,5 +1,0 @@
-error: ApiType can only be derived for structs with named fields
- --> tests/ui/api_type_tuple_struct.rs:2:8
-  |
-2 | struct UserId(i64);
-  |        ^^^^^^
