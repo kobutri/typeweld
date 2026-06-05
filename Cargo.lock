@@ -23,6 +23,9 @@ dependencies = [
 [[package]]
 name = "api-core"
 version = "0.0.0"
+dependencies = [
+ "api-ir",
+]
 
 [[package]]
 name = "api-gen-effect-v4"

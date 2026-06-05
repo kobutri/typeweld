@@ -1484,7 +1484,7 @@ Acceptance criteria:
 - stable symbol IDs are deterministic in tests;
 - IR supports unary and SSE transports even if not yet generated.
 
-### T-003 — Implement `api-core` public traits and wrappers
+### T-003 — Implement `api-core` public traits and wrappers [done]
 
 Goal: define user-facing Rust types without macros.
 
