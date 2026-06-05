@@ -10,7 +10,14 @@ path = "src/lib.rs"
 
 [dependencies]
 api-core = { path = "../api-core" }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
+http = "1.0"
+serde = "1.0"
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
-

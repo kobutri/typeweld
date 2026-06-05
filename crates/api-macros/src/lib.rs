@@ -192,6 +192,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 
     let mut api_type_variants = Vec::new();
     let mut error_variants = Vec::new();
+    let mut status_arms = Vec::new();
 
     for variant in &data.variants {
         let variant_ident = &variant.ident;
@@ -254,6 +255,13 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 },
             }
         });
+
+        let pattern = match &variant.fields {
+            Fields::Unit => quote!(Self::#variant_ident),
+            Fields::Named(_) => quote!(Self::#variant_ident { .. }),
+            Fields::Unnamed(_) => unreachable!("unnamed variants rejected above"),
+        };
+        status_arms.push(quote!(#pattern => ::api_core::ir::HttpStatus(#status)));
     }
 
     Ok(quote! {
@@ -300,6 +308,12 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         }
 
         impl ::api_core::ApiError for #ident {
+            fn status(&self) -> ::api_core::ir::HttpStatus {
+                match self {
+                    #(#status_arms,)*
+                }
+            }
+
             fn error_def() -> ::api_core::ir::ErrorDef {
                 ::api_core::ir::ErrorDef {
                     id: <Self as ::api_core::ApiError>::error_ref().id,

@@ -62,6 +62,9 @@ pub trait ApiError: ApiType {
         }
     }
 
+    /// HTTP status for this concrete domain error value.
+    fn status(&self) -> api_ir::HttpStatus;
+
     /// Full error definition when this error is exported in a contract.
     fn error_def() -> ErrorDef;
 }

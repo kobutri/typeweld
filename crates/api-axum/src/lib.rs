@@ -1,8 +1,513 @@
-//! Axum integration adapter placeholder.
+//! Axum integration adapter.
 
-use api_core::Endpoint;
+use std::{convert::Infallible, ops::Deref};
+
+use api_core::{
+    ir::{HttpMethod, HttpStatus},
+    ApiError, ApiModule, Endpoint,
+};
+use axum::{
+    extract::{FromRequest, FromRequestParts},
+    http::{request::Parts, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{delete, get, patch, post, put, MethodRouter},
+    Router,
+};
+use serde::Serialize;
+
+/// Axum router builder paired with an explicit API module.
+///
+/// The module supplies the exported endpoint metadata; each route call pairs
+/// one endpoint descriptor with the concrete Axum handler that serves it.
+#[derive(Clone, Debug)]
+pub struct ApiRouter<S = ()> {
+    module: ApiModule,
+    router: Router<S>,
+}
+
+impl ApiRouter<()> {
+    #[must_use]
+    pub fn new(module: ApiModule) -> Self {
+        Self {
+            module,
+            router: Router::new(),
+        }
+    }
+}
+
+impl<S> ApiRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    #[must_use]
+    pub fn with_state<T>(self, state: S) -> ApiRouter<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ApiRouter {
+            module: self.module,
+            router: self.router.with_state(state),
+        }
+    }
+
+    #[must_use]
+    pub fn route(mut self, endpoint: Endpoint, method_router: MethodRouter<S>) -> Self {
+        self.router = self
+            .router
+            .route(&normalize_route_path(&endpoint.route.0), method_router);
+        self
+    }
+
+    #[must_use]
+    pub fn module(&self) -> &ApiModule {
+        &self.module
+    }
+
+    #[must_use]
+    pub fn into_router(self) -> Router<S> {
+        self.router
+    }
+}
 
 #[must_use]
-pub fn endpoint_path(endpoint: &Endpoint) -> &str {
-    &endpoint.route.0
+pub fn router(module: ApiModule) -> ApiRouter {
+    ApiRouter::new(module)
+}
+
+#[must_use]
+pub fn method_router<H, T, S>(method: HttpMethod, handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    match method {
+        HttpMethod::Delete => delete(handler),
+        HttpMethod::Get => get(handler),
+        HttpMethod::Patch => patch(handler),
+        HttpMethod::Post => post(handler),
+        HttpMethod::Put => put(handler),
+    }
+}
+
+/// JSON success response with a `200 OK` status.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Json<T>(pub T);
+
+/// JSON success response with a `201 Created` status.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Created<T>(pub T);
+
+/// Empty success response with a `204 No Content` status.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NoContent;
+
+/// Route path extractor for endpoint handlers.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Path<T>(pub T);
+
+/// Query string extractor for endpoint handlers.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Query<T>(pub T);
+
+/// JSON request body extractor for endpoint handlers.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Body<T>(pub T);
+
+/// Wrapper for typed API domain errors.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DomainError<E>(pub E);
+
+#[must_use]
+pub fn success_or_error<T, E>(result: Result<T, E>) -> Response
+where
+    T: IntoResponse,
+    E: ApiError + Serialize,
+{
+    match result {
+        Ok(success) => success.into_response(),
+        Err(error) => DomainError(error).into_response(),
+    }
+}
+
+impl<T> Json<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Created<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Path<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Query<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Body<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Deref for Json<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> Deref for Created<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> Deref for Path<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> Deref for Query<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> Deref for Body<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> From<T> for Json<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<T> for Created<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<T> for Path<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<T> for Query<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<T> for Body<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> IntoResponse for Json<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+impl<T> IntoResponse for Created<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        (StatusCode::CREATED, axum::Json(self.0)).into_response()
+    }
+}
+
+impl IntoResponse for NoContent {
+    fn into_response(self) -> Response {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl<E> IntoResponse for DomainError<E>
+where
+    E: ApiError + Serialize,
+{
+    fn into_response(self) -> Response {
+        (status_code(self.0.status()), axum::Json(self.0)).into_response()
+    }
+}
+
+impl<S, T> FromRequestParts<S> for Path<T>
+where
+    axum::extract::Path<T>: FromRequestParts<S>,
+    S: Send + Sync,
+{
+    type Rejection = <axum::extract::Path<T> as FromRequestParts<S>>::Rejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Path::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(value)| Self(value))
+    }
+}
+
+impl<S, T> FromRequestParts<S> for Query<T>
+where
+    axum::extract::Query<T>: FromRequestParts<S>,
+    S: Send + Sync,
+{
+    type Rejection = <axum::extract::Query<T> as FromRequestParts<S>>::Rejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(value)| Self(value))
+    }
+}
+
+impl<S, T> FromRequest<S> for Body<T>
+where
+    axum::Json<T>: FromRequest<S>,
+    S: Send + Sync,
+{
+    type Rejection = <axum::Json<T> as FromRequest<S>>::Rejection;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        axum::Json::from_request(request, state)
+            .await
+            .map(|axum::Json(value)| Self(value))
+    }
+}
+
+#[must_use]
+pub const fn status_code(status: HttpStatus) -> StatusCode {
+    match StatusCode::from_u16(status.0) {
+        Ok(status) => status,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn normalize_route_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            segment
+                .strip_prefix(':')
+                .map_or_else(|| segment.to_owned(), |param| format!("{{{param}}}"))
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+impl<T> From<Infallible> for DomainError<T> {
+    fn from(value: Infallible) -> Self {
+        match value {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api_core::{ir::HttpMethod, ApiType};
+    use axum::{
+        body::{to_bytes, Body as AxumBody},
+        extract::Request,
+        http::{Method, StatusCode},
+    };
+    use serde::{Deserialize, Serialize};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct User {
+        id: i64,
+        filter: String,
+        name: String,
+    }
+
+    impl ApiType for User {
+        const RUST_NAME: &'static str = "User";
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct CreateUser {
+        name: String,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(tag = "_tag")]
+    enum GetUserError {
+        NotFound { id: i64 },
+    }
+
+    impl ApiType for GetUserError {
+        const RUST_NAME: &'static str = "GetUserError";
+    }
+
+    impl ApiError for GetUserError {
+        fn status(&self) -> HttpStatus {
+            match self {
+                Self::NotFound { .. } => HttpStatus(404),
+            }
+        }
+
+        fn error_def() -> api_core::ir::ErrorDef {
+            api_core::ir::ErrorDef {
+                id: Self::error_ref().id,
+                rust_path: Self::rust_path(),
+                rust_name: Self::RUST_NAME.to_owned(),
+                ts_name: Self::TS_NAME.to_owned(),
+                variants: Vec::new(),
+                source: api_core::ir::SourceRange::default(),
+            }
+        }
+    }
+
+    async fn get_user(Path(id): Path<i64>, Query(filter): Query<Filter>) -> Response {
+        success_or_error::<_, GetUserError>(Ok(Json(User {
+            id,
+            filter: filter.filter,
+            name: "Ada".to_owned(),
+        })))
+    }
+
+    async fn missing_user(Path(id): Path<i64>) -> Response {
+        success_or_error::<Json<User>, _>(Err(GetUserError::NotFound { id }))
+    }
+
+    async fn create_user(Body(body): Body<CreateUser>) -> Created<User> {
+        Created(User {
+            id: 7,
+            filter: String::new(),
+            name: body.name,
+        })
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    struct Filter {
+        filter: String,
+    }
+
+    #[tokio::test]
+    async fn registers_handlers_from_endpoint_metadata() {
+        let module = ApiModule::new("users");
+        let endpoint = Endpoint::new(HttpMethod::Get, "/users/{id}");
+        let app = router(module)
+            .route(endpoint, method_router(HttpMethod::Get, get_user))
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/users/42?filter=active")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(
+            std::str::from_utf8(&body).expect("utf8"),
+            r#"{"id":42,"filter":"active","name":"Ada"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn serializes_domain_errors_with_declared_status() {
+        let app = router(ApiModule::new("users"))
+            .route(
+                Endpoint::new(HttpMethod::Get, "/missing/:id"),
+                method_router(HttpMethod::Get, missing_user),
+            )
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/missing/99")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(
+            std::str::from_utf8(&body).expect("utf8"),
+            r#"{"_tag":"NotFound","id":99}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn decodes_json_body_and_maps_created_status() {
+        let app = router(ApiModule::new("users"))
+            .route(
+                Endpoint::new(HttpMethod::Post, "/users"),
+                method_router(HttpMethod::Post, create_user),
+            )
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/users")
+                    .header("content-type", "application/json")
+                    .body(AxumBody::from(r#"{"name":"Grace"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(
+            std::str::from_utf8(&body).expect("utf8"),
+            r#"{"id":7,"filter":"","name":"Grace"}"#
+        );
+    }
 }

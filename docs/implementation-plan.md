@@ -1781,7 +1781,7 @@ Acceptance criteria:
 - domain errors decode to error channel;
 - transport/decode errors are `ApiClientError`.
 
-### T-018 — Implement Axum adapter
+### T-018 — Implement Axum adapter [done]
 
 Goal: serve Rust endpoints through Axum.
 
