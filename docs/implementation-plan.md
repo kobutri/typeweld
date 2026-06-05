@@ -1509,7 +1509,7 @@ Acceptance criteria:
 - wrappers are framework-neutral;
 - no Axum dependency in `api-core`.
 
-### T-004 — Implement `#[derive(ApiType)]` for simple structs
+### T-004 — Implement `#[derive(ApiType)]` for simple structs [done]
 
 Goal: derive API type metadata for plain structs.
 
