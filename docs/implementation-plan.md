@@ -1821,7 +1821,7 @@ Acceptance criteria:
 - field links account for Serde rename;
 - symbol graph round-trips through JSON.
 
-### T-020 — Implement `api-ls` process and config discovery
+### T-020 — Implement `api-ls` process and config discovery [done]
 
 Goal: create the gateway LSP executable.
 
