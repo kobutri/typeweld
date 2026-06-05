@@ -1,0 +1,30 @@
+[workspace]
+members = [
+  "crates/api-axum",
+  "crates/api-build",
+  "crates/api-collector",
+  "crates/api-core",
+  "crates/api-gen-effect-v4",
+  "crates/api-ir",
+  "crates/api-ls",
+  "crates/api-macros",
+  "crates/api-test-fixtures",
+  "examples/axum-basic",
+  "examples/axum-sse",
+  "examples/monorepo-basic",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-ts-integration/rust-ts-integration"
+version = "0.0.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+

@@ -1441,7 +1441,7 @@ Exit criteria:
 
 The tasks below are intentionally scoped so multiple people or agents can implement them independently once the crate/package skeleton exists.
 
-### T-001 — Initialize repository workspace
+### T-001 — Initialize repository workspace [done]
 
 Goal: create the Rust/npm monorepo skeleton.
 

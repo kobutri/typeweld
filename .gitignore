@@ -1,0 +1,7 @@
+/target/
+/npm/node_modules/
+/npm/**/node_modules/
+/target/api-contract/
+
+.DS_Store
+*.log

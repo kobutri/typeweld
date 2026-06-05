@@ -1,0 +1,13 @@
+[package]
+name = "monorepo-basic"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
+

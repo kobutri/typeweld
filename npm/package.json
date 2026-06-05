@@ -1,0 +1,18 @@
+{
+  "name": "rust-ts-integration-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "effect-runtime",
+    "language-server-wrapper"
+  ],
+  "scripts": {
+    "format": "prettier --check .",
+    "test": "npm run typecheck --workspaces",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
+

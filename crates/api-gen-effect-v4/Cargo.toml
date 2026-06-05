@@ -1,0 +1,16 @@
+[package]
+name = "api-gen-effect-v4"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+api-ir = { path = "../api-ir" }
+
+[lints]
+workspace = true
+

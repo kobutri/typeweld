@@ -1,0 +1,14 @@
+[package]
+name = "axum-basic"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+api-core = { path = "../../crates/api-core" }
+
+[lints]
+workspace = true
+

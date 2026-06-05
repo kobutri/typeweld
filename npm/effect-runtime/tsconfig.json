@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "tsBuildInfoFile": "../node_modules/.cache/effect-runtime.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}
+
