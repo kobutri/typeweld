@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `__api_endpoint_missing` in this scope
+ --> tests/ui/api_module_missing_endpoint.rs:4:22
+  |
+4 |         endpoints = [__api_endpoint_missing]
+  |                      ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope

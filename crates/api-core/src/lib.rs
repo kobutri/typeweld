@@ -190,6 +190,13 @@ pub struct ApiModule {
     pub endpoints: Vec<Endpoint>,
 }
 
+/// Reachability summary for exported endpoint collection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EndpointReachability {
+    pub root_module: String,
+    pub endpoint_ids: Vec<SymbolId>,
+}
+
 impl ApiModule {
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
@@ -213,6 +220,30 @@ impl ApiModule {
             .map(Endpoint::into_ir)
             .collect()
     }
+
+    #[must_use]
+    pub fn reachability_graph(&self) -> EndpointReachability {
+        EndpointReachability {
+            root_module: self.name.clone(),
+            endpoint_ids: self
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.id.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Compose the explicit root API module exported by a crate.
+#[macro_export]
+macro_rules! api_module {
+    (name = $name:literal, endpoints = [$($endpoint:path),* $(,)?]) => {{
+        let mut module = $crate::ApiModule::new($name);
+        $(
+            module = module.with_endpoint($endpoint());
+        )*
+        module
+    }};
 }
 
 impl<T: ApiType> ApiType for Json<T> {
@@ -454,5 +485,25 @@ mod tests {
             ApiModule::new("users").with_endpoint(Endpoint::new(HttpMethod::Post, "/users"));
 
         assert_eq!(module.endpoint_irs().len(), 1);
+    }
+
+    #[test]
+    fn api_module_macro_exports_only_listed_endpoints() {
+        fn get_user() -> Endpoint {
+            Endpoint::new(HttpMethod::Get, "/users/{id}").named(["crate", "get_user"])
+        }
+
+        fn delete_user() -> Endpoint {
+            Endpoint::new(HttpMethod::Delete, "/users/{id}").named(["crate", "delete_user"])
+        }
+
+        let module = api_module!(name = "users", endpoints = [get_user]);
+        let graph = module.reachability_graph();
+
+        assert_eq!(module.name, "users");
+        assert_eq!(module.endpoints.len(), 1);
+        assert_eq!(module.endpoints[0].rust_name, "get_user");
+        assert_eq!(graph.endpoint_ids, vec![get_user().id]);
+        assert_ne!(module.endpoints[0].id, delete_user().id);
     }
 }

@@ -1606,7 +1606,7 @@ Acceptance criteria:
 - path params must be present as extractors;
 - invalid return/error types fail compilation.
 
-### T-009 — Implement `api_module!`
+### T-009 — Implement `api_module!` [done]
 
 Goal: explicitly compose exported endpoints.
 
