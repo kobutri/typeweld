@@ -250,6 +250,19 @@ impl<W: Write> LspServer<W> {
                     }
                 }
             }
+            "textDocument/references" => {
+                if let Some(id) = message.id {
+                    if let Some(locations) = self.cross_language_references(&message.params)? {
+                        self.write_response(id, locations)?;
+                    } else if is_rust_message(method, &message.params) {
+                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                    } else if self.is_typescript_message(method, &message.params) {
+                        self.forward_request_to_typescript(method, message.params, id)?;
+                    } else {
+                        self.write_response(id, json!([]))?;
+                    }
+                }
+            }
             _ => {
                 if is_rust_message(method, &message.params) {
                     match message.id {
@@ -428,6 +441,63 @@ impl<W: Write> LspServer<W> {
         };
         Ok(graph.definition(&query, workspace))
     }
+
+    fn cross_language_references(&mut self, params: &Value) -> Result<Option<Value>, String> {
+        let Some(workspace) = self.workspace.clone() else {
+            return Ok(None);
+        };
+        let Some(query) = TextPositionQuery::from_lsp_params(params) else {
+            return Ok(None);
+        };
+        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        let Some(mut locations) = graph.references(&query, &workspace) else {
+            return Ok(None);
+        };
+
+        let backend_locations = if is_rust_message("textDocument/references", params) {
+            self.backend_reference_locations(BackendKind::Rust, params.clone())?
+        } else if self.is_typescript_message("textDocument/references", params) {
+            self.backend_reference_locations(BackendKind::TypeScript, params.clone())?
+        } else {
+            Vec::new()
+        };
+        locations.extend(backend_locations);
+        Ok(Some(dedupe_locations(locations, &workspace)))
+    }
+
+    fn backend_reference_locations(
+        &mut self,
+        backend: BackendKind,
+        params: Value,
+    ) -> Result<Vec<Value>, String> {
+        let response = match backend {
+            BackendKind::Rust => self
+                .rust_analyzer
+                .as_mut()
+                .map(|backend| backend.request_raw("textDocument/references", params)),
+            BackendKind::TypeScript => self
+                .typescript
+                .as_mut()
+                .map(|backend| backend.request_raw("textDocument/references", params)),
+        };
+        let Some(response) = response else {
+            return Ok(Vec::new());
+        };
+        let response = response?;
+        Ok(response
+            .get("result")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackendKind {
+    Rust,
+    TypeScript,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -470,6 +540,41 @@ impl SymbolGraph {
             {
                 return Some(symbol.rust.to_lsp_location(workspace));
             }
+        }
+
+        None
+    }
+
+    fn references(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Option<Vec<Value>> {
+        let include_declaration = query.include_declaration;
+
+        for symbol in &self.symbols {
+            let rust_match = symbol.rust.matches(query, workspace);
+            let typescript_match = symbol
+                .typescript
+                .iter()
+                .any(|location| location.matches(query, workspace));
+            if !rust_match && !typescript_match {
+                continue;
+            }
+
+            let mut locations = Vec::new();
+            if include_declaration || typescript_match {
+                locations.push(symbol.rust.to_lsp_location(workspace));
+            }
+            locations.extend(
+                symbol
+                    .typescript
+                    .iter()
+                    .filter(|location| !location.generated)
+                    .map(|location| location.to_lsp_location(workspace)),
+            );
+
+            return Some(locations);
         }
 
         None
@@ -547,6 +652,7 @@ struct GraphPosition {
 struct TextPositionQuery {
     uri: String,
     position: GraphPosition,
+    include_declaration: bool,
 }
 
 impl TextPositionQuery {
@@ -558,6 +664,11 @@ impl TextPositionQuery {
                 character: u32::try_from(params.get("position")?.get("character")?.as_u64()?)
                     .ok()?,
             },
+            include_declaration: params
+                .get("context")
+                .and_then(|context| context.get("includeDeclaration"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -614,20 +725,37 @@ impl BackendProcess {
         client_id: Value,
         writer: &mut impl Write,
     ) -> Result<(), String> {
+        let (response, notifications) = self.request_raw_with_notifications(method, params)?;
+        for notification in notifications {
+            write_framed(writer, &notification)?;
+        }
+        let mut raw = response;
+        raw["id"] = client_id;
+        write_framed(writer, &raw)
+    }
+
+    fn request_raw(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_raw_with_notifications(method, params)
+            .map(|(response, _)| response)
+    }
+
+    fn request_raw_with_notifications(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<(Value, Vec<Value>), String> {
         let backend_id = self.allocate_id();
         self.write_request(backend_id, method, params)?;
+        let mut notifications = Vec::new();
 
         loop {
             let message = read_message(&mut self.stdout)?
                 .ok_or_else(|| format!("{} exited while handling `{method}`", self.name))?;
             if message.id.as_ref() == Some(&json!(backend_id)) {
-                let mut raw = message.raw;
-                raw["id"] = client_id;
-                write_framed(writer, &raw)?;
-                return Ok(());
+                return Ok((message.raw, notifications));
             }
             if message.id.is_none() {
-                write_framed(writer, &message.raw)?;
+                notifications.push(message.raw);
             }
         }
     }
@@ -856,6 +984,32 @@ fn same_uri(left: &str, right: &str) -> bool {
         (Some(left), Some(right)) => left == right,
         _ => left == right,
     }
+}
+
+fn dedupe_locations(locations: Vec<Value>, workspace: &WorkspaceConfig) -> Value {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+
+    for location in locations {
+        let Some(uri) = location.get("uri").and_then(Value::as_str) else {
+            continue;
+        };
+        if file_uri_to_path(uri)
+            .is_some_and(|path| path.starts_with(&workspace.generated_cache_dir))
+        {
+            continue;
+        }
+        let key = serde_json::to_string(&json!({
+            "uri": uri,
+            "range": location.get("range").cloned().unwrap_or(Value::Null),
+        }))
+        .expect("location key serializes");
+        if seen.insert(key) {
+            deduped.push(location);
+        }
+    }
+
+    Value::Array(deduped)
 }
 
 fn document_uris(value: &Value) -> BTreeSet<String> {
@@ -1305,6 +1459,104 @@ mod tests {
         assert!(!output.contains("\"id\":2,\"error\""));
     }
 
+    #[test]
+    fn merges_cross_language_references_without_generated_duplicates() {
+        let root = test_root("cross-references");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
+        )
+        .expect("write config");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        let usage_location = json!({
+            "uri": usage_uri,
+            "generated": false,
+            "range": {
+                "start": { "line": 2, "character": 4 },
+                "end": { "line": 2, "character": 11 }
+            }
+        });
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [
+                        usage_location,
+                        usage_location,
+                        {
+                            "uri": generated_uri,
+                            "generated": true,
+                            "range": {
+                                "start": { "line": 4, "character": 15 },
+                                "end": { "line": 4, "character": 22 }
+                            }
+                        }
+                    ]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 10, "character": 12 },
+                    "context": { "includeDeclaration": true }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("\"id\":2"));
+        assert!(output.contains(&rust_uri));
+        assert_eq!(output.matches(&usage_uri).count(), 1);
+        assert!(!output.contains(&generated_uri));
+    }
+
     fn framed(value: &Value) -> String {
         let body = serde_json::to_string(value).expect("serialize message");
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -1368,6 +1620,15 @@ while True:
             "result":[{
                 "uri":"file:///mock-definition.rs",
                 "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+            }]
+        })
+    elif method == "textDocument/references":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "uri":"file:///mock-reference.rs",
+                "range":{"start":{"line":3,"character":0},"end":{"line":3,"character":4}}
             }]
         })
     elif method == "shutdown":

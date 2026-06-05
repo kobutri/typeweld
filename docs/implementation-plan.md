@@ -1899,7 +1899,7 @@ Acceptance criteria:
 - definitions are precise at field/variant level;
 - non-API TS symbols still use TS backend normally.
 
-### T-024 — Implement cross-language references
+### T-024 — Implement cross-language references [done]
 
 Goal: merge Rust and TS references.
 
