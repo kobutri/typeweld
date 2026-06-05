@@ -219,7 +219,7 @@ Acceptance criteria:
 - The descriptor registers path, query, body, response, stream, and error types.
 - Endpoint metadata remains deterministic.
 
-### A3. Implement real `api collect`
+### A3. Implement real `api collect` [done]
 
 Goal: collect a real contract from a Cargo workspace package.
 

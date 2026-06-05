@@ -46,6 +46,8 @@ pub fn api() -> api_core::ApiModule {
 
 ```sh
 cargo run -p api-collector --bin api -- collect \
+  --package server \
+  --api-root server::api \
   --package-name @workspace/server-api \
   --out target/api-contract/server-api.json
 ```
