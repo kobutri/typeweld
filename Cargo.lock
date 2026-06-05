@@ -28,7 +28,9 @@ name = "api-collector"
 version = "0.0.0"
 dependencies = [
  "api-core",
+ "api-gen-effect-v4",
  "api-ir",
+ "api-test-fixtures",
  "cargo_metadata",
  "serde",
  "serde_json",

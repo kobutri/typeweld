@@ -2178,7 +2178,7 @@ Can begin after generated endpoint accessors and symbol graph exist.
 Continuous.
 
 - T-032 [done]
-- T-033
+- T-033 [done]
 - T-034
 
 ## 17. Suggested milestone order
