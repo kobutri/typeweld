@@ -246,6 +246,8 @@ pub struct ExternalType {
     pub rust_path: Vec<String>,
     pub ts_import: String,
     pub ts_name: String,
+    pub encoded_ts_name: String,
+    pub decoded_ts_name: String,
 }
 
 /// A tagged error variant.

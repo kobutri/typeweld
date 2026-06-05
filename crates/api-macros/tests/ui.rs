@@ -11,4 +11,5 @@ fn api_type_compile_failures_are_clear() {
     tests.compile_fail("tests/ui/api_endpoint_invalid_return.rs");
     tests.compile_fail("tests/ui/api_endpoint_invalid_error.rs");
     tests.compile_fail("tests/ui/api_module_missing_endpoint.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_external_generic.rs");
 }

@@ -1644,7 +1644,7 @@ Acceptance criteria:
 - transitive DTOs are included;
 - non-reachable DTOs are not exported.
 
-### T-011 — Implement common external type mappings
+### T-011 — Implement common external type mappings [done]
 
 Goal: support realistic API-layer Rust types.
 

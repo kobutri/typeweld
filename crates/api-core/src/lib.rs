@@ -1,9 +1,12 @@
 //! Framework-neutral public API primitives.
 
+use std::collections::{BTreeMap, HashMap};
+
 pub use api_ir as ir;
 use api_ir::{
-    ErrorDef, ErrorRef, Field, HttpMethod, Optionality, Primitive, RequestShape, ResponseShape,
-    RoutePattern, SourceRange, StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
+    ErrorDef, ErrorRef, ExternalType, Field, HttpMethod, Optionality, Primitive, RequestShape,
+    ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId, Transport, TypeDef, TypeRef,
+    TypeShape,
 };
 
 /// Rust type that can cross the generated API boundary.
@@ -37,10 +40,12 @@ pub trait ApiType {
             rust_path: Self::rust_path(),
             rust_name: Self::RUST_NAME.to_owned(),
             ts_name: Self::TS_NAME.to_owned(),
-            shape: TypeShape::External(api_ir::ExternalType {
+            shape: TypeShape::External(ExternalType {
                 rust_path: Self::rust_path(),
                 ts_import: String::new(),
                 ts_name: Self::TS_NAME.to_owned(),
+                encoded_ts_name: Self::TS_NAME.to_owned(),
+                decoded_ts_name: Self::TS_NAME.to_owned(),
             }),
             source: SourceRange::default(),
         }
@@ -378,6 +383,21 @@ primitive_api_type!(i64, "i64", Primitive::I64);
 primitive_api_type!(f64, "f64", Primitive::F64);
 primitive_api_type!(String, "String", Primitive::String);
 
+/// Integer encoding policy for generated clients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegerEncodingPolicy {
+    SafeNumber,
+    StringEncoded,
+}
+
+#[must_use]
+pub const fn integer_policy_for(rust_name: &str) -> IntegerEncodingPolicy {
+    match rust_name.as_bytes() {
+        b"i64" | b"u64" | b"usize" | b"isize" => IntegerEncodingPolicy::StringEncoded,
+        _ => IntegerEncodingPolicy::SafeNumber,
+    }
+}
+
 impl ApiType for &str {
     const RUST_NAME: &'static str = "str";
     const TS_NAME: &'static str = "String";
@@ -415,6 +435,189 @@ impl<T: ApiType> ApiType for Option<T> {
             shape: TypeShape::Option(Box::new(T::type_ref())),
             source: SourceRange::default(),
         }
+    }
+}
+
+impl<T: ApiType> ApiType for Vec<T> {
+    const RUST_NAME: &'static str = "Vec";
+    const TS_NAME: &'static str = "Array";
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("list", &[T::RUST_NAME]),
+            name: format!("Array<{}>", T::TS_NAME),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        TypeDef {
+            id: Self::type_ref().id,
+            rust_path: vec!["Vec".to_owned(), T::RUST_NAME.to_owned()],
+            rust_name: "Vec".to_owned(),
+            ts_name: Self::type_ref().name,
+            shape: TypeShape::List(Box::new(T::type_ref())),
+            source: SourceRange::default(),
+        }
+    }
+}
+
+impl<T: ApiType> ApiType for BTreeMap<String, T> {
+    const RUST_NAME: &'static str = "BTreeMap";
+    const TS_NAME: &'static str = "Record";
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("map", &["String", T::RUST_NAME]),
+            name: format!("Record<string, {}>", T::TS_NAME),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        TypeDef {
+            id: Self::type_ref().id,
+            rust_path: vec![
+                "BTreeMap".to_owned(),
+                "String".to_owned(),
+                T::RUST_NAME.to_owned(),
+            ],
+            rust_name: "BTreeMap".to_owned(),
+            ts_name: Self::type_ref().name,
+            shape: TypeShape::Map {
+                key: Box::new(String::type_ref()),
+                value: Box::new(T::type_ref()),
+            },
+            source: SourceRange::default(),
+        }
+    }
+}
+
+impl<T: ApiType> ApiType for HashMap<String, T> {
+    const RUST_NAME: &'static str = "HashMap";
+    const TS_NAME: &'static str = "Record";
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("map", &["String", T::RUST_NAME]),
+            name: format!("Record<string, {}>", T::TS_NAME),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        TypeDef {
+            id: Self::type_ref().id,
+            rust_path: vec![
+                "HashMap".to_owned(),
+                "String".to_owned(),
+                T::RUST_NAME.to_owned(),
+            ],
+            rust_name: "HashMap".to_owned(),
+            ts_name: Self::type_ref().name,
+            shape: TypeShape::Map {
+                key: Box::new(String::type_ref()),
+                value: Box::new(T::type_ref()),
+            },
+            source: SourceRange::default(),
+        }
+    }
+}
+
+impl ApiType for uuid::Uuid {
+    const RUST_NAME: &'static str = "Uuid";
+
+    fn rust_path() -> Vec<String> {
+        vec!["uuid".to_owned(), "Uuid".to_owned()]
+    }
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("external", &["uuid", "Uuid"]),
+            name: "Uuid".to_owned(),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        external_type_def::<Self>("@api/external", "Uuid", "string", "Uuid")
+    }
+}
+
+impl ApiType for chrono::DateTime<chrono::Utc> {
+    const RUST_NAME: &'static str = "DateTimeUtc";
+    const TS_NAME: &'static str = "Date";
+
+    fn rust_path() -> Vec<String> {
+        vec!["chrono".to_owned(), "DateTime".to_owned(), "Utc".to_owned()]
+    }
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("external", &["chrono", "DateTime", "Utc"]),
+            name: "Date".to_owned(),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        external_type_def::<Self>("@api/external", "Date", "string", "Date")
+    }
+}
+
+impl ApiType for rust_decimal::Decimal {
+    const RUST_NAME: &'static str = "Decimal";
+
+    fn rust_path() -> Vec<String> {
+        vec!["rust_decimal".to_owned(), "Decimal".to_owned()]
+    }
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("external", &["rust_decimal", "Decimal"]),
+            name: "Decimal".to_owned(),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        external_type_def::<Self>("@api/external", "Decimal", "string", "Decimal")
+    }
+}
+
+impl ApiType for serde_json::Value {
+    const RUST_NAME: &'static str = "JsonValue";
+    const TS_NAME: &'static str = "JsonValue";
+
+    fn rust_path() -> Vec<String> {
+        vec!["serde_json".to_owned(), "Value".to_owned()]
+    }
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("external", &["serde_json", "Value"]),
+            name: "JsonValue".to_owned(),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        external_type_def::<Self>("@api/external", "JsonValue", "unknown", "JsonValue")
+    }
+}
+
+fn external_type_def<T: ApiType>(
+    ts_import: &str,
+    ts_name: &str,
+    encoded_ts_name: &str,
+    decoded_ts_name: &str,
+) -> TypeDef {
+    TypeDef {
+        id: T::type_ref().id,
+        rust_path: T::rust_path(),
+        rust_name: T::RUST_NAME.to_owned(),
+        ts_name: ts_name.to_owned(),
+        shape: TypeShape::External(ExternalType {
+            rust_path: T::rust_path(),
+            ts_import: ts_import.to_owned(),
+            ts_name: ts_name.to_owned(),
+            encoded_ts_name: encoded_ts_name.to_owned(),
+            decoded_ts_name: decoded_ts_name.to_owned(),
+        }),
+        source: SourceRange::default(),
     }
 }
 
@@ -505,5 +708,46 @@ mod tests {
         assert_eq!(module.endpoints[0].rust_name, "get_user");
         assert_eq!(graph.endpoint_ids, vec![get_user().id]);
         assert_ne!(module.endpoints[0].id, delete_user().id);
+    }
+
+    #[test]
+    fn common_external_mappings_preserve_encoded_and_decoded_names() {
+        let TypeShape::External(uuid) = uuid::Uuid::type_def().shape else {
+            panic!("expected external uuid mapping");
+        };
+        let TypeShape::External(date) = chrono::DateTime::<chrono::Utc>::type_def().shape else {
+            panic!("expected external date mapping");
+        };
+        let TypeShape::External(decimal) = rust_decimal::Decimal::type_def().shape else {
+            panic!("expected external decimal mapping");
+        };
+
+        assert_eq!(uuid.encoded_ts_name, "string");
+        assert_eq!(uuid.decoded_ts_name, "Uuid");
+        assert_eq!(date.encoded_ts_name, "string");
+        assert_eq!(date.decoded_ts_name, "Date");
+        assert_eq!(decimal.encoded_ts_name, "string");
+        assert_eq!(decimal.decoded_ts_name, "Decimal");
+    }
+
+    #[test]
+    fn list_map_option_and_integer_policy_are_represented() {
+        assert!(matches!(
+            Vec::<String>::type_def().shape,
+            TypeShape::List(_)
+        ));
+        assert!(matches!(
+            BTreeMap::<String, i64>::type_def().shape,
+            TypeShape::Map { .. }
+        ));
+        assert!(matches!(
+            Option::<String>::type_def().shape,
+            TypeShape::Option(_)
+        ));
+        assert_eq!(
+            integer_policy_for("i64"),
+            IntegerEncodingPolicy::StringEncoded
+        );
+        assert_eq!(integer_policy_for("i32"), IntegerEncodingPolicy::SafeNumber);
     }
 }

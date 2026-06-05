@@ -11,11 +11,11 @@ help: the trait `ApiType` is not implemented for `NotApiType`
   | ^^^^^^^^^^^^^^^^^
   = help: the following other types implement trait `ApiType`:
             &str
+            BTreeMap<std::string::String, T>
             Body<T>
             Created<T>
+            HashMap<std::string::String, T>
             NoContent
             Query<T>
             User
-            api_core::Json<T>
-            api_core::Path<T>
           and $N others
