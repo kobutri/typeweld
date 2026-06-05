@@ -2179,7 +2179,7 @@ Continuous.
 
 - T-032 [done]
 - T-033 [done]
-- T-034
+- T-034 [done]
 
 ## 17. Suggested milestone order
 
