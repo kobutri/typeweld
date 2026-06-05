@@ -36,6 +36,7 @@ fn api_endpoint_macro_emits_metadata() {
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.route.0, "/users/{id}");
     assert_eq!(endpoint.rust_name, "get_user");
+    assert_eq!(endpoint.ts_path, ["users", "getUser"]);
     assert!(endpoint.allow_unused);
     assert_eq!(endpoint.request.path_params[0].rust_name, "id");
     assert_eq!(endpoint.request.query_params[0].rust_name, "filter");
@@ -54,6 +55,7 @@ fn api_endpoint_macro_emits_sse_metadata() {
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.transport, Transport::ServerSentEvents);
     assert_eq!(endpoint.route.0, "/users/events");
+    assert_eq!(endpoint.ts_path, ["users", "userEvents"]);
     assert_eq!(endpoint.errors[0].name, "GetUserError");
 
     let ResponseShape::Stream(item) = endpoint.response else {
@@ -76,4 +78,15 @@ fn api_endpoint_macro_registers_reachable_types_and_errors() {
     assert_eq!(types[0].rust_name, "User");
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].rust_name, "GetUserError");
+}
+
+#[test]
+fn api_module_accepts_endpoint_functions_directly() {
+    let module = api_core::api_module!(name = "users", endpoints = [get_user]);
+
+    assert_eq!(module.endpoints.len(), 1);
+    assert_eq!(module.endpoints[0].rust_name, "get_user");
+    assert_eq!(module.endpoints[0].ts_path, ["users", "getUser"]);
+    assert_eq!(module.registry().type_defs()[0].rust_name, "User");
+    assert_eq!(module.registry().error_defs()[0].rust_name, "GetUserError");
 }

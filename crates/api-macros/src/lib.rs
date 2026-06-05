@@ -380,6 +380,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let fn_ident = &input.sig.ident;
     let metadata_ident = format_ident!("__api_endpoint_{fn_ident}");
     let register_ident = format_ident!("__api_register_endpoint_{fn_ident}");
+    let descriptor_ident = format_ident!("__api_endpoint_descriptor_{fn_ident}");
     let method = args.method_tokens()?;
     let transport = args.transport_tokens();
     let route_params = route_params(&args.path);
@@ -392,10 +393,12 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let return_registrations = endpoint_return.registrations;
     let allow_unused = args.allow_unused;
     let path = args.path;
+    let (ts_namespace, ts_function) = default_ts_path(&path, &fn_ident.to_string());
 
     Ok(quote! {
         #input
 
+        #[doc(hidden)]
         #[allow(non_snake_case)]
         pub fn #metadata_ident() -> ::api_core::Endpoint {
             let request = #request_shape;
@@ -406,6 +409,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 
             ::api_core::Endpoint::new(#method, #path)
                 .named(rust_path)
+                .ts_path([#ts_namespace, #ts_function])
                 .transport(#transport)
                 .request(request)
                 .response(#response)
@@ -413,11 +417,18 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
                 .allow_unused(#allow_unused)
         }
 
+        #[doc(hidden)]
         #[allow(non_snake_case, unused_variables)]
         pub fn #register_ident(registry: &mut ::api_core::ContractRegistry) {
             let registry = registry;
             #(#request_registrations)*
             #(#return_registrations)*
+        }
+
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        pub fn #descriptor_ident() -> ::api_core::EndpointDescriptor {
+            ::api_core::EndpointDescriptor::new(#metadata_ident(), #register_ident)
         }
     })
 }
@@ -703,6 +714,23 @@ fn route_params(path: &str) -> Vec<String> {
     }
 
     params
+}
+
+fn default_ts_path(path: &str, fn_name: &str) -> (String, String) {
+    let namespace = path
+        .split('/')
+        .find_map(|segment| {
+            let segment = segment.trim();
+            (!segment.is_empty()
+                && !segment.starts_with('{')
+                && !segment.starts_with(':')
+                && !segment.contains('}'))
+            .then(|| to_camel_case(segment))
+        })
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| "api".to_owned());
+
+    (namespace, to_camel_case(fn_name))
 }
 
 struct ApiAttr {

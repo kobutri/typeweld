@@ -34,7 +34,7 @@ fn events() -> Result<Sse<UserEvent, EventStream>, EventError> {
 }
 
 fn main() {
-    let module = api_module!(name = "events", endpoints = [__api_endpoint_events]);
+    let module = api_module!(name = "events", endpoints = [events]);
     let _app = router(module)
         .route(
             __api_endpoint_events(),

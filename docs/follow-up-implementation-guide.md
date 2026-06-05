@@ -202,7 +202,7 @@ Acceptance criteria:
 - Repeated shared types appear once.
 - Recursive/cyclic type graphs terminate.
 
-### A2. Replace endpoint metadata functions with endpoint descriptors
+### A2. Replace endpoint metadata functions with endpoint descriptors [done]
 
 Goal: each endpoint carries endpoint metadata and a typed registration function.
 

@@ -34,7 +34,7 @@ async fn get_user(Path(id): Path<i64>) -> Result<Json<User>, GetUserError> {
 }
 
 fn app() -> axum::Router {
-    let module = api_module!(name = "users", endpoints = [__api_endpoint_get_user]);
+    let module = api_module!(name = "users", endpoints = [get_user]);
 
     router(module)
         .route(

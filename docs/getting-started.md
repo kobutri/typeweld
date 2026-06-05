@@ -38,7 +38,7 @@ you chose to publish:
 use api_core::api_module;
 
 pub fn api() -> api_core::ApiModule {
-    api_module!(name = "users", endpoints = [__api_endpoint_get_user])
+    api_module!(name = "users", endpoints = [get_user])
 }
 ```
 

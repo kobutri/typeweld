@@ -101,32 +101,13 @@ async fn create_user(request: Body<CreateUserRequest>) -> Result<Json<User>, Use
     }
 }
 
-/// The macro-generated endpoint metadata starts from Rust names.
-///
-/// These wrapper functions add the TypeScript namespace/accessor path we want
-/// the generated client to expose. That is why the TypeScript example can call
-/// `users.getUser` instead of a Rust-shaped `get_user.get_user`.
-fn get_user_endpoint() -> api_core::Endpoint {
-    __api_endpoint_get_user().ts_path(["users", "getUser"])
-}
-
-fn create_user_endpoint() -> api_core::Endpoint {
-    __api_endpoint_create_user().ts_path(["users", "createUser"])
-}
-
 /// The root API module is intentionally explicit.
 ///
 /// Only endpoints listed here are exported to TypeScript and tracked by unused
 /// endpoint analysis. This avoids surprising "everything public is an API"
 /// behavior in larger workspaces.
 fn api() -> ApiModule {
-    let mut module = api_module!(
-        name = "server",
-        endpoints = [get_user_endpoint, create_user_endpoint]
-    );
-    __api_register_endpoint_get_user(module.registry_mut());
-    __api_register_endpoint_create_user(module.registry_mut());
-    module
+    api_module!(name = "server", endpoints = [get_user, create_user])
 }
 
 fn main() {
