@@ -1,6 +1,6 @@
 use api_core::{
-    ir::{HttpMethod, ResponseShape},
-    ApiType, Json, Path, Query,
+    ir::{HttpMethod, ResponseShape, Transport},
+    ApiType, Json, Path, Query, Sse,
 };
 
 #[derive(api_macros::ApiType)]
@@ -23,6 +23,12 @@ async fn get_user(id: Path<i64>, filter: Query<String>) -> Result<Json<User>, Ge
     unimplemented!()
 }
 
+#[api_macros::api(method = "SSE", path = "/users/events")]
+#[allow(dead_code)]
+fn user_events() -> Result<Sse<User>, GetUserError> {
+    unimplemented!()
+}
+
 #[test]
 fn api_endpoint_macro_emits_metadata() {
     let endpoint = __api_endpoint_get_user();
@@ -39,4 +45,19 @@ fn api_endpoint_macro_emits_metadata() {
         panic!("expected json response");
     };
     assert_eq!(response.name, "User");
+}
+
+#[test]
+fn api_endpoint_macro_emits_sse_metadata() {
+    let endpoint = __api_endpoint_user_events();
+
+    assert_eq!(endpoint.method, HttpMethod::Get);
+    assert_eq!(endpoint.transport, Transport::ServerSentEvents);
+    assert_eq!(endpoint.route.0, "/users/events");
+    assert_eq!(endpoint.errors[0].name, "GetUserError");
+
+    let ResponseShape::Stream(item) = endpoint.response else {
+        panic!("expected stream response");
+    };
+    assert_eq!(item.name, "User");
 }

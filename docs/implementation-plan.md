@@ -1997,7 +1997,7 @@ Acceptance criteria:
 - route path is not changed by function rename;
 - edits are previewable and deterministic.
 
-### T-029 — Implement SSE IR and generator
+### T-029 — Implement SSE IR and generator [done]
 
 Goal: support server streams.
 

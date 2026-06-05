@@ -17,5 +17,5 @@ help: the trait `ApiType` is not implemented for `NotApiType`
             HashMap<std::string::String, T>
             NoContent
             Query<T>
-            User
+            Sse<T>
           and $N others

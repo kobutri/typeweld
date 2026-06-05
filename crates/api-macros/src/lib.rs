@@ -335,7 +335,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 }
 
 fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    if input.sig.asyncness.is_none() {
+    if input.sig.asyncness.is_none() && !args.is_sse() {
         return Err(syn::Error::new_spanned(
             &input.sig.fn_token,
             "#[api] endpoints must be async functions",
@@ -345,6 +345,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let fn_ident = &input.sig.ident;
     let metadata_ident = format_ident!("__api_endpoint_{fn_ident}");
     let method = args.method_tokens()?;
+    let transport = args.transport_tokens();
     let route_params = route_params(&args.path);
     let request = endpoint_request(&input.sig.inputs, &route_params)?;
     let endpoint_return = endpoint_return(&input.sig.output)?;
@@ -366,6 +367,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 
             ::api_core::Endpoint::new(#method, #path)
                 .named(rust_path)
+                .transport(#transport)
                 .request(request)
                 .response(#response)
                 .errors(vec![#(#errors),*])
@@ -481,6 +483,15 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
         return Ok(EndpointReturn {
             response: quote! {
                 ::api_core::ir::ResponseShape::Json(<#inner as ::api_core::ApiType>::type_ref())
+            },
+            errors: Vec::new(),
+        });
+    }
+
+    if let Some(inner) = extractor_inner(ty, "Sse") {
+        return Ok(EndpointReturn {
+            response: quote! {
+                ::api_core::ir::ResponseShape::Stream(<#inner as ::api_core::ApiType>::type_ref())
             },
             errors: Vec::new(),
         });
@@ -625,11 +636,24 @@ impl ApiAttr {
             "PATCH" => Ok(quote!(::api_core::ir::HttpMethod::Patch)),
             "POST" => Ok(quote!(::api_core::ir::HttpMethod::Post)),
             "PUT" => Ok(quote!(::api_core::ir::HttpMethod::Put)),
+            "SSE" => Ok(quote!(::api_core::ir::HttpMethod::Get)),
             _ => Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "unsupported HTTP method for #[api]",
             )),
         }
+    }
+
+    fn transport_tokens(&self) -> proc_macro2::TokenStream {
+        if self.is_sse() {
+            quote!(::api_core::ir::Transport::ServerSentEvents)
+        } else {
+            quote!(::api_core::ir::Transport::UnaryHttp)
+        }
+    }
+
+    fn is_sse(&self) -> bool {
+        self.method == "SSE"
     }
 }
 

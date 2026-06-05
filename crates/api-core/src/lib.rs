@@ -137,6 +137,12 @@ impl Endpoint {
     }
 
     #[must_use]
+    pub const fn transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    #[must_use]
     pub fn errors(mut self, errors: impl IntoIterator<Item = ErrorRef>) -> Self {
         self.errors = errors.into_iter().collect();
         self
@@ -178,6 +184,10 @@ pub struct Created<T>(pub T);
 /// Empty `204 No Content` response marker.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NoContent;
+
+/// Server-sent event stream response wrapper.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Sse<T>(pub T);
 
 /// Path extractor marker.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -300,6 +310,23 @@ impl ApiType for NoContent {
             shape: TypeShape::Struct(StructShape::default()),
             source: SourceRange::default(),
         }
+    }
+}
+
+impl<T: ApiType> ApiType for Sse<T> {
+    const RUST_NAME: &'static str = T::RUST_NAME;
+    const TS_NAME: &'static str = T::TS_NAME;
+
+    fn rust_path() -> Vec<String> {
+        T::rust_path()
+    }
+
+    fn type_ref() -> TypeRef {
+        T::type_ref()
+    }
+
+    fn type_def() -> TypeDef {
+        T::type_def()
     }
 }
 

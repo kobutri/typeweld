@@ -78,7 +78,11 @@ pub fn render_errors(contract: &ApiContract) -> String {
 #[must_use]
 pub fn render_endpoints(contract: &ApiContract) -> String {
     let mut output = render_package_banner(contract);
-    output.push_str("import { Effect } from \"effect\"\n");
+    if contract_has_stream_endpoints(contract) {
+        output.push_str("import { Effect, Stream } from \"effect\"\n");
+    } else {
+        output.push_str("import { Effect } from \"effect\"\n");
+    }
     output.push_str("import { ServerApi } from \"./layer\"\n");
 
     let schema_imports = collect_endpoint_schema_imports(contract);
@@ -140,9 +144,23 @@ pub fn render_endpoints(contract: &ApiContract) -> String {
 #[must_use]
 pub fn render_layer(contract: &ApiContract) -> String {
     let mut output = render_package_banner(contract);
-    output.push_str("import { Context, Layer, Effect } from \"effect\"\n");
-    output
-        .push_str("import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\"\n");
+    if contract_has_stream_endpoints(contract) {
+        output.push_str("import { Context, Layer, Effect, Stream } from \"effect\"\n");
+    } else {
+        output.push_str("import { Context, Layer, Effect } from \"effect\"\n");
+    }
+    let runtime_client_imports = collect_runtime_client_imports(contract);
+    if !runtime_client_imports.is_empty() {
+        output.push_str("import { ");
+        output.push_str(
+            &runtime_client_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"@rust-ts-integration/effect-runtime\"\n");
+    }
 
     let endpoint_namespaces = collect_endpoint_namespaces(contract);
     if !endpoint_namespaces.is_empty() {
@@ -348,6 +366,29 @@ fn collect_endpoint_namespaces(contract: &ApiContract) -> BTreeSet<String> {
     contract.endpoints.iter().map(endpoint_namespace).collect()
 }
 
+fn collect_runtime_client_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        match endpoint.transport {
+            Transport::UnaryHttp => {
+                imports.insert("makeUnaryHttpClient".to_owned());
+            }
+            Transport::ServerSentEvents => {
+                imports.insert("makeSseClient".to_owned());
+            }
+            Transport::WebSocketDuplex | Transport::BinaryDownload | Transport::BinaryUpload => {}
+        }
+    }
+    imports
+}
+
+fn contract_has_stream_endpoints(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| matches!(endpoint.response, ResponseShape::Stream(_)))
+}
+
 fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
     let mut imports = BTreeSet::new();
     for endpoint in &contract.endpoints {
@@ -377,12 +418,11 @@ fn render_service_interface(contract: &ApiContract) -> String {
 
 fn render_service_method(endpoint: &Endpoint) -> String {
     format!(
-        "      readonly {function_name}: (args: {namespace}.{args_name}) => Effect.Effect<{success}, {error}, never>\n",
+        "      readonly {function_name}: (args: {namespace}.{args_name}) => {return_type}\n",
         function_name = endpoint_function_name(endpoint),
         namespace = endpoint_namespace(endpoint),
         args_name = endpoint_args_name(endpoint),
-        success = render_response_type(&endpoint.response),
-        error = render_endpoint_error_type(endpoint),
+        return_type = render_endpoint_return_type(endpoint, "never"),
     )
 }
 
@@ -407,13 +447,14 @@ fn render_fetch_service_method(endpoint: &Endpoint) -> String {
     let function_name = endpoint_function_name(endpoint);
     let namespace = endpoint_namespace(endpoint);
     let args_name = endpoint_args_name(endpoint);
-    let success_decoder = render_success_decoder(&endpoint.response);
-    let error_decoder = render_domain_error_decoder(endpoint);
+    let helper = render_runtime_client_helper(endpoint);
+    let success_decoder = render_success_decoder(&endpoint.response, helper);
+    let error_decoder = render_domain_error_decoder(endpoint, helper);
     let success = render_response_type(&endpoint.response);
     let error = render_endpoint_error_type(endpoint);
 
     format!(
-        "        {function_name}: makeUnaryHttpClient<{namespace}.{args_name}, {success}, {error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
+        "        {function_name}: {helper}<{namespace}.{args_name}, {success}, {error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
         method = ts_string(endpoint.method.as_str()),
         encoder = render_request_encoder(&endpoint.request, &format!("{namespace}.{args_name}")),
     )
@@ -502,15 +543,14 @@ fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<S
 fn render_endpoint(endpoint: &Endpoint) -> String {
     let function_name = endpoint_function_name(endpoint);
     let args_name = endpoint_args_name(endpoint);
-    let success = render_response_type(&endpoint.response);
-    let error = render_endpoint_error_type(endpoint);
 
     format!(
-        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): Effect.Effect<{success}, {error}, ServerApi> =>\n    ServerApi.use((api) => api.{namespace}.{function_name}(args))\n\n",
+        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): {return_type} =>\n    ServerApi.use((api) => api.{namespace}.{function_name}(args))\n\n",
         args_interface = render_endpoint_args(endpoint),
         method = ts_string(endpoint.method.as_str()),
         path = ts_string(&endpoint.route.0),
         transport = ts_string(render_transport(endpoint.transport)),
+        return_type = render_endpoint_return_type(endpoint, "ServerApi"),
         namespace = endpoint_namespace(endpoint),
     )
 }
@@ -572,9 +612,22 @@ fn render_endpoint_arg_field(field: &Field) -> String {
 fn render_response_type(response: &ResponseShape) -> String {
     match response {
         ResponseShape::Empty => "void".to_owned(),
-        ResponseShape::Json(type_ref) => render_ts_type_ref(type_ref),
-        ResponseShape::Stream(type_ref) => {
-            format!("ReadonlyArray<{}>", render_ts_type_ref(type_ref))
+        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+            render_ts_type_ref(type_ref)
+        }
+    }
+}
+
+fn render_endpoint_return_type(endpoint: &Endpoint, requirements: &str) -> String {
+    let success = render_response_type(&endpoint.response);
+    let error = render_endpoint_error_type(endpoint);
+
+    match &endpoint.response {
+        ResponseShape::Stream(_) => {
+            format!("Stream.Stream<{success}, {error}, {requirements}>")
+        }
+        ResponseShape::Empty | ResponseShape::Json(_) => {
+            format!("Effect.Effect<{success}, {error}, {requirements}>")
         }
     }
 }
@@ -644,20 +697,17 @@ fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
     }
 }
 
-fn render_success_decoder(response: &ResponseShape) -> String {
+fn render_success_decoder(response: &ResponseShape, helper: &str) -> String {
     match response {
         ResponseShape::Empty => "() => Effect.void",
         ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
-            return format!(
-                "(input) => makeUnaryHttpClient.decode(input, {})",
-                type_ref.name
-            );
+            return format!("(input) => {helper}.decode(input, {})", type_ref.name);
         }
     }
     .to_owned()
 }
 
-fn render_domain_error_decoder(endpoint: &Endpoint) -> String {
+fn render_domain_error_decoder(endpoint: &Endpoint, helper: &str) -> String {
     if endpoint.errors.is_empty() {
         return "() => undefined".to_owned();
     }
@@ -674,7 +724,9 @@ fn render_domain_error_decoder(endpoint: &Endpoint) -> String {
         output.push_str("            if (");
         output.push_str(&error.name);
         output.push_str("Schema !== undefined) {\n");
-        output.push_str("              return makeUnaryHttpClient.decode(input, ");
+        output.push_str("              return ");
+        output.push_str(helper);
+        output.push_str(".decode(input, ");
         output.push_str(&error.name);
         output.push_str("Schema)\n");
         output.push_str("            }\n");
@@ -682,6 +734,16 @@ fn render_domain_error_decoder(endpoint: &Endpoint) -> String {
     output.push_str("            return undefined\n");
     output.push_str("          }");
     output
+}
+
+const fn render_runtime_client_helper(endpoint: &Endpoint) -> &'static str {
+    match endpoint.transport {
+        Transport::UnaryHttp => "makeUnaryHttpClient",
+        Transport::ServerSentEvents => "makeSseClient",
+        Transport::WebSocketDuplex | Transport::BinaryDownload | Transport::BinaryUpload => {
+            "makeUnaryHttpClient"
+        }
+    }
 }
 
 fn endpoint_namespace(endpoint: &Endpoint) -> String {
@@ -1507,6 +1569,45 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
     }
 
     #[test]
+    fn renders_sse_endpoint_accessors_with_stream_signatures() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["events", "events"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "events".to_owned(),
+                    "events".to_owned(),
+                ],
+                rust_name: "events".to_owned(),
+                ts_path: vec!["events".to_owned(), "events".to_owned()],
+                route: RoutePattern("/events".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::ServerSentEvents,
+                request: RequestShape::default(),
+                response: ResponseShape::Stream(type_ref("UserEvent")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["EventError"]),
+                    name: "EventError".to_owned(),
+                }],
+                source: source(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(rendered.contains("import { Effect, Stream } from \"effect\""));
+        assert!(rendered.contains(
+            "  export const eventsRoute = {\n    method: \"GET\",\n    path: \"/events\",\n    transport: \"ServerSentEvents\",\n  } as const"
+        ));
+        assert!(rendered.contains(
+            "  export const events = (\n    args: EventsArgs\n  ): Stream.Stream<UserEvent, ApiClientError | EventError, ServerApi> =>\n    ServerApi.use((api) => api.events.events(args))"
+        ));
+    }
+
+    #[test]
     fn renders_server_api_service_and_layers() {
         let contract = ApiContract {
             package_name: "@workspace/server-api".to_owned(),
@@ -1564,6 +1665,50 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         );
         assert!(rendered
             .contains("  export const mock = (service: Service): Layer.Layer<ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_sse_server_api_service_and_layer_client() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["events", "events"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "events".to_owned(),
+                    "events".to_owned(),
+                ],
+                rust_name: "events".to_owned(),
+                ts_path: vec!["events".to_owned(), "events".to_owned()],
+                route: RoutePattern("/events".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::ServerSentEvents,
+                request: RequestShape::default(),
+                response: ResponseShape::Stream(type_ref("UserEvent")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["EventError"]),
+                    name: "EventError".to_owned(),
+                }],
+                source: source(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains("import { Context, Layer, Effect, Stream } from \"effect\""));
+        assert!(rendered
+            .contains("import { makeSseClient } from \"@rust-ts-integration/effect-runtime\""));
+        assert!(rendered.contains(
+            "      readonly events: (args: events.EventsArgs) => Stream.Stream<UserEvent, ApiClientError | EventError, never>"
+        ));
+        assert!(rendered.contains(
+            "events: makeSseClient<events.EventsArgs, UserEvent, ApiClientError | EventError>(config,"
+        ));
+        assert!(
+            rendered.contains("decodeSuccess: (input) => makeSseClient.decode(input, UserEvent)")
+        );
     }
 
     #[test]
