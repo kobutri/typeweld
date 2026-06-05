@@ -1704,7 +1704,7 @@ Acceptance criteria:
 - error variant source links are in symbol graph;
 - statuses are preserved.
 
-### T-014 — Implement endpoint accessor generator
+### T-014 — Implement endpoint accessor generator [done]
 
 Goal: generate Effect endpoint functions.
 

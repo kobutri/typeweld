@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use api_ir::{
-    ApiContract, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field, Optionality,
-    Primitive, SourceRange, StructShape, TypeDef, TypeRef, TypeShape,
+    ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
+    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, StructShape, Transport,
+    TypeDef, TypeRef, TypeShape,
 };
 
 #[must_use]
@@ -70,12 +71,251 @@ pub fn render_errors(contract: &ApiContract) -> String {
     trim_trailing_blank_lines(output)
 }
 
+/// Renders generated endpoint accessors and route metadata.
+#[must_use]
+pub fn render_endpoints(contract: &ApiContract) -> String {
+    let mut output = render_package_banner(contract);
+    output.push_str("import { Effect } from \"effect\"\n");
+    output.push_str("import { ServerApi } from \"./layer\"\n");
+
+    let schema_imports = collect_endpoint_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        output.push_str("import type { ");
+        output.push_str(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str(" } from \"./schemas\"\n");
+    }
+
+    let error_imports = collect_endpoint_error_imports(contract);
+    output.push_str("import type { ");
+    output.push_str(
+        &error_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    output.push_str(" } from \"./errors\"\n\n");
+
+    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        endpoint_namespace(left)
+            .cmp(&endpoint_namespace(right))
+            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let mut namespace = None::<String>;
+    for endpoint in endpoints {
+        let current_namespace = endpoint_namespace(endpoint);
+        if namespace.as_deref() != Some(current_namespace.as_str()) {
+            if namespace.is_some() {
+                output.push_str("}\n\n");
+            }
+            output.push_str("export namespace ");
+            output.push_str(&current_namespace);
+            output.push_str(" {\n");
+            namespace = Some(current_namespace);
+        }
+
+        output.push_str(&render_endpoint(endpoint));
+    }
+
+    if namespace.is_some() {
+        output.push_str("}\n");
+    }
+
+    trim_trailing_blank_lines(output)
+}
+
 fn render_type_def(type_def: &TypeDef) -> String {
     let schema = render_type_shape(&type_def.shape, type_def);
     format!(
         "export const {name} = {schema}\nexport type {name} = typeof {name}.Type\nexport type {name}Encoded = typeof {name}.Encoded\n",
         name = type_def.ts_name,
     )
+}
+
+fn collect_endpoint_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        collect_request_type_imports(&endpoint.request, &mut imports);
+        collect_response_type_imports(&endpoint.response, &mut imports);
+    }
+    imports
+}
+
+fn collect_request_type_imports(request: &RequestShape, imports: &mut BTreeSet<String>) {
+    for field in request
+        .path_params
+        .iter()
+        .chain(request.query_params.iter())
+    {
+        collect_type_ref_import(&field.type_ref, imports);
+    }
+    if let Some(body) = &request.body {
+        collect_type_ref_import(body, imports);
+    }
+}
+
+fn collect_response_type_imports(response: &ResponseShape, imports: &mut BTreeSet<String>) {
+    match response {
+        ResponseShape::Empty => {}
+        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+            collect_type_ref_import(type_ref, imports);
+        }
+    }
+}
+
+fn collect_type_ref_import(type_ref: &TypeRef, imports: &mut BTreeSet<String>) {
+    if primitive_from_type_ref(type_ref).is_none() {
+        imports.insert(type_ref.name.clone());
+    }
+}
+
+fn collect_endpoint_error_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::from(["ApiClientError".to_owned()]);
+    for endpoint in &contract.endpoints {
+        imports.extend(endpoint.errors.iter().map(|error| error.name.clone()));
+    }
+    imports
+}
+
+fn render_endpoint(endpoint: &Endpoint) -> String {
+    let function_name = endpoint_function_name(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let success = render_response_type(&endpoint.response);
+    let error = render_endpoint_error_type(endpoint);
+
+    format!(
+        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): Effect.Effect<{success}, {error}, ServerApi> =>\n    Effect.flatMap(ServerApi, (api) => api.{namespace}.{function_name}(args))\n\n",
+        args_interface = render_endpoint_args(endpoint),
+        method = ts_string(endpoint.method.as_str()),
+        path = ts_string(&endpoint.route.0),
+        transport = ts_string(render_transport(endpoint.transport)),
+        namespace = endpoint_namespace(endpoint),
+    )
+}
+
+fn render_endpoint_args(endpoint: &Endpoint) -> String {
+    let args_name = endpoint_args_name(endpoint);
+    let mut fields = Vec::new();
+
+    fields.extend(
+        endpoint
+            .request
+            .path_params
+            .iter()
+            .map(render_endpoint_arg_field),
+    );
+    fields.extend(
+        endpoint
+            .request
+            .query_params
+            .iter()
+            .map(render_endpoint_arg_field),
+    );
+    if let Some(body) = &endpoint.request.body {
+        fields.push(format!("readonly body: {};", render_ts_type_ref(body)));
+    }
+
+    if fields.is_empty() {
+        return format!("  export interface {args_name} {{}}\n");
+    }
+
+    let mut output = format!("  export interface {args_name} {{\n");
+    for field in fields {
+        output.push_str("    ");
+        output.push_str(&field);
+        output.push('\n');
+    }
+    output.push_str("  }\n");
+    output
+}
+
+fn render_endpoint_arg_field(field: &Field) -> String {
+    let optional_marker = match field.optionality {
+        Optionality::Optional => "?",
+        Optionality::Required | Optionality::Nullable => "",
+    };
+    let mut field_type = render_ts_type_ref(&field.type_ref);
+    if matches!(field.optionality, Optionality::Nullable) {
+        field_type.push_str(" | null");
+    }
+
+    format!(
+        "readonly {}{}: {};",
+        render_property_key(&field.ts_name),
+        optional_marker,
+        field_type
+    )
+}
+
+fn render_response_type(response: &ResponseShape) -> String {
+    match response {
+        ResponseShape::Empty => "void".to_owned(),
+        ResponseShape::Json(type_ref) => render_ts_type_ref(type_ref),
+        ResponseShape::Stream(type_ref) => {
+            format!("ReadonlyArray<{}>", render_ts_type_ref(type_ref))
+        }
+    }
+}
+
+fn render_endpoint_error_type(endpoint: &Endpoint) -> String {
+    let mut errors = endpoint
+        .errors
+        .iter()
+        .map(|error| error.name.clone())
+        .collect::<Vec<_>>();
+    errors.push("ApiClientError".to_owned());
+    errors.sort();
+    errors.dedup();
+    errors.join(" | ")
+}
+
+fn render_ts_type_ref(type_ref: &TypeRef) -> String {
+    match primitive_from_type_ref(type_ref) {
+        Some(Primitive::Bool) => "boolean".to_owned(),
+        Some(Primitive::I32 | Primitive::I64 | Primitive::F64) => "number".to_owned(),
+        Some(Primitive::String) => "string".to_owned(),
+        None => type_ref.name.clone(),
+    }
+}
+
+fn endpoint_namespace(endpoint: &Endpoint) -> String {
+    endpoint
+        .ts_path
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "api".to_owned())
+}
+
+fn endpoint_function_name(endpoint: &Endpoint) -> String {
+    endpoint
+        .ts_path
+        .last()
+        .cloned()
+        .filter(|name| name != &endpoint_namespace(endpoint))
+        .unwrap_or_else(|| endpoint.rust_name.clone())
+}
+
+fn endpoint_args_name(endpoint: &Endpoint) -> String {
+    format!("{}Args", to_pascal_case(&endpoint_function_name(endpoint)))
+}
+
+const fn render_transport(transport: Transport) -> &'static str {
+    match transport {
+        Transport::UnaryHttp => "UnaryHttp",
+        Transport::ServerSentEvents => "ServerSentEvents",
+        Transport::WebSocketDuplex => "WebSocketDuplex",
+        Transport::BinaryDownload => "BinaryDownload",
+        Transport::BinaryUpload => "BinaryUpload",
+    }
 }
 
 fn collect_error_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
@@ -455,6 +695,25 @@ fn ts_string(value: &str) -> String {
     output
 }
 
+fn to_pascal_case(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = true;
+    for char in value.chars() {
+        if char == '_' || char == '-' || char == ' ' {
+            uppercase_next = true;
+            continue;
+        }
+
+        if uppercase_next {
+            output.extend(char.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(char);
+        }
+    }
+    output
+}
+
 fn trim_trailing_blank_lines(mut output: String) -> String {
     while output.ends_with("\n\n") {
         output.pop();
@@ -465,8 +724,9 @@ fn trim_trailing_blank_lines(mut output: String) -> String {
 #[cfg(test)]
 mod tests {
     use api_ir::{
-        ApiContract, EnumShape, EnumVariant, ErrorDef, ErrorVariant, Field, HttpStatus,
-        Optionality, Primitive, SourceRange, StructShape, SymbolId, TypeDef, TypeRef, TypeShape,
+        ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant, Field,
+        HttpMethod, HttpStatus, Optionality, Primitive, RequestShape, ResponseShape, RoutePattern,
+        SourceRange, StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
     };
 
     use super::*;
@@ -704,6 +964,97 @@ export type UserEncoded = typeof User.Encoded
         assert!(rendered.contains(
             "export type ApiClientError =\n  | NetworkError\n  | TimeoutError\n  | EncodeError\n  | DecodeError\n  | UnexpectedStatusError\n  | RemoteProtocolError"
         ));
+    }
+
+    #[test]
+    fn renders_endpoint_accessors_with_effect_signatures() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_user"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_user".to_owned(),
+                ],
+                rust_name: "get_user".to_owned(),
+                ts_path: vec!["users".to_owned(), "getUser".to_owned()],
+                route: RoutePattern("/users/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                    query_params: vec![field(
+                        "include_posts",
+                        "includePosts",
+                        type_ref("bool"),
+                        Optionality::Optional,
+                    )],
+                    body: None,
+                },
+                response: ResponseShape::Json(type_ref("User")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["GetUserError"]),
+                    name: "GetUserError".to_owned(),
+                }],
+                source: source(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(rendered.contains("import { Effect } from \"effect\""));
+        assert!(rendered.contains("import { ServerApi } from \"./layer\""));
+        assert!(rendered.contains("import type { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains("export namespace users {"));
+        assert!(rendered.contains(
+            "  export interface GetUserArgs {\n    readonly id: UserId;\n    readonly includePosts?: boolean;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const getUserRoute = {\n    method: \"GET\",\n    path: \"/users/{id}\",\n    transport: \"UnaryHttp\",\n  } as const"
+        ));
+        assert!(rendered.contains(
+            "  export const getUser = (\n    args: GetUserArgs\n  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>\n    Effect.flatMap(ServerApi, (api) => api.users.getUser(args))"
+        ));
+    }
+
+    #[test]
+    fn renders_endpoint_body_and_empty_response() {
+        let endpoint = Endpoint {
+            id: symbol("endpoint", &["users", "create_user"]),
+            rust_path: vec![
+                "server".to_owned(),
+                "users".to_owned(),
+                "create_user".to_owned(),
+            ],
+            rust_name: "create_user".to_owned(),
+            ts_path: vec!["users".to_owned(), "createUser".to_owned()],
+            route: RoutePattern("/users".to_owned()),
+            method: HttpMethod::Post,
+            transport: Transport::UnaryHttp,
+            request: RequestShape {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                body: Some(type_ref("CreateUser")),
+            },
+            response: ResponseShape::Empty,
+            errors: Vec::new(),
+            source: source(),
+            allow_unused: false,
+        };
+
+        let rendered = render_endpoints(&ApiContract {
+            package_name: "example-api".to_owned(),
+            endpoints: vec![endpoint],
+            ..ApiContract::default()
+        });
+
+        assert!(rendered
+            .contains("  export interface CreateUserArgs {\n    readonly body: CreateUser;\n  }"));
+        assert!(rendered.contains("): Effect.Effect<void, ApiClientError, ServerApi> =>"));
     }
 
     fn simple_type(name: &str) -> TypeDef {
