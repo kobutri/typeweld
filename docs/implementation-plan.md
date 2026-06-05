@@ -1664,7 +1664,7 @@ Acceptance criteria:
 - mappings appear in IR with encoded/decoded distinctions;
 - unsupported generic/external types fail with useful diagnostics.
 
-### T-012 — Implement Effect schema generator
+### T-012 — Implement Effect schema generator [done]
 
 Goal: generate Effect Schema values for API types.
 
