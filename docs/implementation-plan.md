@@ -1586,7 +1586,7 @@ Acceptance criteria:
 - every variant has a status;
 - variants map to TS tag names.
 
-### T-008 — Implement `#[api(...)]` endpoint macro
+### T-008 — Implement `#[api(...)]` endpoint macro [done]
 
 Goal: mark and validate Rust endpoint functions.
 

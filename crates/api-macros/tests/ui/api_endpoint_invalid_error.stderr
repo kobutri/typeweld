@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `NotApiError: ApiError` is not satisfied
+  --> tests/ui/api_endpoint_invalid_error.rs:11:43
+   |
+11 | async fn get_user() -> Result<Json<User>, NotApiError> {
+   |                                           ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `ApiError` is not implemented for `NotApiError`
+  --> tests/ui/api_endpoint_invalid_error.rs:8:1
+   |
+ 8 | struct NotApiError;
+   | ^^^^^^^^^^^^^^^^^^
