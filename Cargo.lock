@@ -18,6 +18,10 @@ dependencies = [
 [[package]]
 name = "api-build"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "api-collector"

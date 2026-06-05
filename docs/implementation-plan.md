@@ -2035,7 +2035,7 @@ Acceptance criteria:
 - dropped/failed streams surface typed errors;
 - integration test passes.
 
-### T-031 — Implement build usage lint bridge
+### T-031 — Implement build usage lint bridge [done]
 
 Goal: surface unused endpoints outside the editor.
 
@@ -2171,7 +2171,7 @@ Can begin after generated endpoint accessors and symbol graph exist.
 
 - T-026 [done]
 - T-027 [done]
-- T-031
+- T-031 [done]
 
 ### Track F — Testing/docs/tooling
 
