@@ -596,7 +596,7 @@ Acceptance criteria:
 
 ## Track F: gateway-only LSP
 
-### F1. Make backend startup mandatory
+### F1. Make backend startup mandatory [done]
 
 Goal: honor gateway-only mode.
 

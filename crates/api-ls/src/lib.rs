@@ -182,41 +182,35 @@ impl<W: Write> LspServer<W> {
                 };
                 match initialize_workspace(&message.params) {
                     Ok(workspace) => {
-                        let rust_backend_result =
-                            BackendProcess::start("rust-analyzer", &workspace.config.rust_analyzer)
-                                .and_then(|mut backend| {
-                                    backend.initialize(message.params.clone())?;
-                                    Ok(backend)
-                                });
+                        let rust_backend = match start_required_backend(
+                            "rust-analyzer",
+                            &workspace.config.rust_analyzer,
+                            message.params.clone(),
+                        ) {
+                            Ok(backend) => backend,
+                            Err(error) => {
+                                self.write_error(id, -32_602, error)?;
+                                return Ok(false);
+                            }
+                        };
                         let typescript_params =
                             typescript_initialize_params(&message.params, &workspace);
-                        let typescript_backend_result =
-                            BackendProcess::start("typescript", &workspace.config.typescript)
-                                .and_then(|mut backend| {
-                                    backend.initialize(typescript_params)?;
-                                    Ok(backend)
-                                });
+                        let typescript_backend = match start_required_backend(
+                            "TypeScript/Effect",
+                            &workspace.config.typescript,
+                            typescript_params,
+                        ) {
+                            Ok(backend) => backend,
+                            Err(error) => {
+                                let mut rust_backend = rust_backend;
+                                rust_backend.shutdown();
+                                self.write_error(id, -32_602, error)?;
+                                return Ok(false);
+                            }
+                        };
                         self.workspace = Some(workspace);
-                        match rust_backend_result {
-                            Ok(backend) => self.rust_analyzer = Some(backend),
-                            Err(error) => self.write_notification(
-                                "window/logMessage",
-                                json!({
-                                    "type": 3,
-                                    "message": format!("api-ls rust-analyzer backend unavailable: {error}"),
-                                }),
-                            )?,
-                        }
-                        match typescript_backend_result {
-                            Ok(backend) => self.typescript = Some(backend),
-                            Err(error) => self.write_notification(
-                                "window/logMessage",
-                                json!({
-                                    "type": 3,
-                                    "message": format!("api-ls TypeScript backend unavailable: {error}"),
-                                }),
-                            )?,
-                        }
+                        self.rust_analyzer = Some(rust_backend);
+                        self.typescript = Some(typescript_backend);
                         self.write_response(id, initialize_result())?;
                     }
                     Err(error) => self.write_error(id, -32_602, error)?,
@@ -1097,6 +1091,34 @@ struct BackendProcess {
     next_id: u64,
 }
 
+fn start_required_backend(
+    label: &str,
+    command: &BackendCommand,
+    initialize_params: Value,
+) -> Result<BackendProcess, String> {
+    BackendProcess::start(label, command)
+        .and_then(|mut backend| {
+            backend.initialize(initialize_params)?;
+            Ok(backend)
+        })
+        .map_err(|error| {
+            format!(
+                "api-ls requires the {label} backend to start and initialize; configured command: {}; error: {error}; help: install the backend or update `.api-ls.json` for this workspace",
+                backend_command_label(command)
+            )
+        })
+}
+
+fn backend_command_label(command: &BackendCommand) -> String {
+    if command.command.is_empty() {
+        return "<empty command>".to_owned();
+    }
+    std::iter::once(command.command.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl BackendProcess {
     fn start(name: &str, command: &BackendCommand) -> Result<Self, String> {
         if command.command.is_empty() {
@@ -1634,6 +1656,7 @@ mod tests {
         let root = test_root("initialize");
         fs::create_dir_all(&root).expect("create root");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
 
         let input = [
             framed(&json!({
@@ -1696,20 +1719,68 @@ mod tests {
     }
 
     #[test]
-    fn proxies_rust_requests_and_diagnostics_through_backend() {
-        let root = test_root("rust-proxy");
+    fn missing_rust_backend_fails_initialize_clearly() {
+        let root = test_root("missing-rust-backend");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            json!({
+                "rustAnalyzer": { "command": "" },
+                "typescript": { "command": "python3", "args": ["-c", MOCK_BACKEND] }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let output = initialize_output(&root);
+
+        assert!(output.contains("\"id\":\"init\""));
+        assert!(output.contains("requires the rust-analyzer backend"));
+        assert!(
+            output.contains("configured command: &lt;empty command&gt;")
+                || output.contains("configured command: <empty command>")
+        );
+        assert!(output.contains("update `.api-ls.json`"));
+    }
+
+    #[test]
+    fn missing_typescript_backend_fails_initialize_clearly() {
+        let root = test_root("missing-typescript-backend");
         fs::create_dir_all(&root).expect("create root");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
         let backend = root.join("mock_backend.py");
         fs::write(&backend, MOCK_BACKEND).expect("write backend");
         fs::write(
             root.join(".api-ls.json"),
-            format!(
-                "{{\"rustAnalyzer\":{{\"command\":\"python3\",\"args\":[{}]}}}}",
-                serde_json::to_string(&backend.to_string_lossy()).expect("serialize path")
-            ),
+            json!({
+                "rustAnalyzer": {
+                    "command": "python3",
+                    "args": [backend.to_string_lossy()]
+                },
+                "typescript": { "command": "" }
+            })
+            .to_string(),
         )
         .expect("write config");
+
+        let output = initialize_output(&root);
+
+        assert!(output.contains("\"id\":\"init\""));
+        assert!(output.contains("requires the TypeScript/Effect backend"));
+        assert!(
+            output.contains("configured command: &lt;empty command&gt;")
+                || output.contains("configured command: <empty command>")
+        );
+        assert!(output.contains("update `.api-ls.json`"));
+    }
+
+    #[test]
+    fn proxies_rust_requests_and_diagnostics_through_backend() {
+        let root = test_root("rust-proxy");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
         let rust_uri = format!("{}/src/lib.rs", path_to_file_uri(&root));
 
         let input = [
@@ -1777,16 +1848,7 @@ mod tests {
             "export const generated = true\n",
         )
         .expect("write generated file");
-        let backend = root.join("mock_backend.py");
-        fs::write(&backend, MOCK_BACKEND).expect("write backend");
-        fs::write(
-            root.join(".api-ls.json"),
-            format!(
-                "{{\"rustAnalyzer\":{{\"command\":\"\"}},\"typescript\":{{\"command\":\"python3\",\"args\":[{}]}}}}",
-                serde_json::to_string(&backend.to_string_lossy()).expect("serialize path")
-            ),
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let ts_uri = format!("{}/src/client.ts", path_to_file_uri(&root));
         let generated_uri = path_to_file_uri(&generated_cache_dir.join("index.ts"));
 
@@ -1845,11 +1907,7 @@ mod tests {
         fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         let ts_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
         fs::write(
@@ -1929,11 +1987,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::create_dir_all(root.join("client")).expect("create client");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
         let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
@@ -2026,11 +2080,7 @@ mod tests {
         fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         let ts_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
         fs::write(
@@ -2120,11 +2170,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::create_dir_all(root.join("client")).expect("create client");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
         let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
@@ -2234,11 +2280,7 @@ mod tests {
         fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
@@ -2302,11 +2344,7 @@ mod tests {
         fs::create_dir_all(root.join("target/api-contract/graph")).expect("create usage dir");
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            "{\"rustAnalyzer\":{\"command\":\"\"},\"typescript\":{\"command\":\"\"}}\n",
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
@@ -2427,11 +2465,7 @@ mod tests {
         fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
         fs::create_dir_all(root.join("crates/server/src")).expect("create rust dir");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            r#"{"rustAnalyzer":{"command":""},"typescript":{"command":""}}"#,
-        )
-        .expect("write config");
+        write_mock_backend_config(&root);
         let contract = api_test_fixtures::basic_contract();
         let package = api_gen_effect_v4::render_generated_package(&contract, &root.join("target"));
         let symbol_graph = api_gen_effect_v4::render_symbol_graph(&contract, &package);
@@ -2511,6 +2545,23 @@ mod tests {
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
     }
 
+    fn initialize_output(root: &Path) -> String {
+        let input = framed(&json!({
+            "jsonrpc": "2.0",
+            "id": "init",
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": path_to_file_uri(root),
+                "capabilities": {}
+            }
+        }));
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        String::from_utf8(output).expect("utf8 output")
+    }
+
     fn test_root(name: &str) -> PathBuf {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!("api-ls-{name}-{}-{id}", std::process::id()));
@@ -2551,14 +2602,7 @@ mod tests {
         fs::create_dir_all(root.join("target/api-contract/graph")).expect("create usage dir");
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
-        fs::write(
-            root.join(".api-ls.json"),
-            format!(
-                "{{\"rustAnalyzer\":{{\"command\":\"\"}},\"typescript\":{{\"command\":\"\"}},\"unusedEndpointLints\":{}}}\n",
-                serde_json::to_string(lint_level).expect("serialize lint level")
-            ),
-        )
-        .expect("write config");
+        write_mock_backend_config_with_lint(root, Some(lint_level));
         let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
@@ -2594,6 +2638,29 @@ mod tests {
             .to_string(),
         )
         .expect("write usage index");
+    }
+
+    fn write_mock_backend_config(root: &Path) {
+        write_mock_backend_config_with_lint(root, None);
+    }
+
+    fn write_mock_backend_config_with_lint(root: &Path, lint: Option<&str>) {
+        let backend = root.join("mock_backend.py");
+        fs::write(&backend, MOCK_BACKEND).expect("write mock backend");
+        let mut config = json!({
+            "rustAnalyzer": {
+                "command": "python3",
+                "args": [backend.to_string_lossy()]
+            },
+            "typescript": {
+                "command": "python3",
+                "args": [backend.to_string_lossy()]
+            }
+        });
+        if let Some(lint) = lint {
+            config["unusedEndpointLints"] = json!(lint);
+        }
+        fs::write(root.join(".api-ls.json"), config.to_string()).expect("write config");
     }
 
     fn run_initialized_workspace(root: &Path) -> String {
