@@ -644,7 +644,7 @@ Acceptance criteria:
 - Formatting, completion, semantic tokens, code actions, call hierarchy, and workspace symbols work where backends support them.
 - Cross-language definition/references/rename/hover are handled by `api-ls`.
 
-### F4. Serve generated files without navigating users into them
+### F4. Serve generated files without navigating users into them [done]
 
 Goal: generated files are available to TS but transparent to users.
 

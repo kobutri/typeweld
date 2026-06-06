@@ -22,6 +22,7 @@ use tokio::{
 };
 
 const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
+const OPEN_GENERATED_FILE_COMMAND: &str = "api-ls.openGeneratedPackageFile";
 
 /// `api-ls` configuration loaded from the workspace root.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -273,8 +274,19 @@ impl AsyncLspServer {
                                 return Ok(());
                             }
                         };
-                        let typescript_params =
-                            typescript_initialize_params(&message.params, &workspace);
+                        let generated_tsconfig = match ensure_generated_package_cache(&workspace) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                rust_backend.stop().await;
+                                self.write_error(id, -32_602, error)?;
+                                return Ok(());
+                            }
+                        };
+                        let typescript_params = typescript_initialize_params(
+                            &message.params,
+                            &workspace,
+                            &generated_tsconfig,
+                        );
                         let typescript_backend = match start_required_backend(
                             BackendKind::TypeScript,
                             "TypeScript/Effect",
@@ -379,6 +391,11 @@ impl AsyncLspServer {
             "workspace/symbol" => {
                 if let Some(id) = message.id {
                     self.handle_workspace_symbol_request(message.params, id)?;
+                }
+            }
+            "workspace/executeCommand" => {
+                if let Some(id) = message.id {
+                    self.handle_execute_command(message.params, id)?;
                 }
             }
             _ => match message.id {
@@ -553,6 +570,31 @@ impl AsyncLspServer {
             )?;
         }
         Ok(())
+    }
+
+    fn handle_execute_command(&mut self, params: Value, id: Value) -> Result<(), String> {
+        let Some(command) = params.get("command").and_then(Value::as_str) else {
+            return self.write_error(id, -32_602, "executeCommand requires `command`".to_owned());
+        };
+        if command == OPEN_GENERATED_FILE_COMMAND {
+            return self.open_generated_package_file(params, id);
+        }
+        if let Some(kind) = self.backend_for_execute_command(command) {
+            self.forward_request_to_backend(
+                kind,
+                "workspace/executeCommand",
+                params,
+                id,
+                PendingRequestKind::Forward,
+                true,
+            )
+        } else {
+            self.write_error(
+                id,
+                -32_601,
+                format!("api-ls has no handler for command `{command}`"),
+            )
+        }
     }
 
     fn route_backend(&self, method: &str, params: &Value) -> Option<BackendKind> {
@@ -891,6 +933,24 @@ impl AsyncLspServer {
             .is_some_and(capability_enabled)
     }
 
+    fn backend_for_execute_command(&self, command: &str) -> Option<BackendKind> {
+        [BackendKind::Rust, BackendKind::TypeScript]
+            .into_iter()
+            .find(|kind| self.backend_supports_execute_command(*kind, command))
+    }
+
+    fn backend_supports_execute_command(&self, kind: BackendKind, command: &str) -> bool {
+        self.backend(kind)
+            .and_then(|backend| backend.capabilities.get("executeCommandProvider"))
+            .and_then(|provider| provider.get("commands"))
+            .and_then(Value::as_array)
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|candidate| candidate.as_str() == Some(command))
+            })
+    }
+
     fn untrack_client_request(&mut self, client_id: &Value, key: &BackendRequestKey) {
         let client_id = rpc_id_key(client_id);
         if let Some(keys) = self.client_requests.get_mut(&client_id) {
@@ -909,6 +969,32 @@ impl AsyncLspServer {
             return;
         }
         semantic_tokens.translate_response(kind, raw);
+    }
+
+    fn open_generated_package_file(&mut self, params: Value, id: Value) -> Result<(), String> {
+        let Some(workspace) = &self.workspace else {
+            return self.write_error(id, -32_000, "api-ls is not initialized".to_owned());
+        };
+        let Some(path) = generated_command_file_path(&params, workspace) else {
+            return self.write_error(
+                id,
+                -32_602,
+                "generated file command requires a generated package `uri` or `path`".to_owned(),
+            );
+        };
+        if !path.is_file() {
+            return self.write_error(
+                id,
+                -32_602,
+                format!("generated package file does not exist: {}", path.display()),
+            );
+        }
+        self.write_response(
+            id,
+            json!({
+                "uri": path_to_file_uri(&path),
+            }),
+        )
     }
 
     fn read_generated_package_file(&mut self, params: Value, id: Value) -> Result<(), String> {
@@ -1140,6 +1226,17 @@ struct WorkspaceSymbolRequest {
     client_id: Value,
     remaining: BTreeSet<BackendKind>,
     results: Vec<Value>,
+}
+
+#[derive(Debug)]
+struct GeneratedPackageMapping {
+    package_name: String,
+    package_dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedPackageManifest {
+    name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1923,19 +2020,153 @@ fn initialize_workspace(params: &Value) -> Result<WorkspaceConfig, String> {
     discover_workspace_config(root_hint.as_deref(), &cwd)
 }
 
-fn typescript_initialize_params(params: &Value, workspace: &WorkspaceConfig) -> Value {
+fn typescript_initialize_params(
+    params: &Value,
+    workspace: &WorkspaceConfig,
+    generated_tsconfig: &Path,
+) -> Value {
     let mut params = params.clone();
     params["initializationOptions"]["hostInfo"] = json!("api-ls");
     params["initializationOptions"]["generatedPackageCacheDir"] =
         json!(workspace.generated_cache_dir.to_string_lossy());
-    params["initializationOptions"]["generatedPackageTsconfig"] = json!(workspace
-        .generated_cache_dir
-        .join("tsconfig.paths.json")
-        .to_string_lossy());
+    params["initializationOptions"]["generatedPackageTsconfig"] =
+        json!(generated_tsconfig.to_string_lossy());
     if let Some(plugin) = &workspace.config.effect_language_service_plugin {
         params["initializationOptions"]["plugins"] = json!([{ "name": plugin }]);
     }
     params
+}
+
+fn ensure_generated_package_cache(workspace: &WorkspaceConfig) -> Result<PathBuf, String> {
+    let packages = discover_generated_packages(&workspace.generated_cache_dir)?;
+    let tsconfig_path = generated_package_tsconfig_path(workspace);
+    if let Some(parent) = tsconfig_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create generated package tsconfig directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(
+        &tsconfig_path,
+        render_generated_package_tsconfig_paths(&packages),
+    )
+    .map_err(|error| {
+        format!(
+            "failed to write generated package tsconfig `{}`: {error}",
+            tsconfig_path.display()
+        )
+    })?;
+    Ok(tsconfig_path)
+}
+
+fn discover_generated_packages(
+    packages_dir: &Path,
+) -> Result<Vec<GeneratedPackageMapping>, String> {
+    if !packages_dir.is_dir() {
+        return Err(format!(
+            "generated package cache `{}` does not exist; run `api gen --contract <path> --target-dir <target>` before starting api-ls",
+            packages_dir.display()
+        ));
+    }
+    let mut entries = fs::read_dir(packages_dir)
+        .map_err(|error| {
+            format!(
+                "failed to read generated package cache `{}`: {error}",
+                packages_dir.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to read generated package cache `{}`: {error}",
+                packages_dir.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+
+    let mut packages = Vec::new();
+    for entry in entries {
+        let package_dir = entry.path();
+        if !package_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = package_dir.join("package.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let index_path = package_dir.join("index.ts");
+        if !index_path.is_file() {
+            return Err(format!(
+                "generated package `{}` is missing index.ts; rerun `api gen`",
+                package_dir.display()
+            ));
+        }
+        let manifest = fs::read_to_string(&manifest_path).map_err(|error| {
+            format!(
+                "failed to read generated package manifest `{}`: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest =
+            serde_json::from_str::<GeneratedPackageManifest>(&manifest).map_err(|error| {
+                format!(
+                    "failed to parse generated package manifest `{}`: {error}",
+                    manifest_path.display()
+                )
+            })?;
+        packages.push(GeneratedPackageMapping {
+            package_name: manifest.name,
+            package_dir,
+        });
+    }
+
+    if packages.is_empty() {
+        return Err(format!(
+            "generated package cache `{}` is empty; run `api gen --contract <path> --target-dir <target>` before starting api-ls",
+            packages_dir.display()
+        ));
+    }
+
+    Ok(packages)
+}
+
+fn generated_package_tsconfig_path(workspace: &WorkspaceConfig) -> PathBuf {
+    if workspace
+        .generated_cache_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("packages")
+    {
+        workspace.generated_cache_dir.parent().map_or_else(
+            || workspace.generated_cache_dir.join("tsconfig.paths.json"),
+            |parent| parent.join("tsconfig.paths.json"),
+        )
+    } else {
+        workspace.generated_cache_dir.join("tsconfig.paths.json")
+    }
+}
+
+fn render_generated_package_tsconfig_paths(packages: &[GeneratedPackageMapping]) -> String {
+    let mut paths = serde_json::Map::new();
+    for package in packages {
+        let package_dir = normalize_ts_path(&package.package_dir);
+        paths.insert(
+            package.package_name.clone(),
+            json!([format!("{package_dir}/index.ts")]),
+        );
+        paths.insert(
+            format!("{}/*", package.package_name),
+            json!([format!("{package_dir}/*")]),
+        );
+    }
+    serde_json::to_string_pretty(&json!({
+        "compilerOptions": {
+            "paths": paths,
+        },
+    }))
+    .expect("generated package tsconfig serializes")
 }
 
 fn initialize_result(
@@ -1947,6 +2178,7 @@ fn initialize_result(
     if let Some(semantic_tokens) = semantic_tokens {
         capabilities["semanticTokensProvider"] = semantic_tokens.provider.clone();
     }
+    add_execute_command(&mut capabilities, OPEN_GENERATED_FILE_COMMAND);
     capabilities["positionEncoding"] = json!("utf-16");
     capabilities["textDocumentSync"] = json!(2);
     capabilities["definitionProvider"] = json!(true);
@@ -2009,6 +2241,30 @@ fn capability_enabled(value: &Value) -> bool {
         Value::Bool(enabled) => *enabled,
         Value::Null => false,
         _ => true,
+    }
+}
+
+fn add_execute_command(capabilities: &mut Value, command: &str) {
+    if !capabilities
+        .get("executeCommandProvider")
+        .is_some_and(Value::is_object)
+    {
+        capabilities["executeCommandProvider"] = json!({ "commands": [] });
+    }
+    if !capabilities["executeCommandProvider"]
+        .get("commands")
+        .is_some_and(Value::is_array)
+    {
+        capabilities["executeCommandProvider"]["commands"] = json!([]);
+    }
+    let commands = capabilities["executeCommandProvider"]["commands"]
+        .as_array_mut()
+        .expect("execute commands is an array");
+    if !commands
+        .iter()
+        .any(|candidate| candidate.as_str() == Some(command))
+    {
+        commands.push(json!(command));
     }
 }
 
@@ -2360,8 +2616,25 @@ fn generated_file_path(params: &Value, workspace: &WorkspaceConfig) -> Option<Pa
         .then_some(path)
 }
 
+fn generated_command_file_path(params: &Value, workspace: &WorkspaceConfig) -> Option<PathBuf> {
+    let argument = params
+        .get("arguments")
+        .and_then(Value::as_array)
+        .and_then(|arguments| arguments.first())?;
+    let params = if let Some(path) = argument.as_str() {
+        json!({ "path": path })
+    } else {
+        argument.clone()
+    };
+    generated_file_path(&params, workspace)
+}
+
 fn path_to_file_uri(path: &Path) -> String {
     format!("file://{}", path.to_string_lossy())
+}
+
+fn normalize_ts_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn same_uri(left: &str, right: &str) -> bool {
@@ -2897,6 +3170,7 @@ mod tests {
         let root = test_root("missing-typescript-backend");
         fs::create_dir_all(&root).expect("create root");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_minimal_generated_package(&root);
         let backend = root.join("mock_backend.py");
         fs::write(&backend, MOCK_BACKEND).expect("write backend");
         fs::write(
@@ -3326,6 +3600,113 @@ mod tests {
             .expect("semantic token response");
 
         assert_eq!(semantic_tokens["result"]["data"], json!([0, 0, 4, 2, 2]));
+    }
+
+    #[test]
+    fn missing_generated_package_cache_fails_before_typescript_initialize() {
+        let root = test_root("missing-generated-cache");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let backend = root.join("mock_backend.py");
+        fs::write(&backend, MOCK_BACKEND).expect("write backend");
+        fs::write(
+            root.join(".api-ls.json"),
+            json!({
+                "rustAnalyzer": {
+                    "command": "python3",
+                    "args": [backend.to_string_lossy()]
+                },
+                "typescript": {
+                    "command": "python3",
+                    "args": [backend.to_string_lossy()]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let output = initialize_output(&root);
+
+        assert!(output.contains("\"id\":\"init\""));
+        assert!(output.contains("generated package cache"));
+        assert!(output.contains("api gen"));
+    }
+
+    #[test]
+    fn typescript_initialize_receives_generated_cache_and_tsconfig_paths() {
+        let root = test_root("generated-paths");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(&root, MOCK_BACKEND, INIT_OPTIONS_BACKEND, None);
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                shutdown_request(2),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let capabilities = &messages[0]["result"]["capabilities"];
+        let tsconfig = root.join("target/api-contract/effect-v4/tsconfig.paths.json");
+
+        assert!(tsconfig.is_file());
+        assert!(fs::read_to_string(&tsconfig)
+            .expect("read generated tsconfig")
+            .contains("@workspace/test-api"));
+        assert_eq!(
+            capabilities["experimental"]["generatedPackageCacheDir"],
+            json!(path_string(
+                &root.join("target/api-contract/effect-v4/packages")
+            ))
+        );
+        assert_eq!(
+            capabilities["experimental"]["generatedPackageTsconfig"],
+            json!(path_string(&tsconfig))
+        );
+    }
+
+    #[test]
+    fn execute_command_returns_explicit_generated_file_uri() {
+        let root = test_root("open-generated-command");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let generated_file =
+            root.join("target/api-contract/effect-v4/packages/workspace-test-api/index.ts");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "workspace/executeCommand",
+                    "params": {
+                        "command": OPEN_GENERATED_FILE_COMMAND,
+                        "arguments": [{ "uri": path_to_file_uri(&generated_file) }]
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let capabilities = &messages[0]["result"]["capabilities"];
+        let command_response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("command response");
+
+        assert!(capabilities["executeCommandProvider"]["commands"]
+            .as_array()
+            .expect("commands array")
+            .iter()
+            .any(|command| command.as_str() == Some(OPEN_GENERATED_FILE_COMMAND)));
+        assert_eq!(
+            command_response["result"]["uri"],
+            json!(path_to_file_uri(&generated_file))
+        );
     }
 
     #[test]
@@ -4012,6 +4393,10 @@ mod tests {
         messages
     }
 
+    fn path_string(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
     fn assert_output_order(output: &str, first: &str, second: &str) {
         let first_index = output.find(first).expect("first output marker");
         let second_index = output.find(second).expect("second output marker");
@@ -4126,6 +4511,7 @@ mod tests {
         typescript_backend_source: &str,
         log_file: Option<&str>,
     ) {
+        write_minimal_generated_package(root);
         let rust_backend = root.join("rust_backend.py");
         let typescript_backend = root.join("typescript_backend.py");
         fs::write(&rust_backend, rust_backend_source).expect("write rust backend");
@@ -4148,6 +4534,7 @@ mod tests {
     }
 
     fn write_mock_backend_config_with_lint(root: &Path, lint: Option<&str>) {
+        write_minimal_generated_package(root);
         let backend = root.join("mock_backend.py");
         fs::write(&backend, MOCK_BACKEND).expect("write mock backend");
         let mut config = json!({
@@ -4164,6 +4551,17 @@ mod tests {
             config["unusedEndpointLints"] = json!(lint);
         }
         fs::write(root.join(".api-ls.json"), config.to_string()).expect("write config");
+    }
+
+    fn write_minimal_generated_package(root: &Path) {
+        let package_dir = root.join("target/api-contract/effect-v4/packages/workspace-test-api");
+        fs::create_dir_all(&package_dir).expect("create generated package");
+        fs::write(
+            package_dir.join("package.json"),
+            "{\"name\":\"@workspace/test-api\",\"type\":\"module\"}\n",
+        )
+        .expect("write generated package manifest");
+        fs::write(package_dir.join("index.ts"), "export {}\n").expect("write generated index");
     }
 
     fn run_initialized_workspace(root: &Path) -> String {
@@ -4456,6 +4854,55 @@ while True:
         sys.stderr.write("backend stderr hello\n")
         sys.stderr.flush()
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const INIT_OPTIONS_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        options = message.get("params", {}).get("initializationOptions", {})
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":{
+                "capabilities":{
+                    "experimental":{
+                        "generatedPackageCacheDir":options.get("generatedPackageCacheDir"),
+                        "generatedPackageTsconfig":options.get("generatedPackageTsconfig")
+                    }
+                }
+            }
+        })
     elif method == "shutdown":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
     elif method == "exit":
