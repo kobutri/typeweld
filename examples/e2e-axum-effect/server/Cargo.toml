@@ -16,6 +16,7 @@ api-collector = { path = "../../../crates/api-collector" }
 api-core = { path = "../../../crates/api-core" }
 api-macros = { path = "../../../crates/api-macros" }
 axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }

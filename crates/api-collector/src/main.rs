@@ -785,7 +785,6 @@ struct NewProject {
     root_dir: PathBuf,
     name: String,
     rust_package: String,
-    crate_name: String,
     ts_package: String,
     api_module: String,
     sample_name: String,
@@ -851,12 +850,6 @@ fn resolve_new_project(options: NewProjectOptions) -> Result<NewProject, String>
     )?;
     let rust_package = sanitize_kebab(&rust_package);
     validate_cargo_package_name(&rust_package)?;
-    let crate_name = rust_package.replace('-', "_");
-    if !is_rust_identifier(&crate_name) {
-        return Err(format!(
-            "api new Rust package `{rust_package}` does not produce a valid crate name"
-        ));
-    }
 
     let ts_package_default = format!("@workspace/{name}-api");
     let ts_package = prompt_string(
@@ -903,7 +896,6 @@ fn resolve_new_project(options: NewProjectOptions) -> Result<NewProject, String>
         root_dir,
         name,
         rust_package,
-        crate_name,
         ts_package,
         api_module,
         sample_name,
@@ -962,7 +954,6 @@ fn write_new_project(project: &NewProject) -> Result<(), String> {
         "server/Cargo.toml",
         render_new_server_cargo_toml(project),
     )?;
-    write_project_file(project, "server/src/lib.rs", render_new_server_lib(project))?;
     write_project_file(
         project,
         "server/src/main.rs",
@@ -1048,39 +1039,24 @@ license.workspace = true
 version.workspace = true
 publish = false
 
-[lib]
-name = {crate_name}
-path = "src/lib.rs"
-
-[[bin]]
-name = {rust_package}
-path = "src/main.rs"
-
 [dependencies]
 api-axum = {{ path = {api_axum_path} }}
 api-collector = {{ path = {api_collector_path} }}
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
 axum = "0.8"
+clap = {{ version = "4.5", features = ["derive"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
 tokio = {{ version = "1.0", features = ["macros", "net", "rt-multi-thread"] }}
-
-[package.metadata.rust_ts]
-ts_package = {ts_package}
-api_root = {api_root}
-features = []
 
 [lints]
 workspace = true
 "#,
         rust_package = toml_string(&project.rust_package),
-        crate_name = toml_string(&project.crate_name),
         api_axum_path = crate_dir("api-axum"),
         api_collector_path = crate_dir("api-collector"),
         api_core_path = crate_dir("api-core"),
         api_macros_path = crate_dir("api-macros"),
-        ts_package = toml_string(&project.ts_package),
-        api_root = toml_string(&format!("{}::api", project.crate_name)),
     )
 }
 
@@ -1090,6 +1066,11 @@ fn render_new_root_package_json(project: &NewProject) -> String {
         "cargo run -q --manifest-path {} --bin api --",
         shell_quote(&api_manifest)
     );
+    let contract_path = format!(
+        "target/api-contract/contracts/{}.json",
+        sanitize_package_dir_name(&project.rust_package)
+    );
+    let quoted_contract_path = shell_quote(&contract_path);
     let language_server = file_dependency(&project.repo_root.join("npm/language-server-wrapper"));
     format!(
         r#"{{
@@ -1100,32 +1081,41 @@ fn render_new_root_package_json(project: &NewProject) -> String {
     "app"
   ],
   "scripts": {{
+    "api:collect": {api_collect},
     "api:check": {api_check},
     "api:gen": {api_gen},
+    "app": {app},
     "dev:server": {dev_server},
+    "start": {start},
     "typecheck": {typecheck}
   }},
   "devDependencies": {{
     "@effect/language-service": "*",
     "@rust-ts-integration/language-server": {language_server},
+    "tsx": "^4.19.0",
     "typescript": "^5.5.0",
     "typescript-language-server": "*"
   }}
 }}
 "#,
         workspace_name = json_string(&format!("{}-workspace", project.name)),
+        api_collect = json_string(&format!(
+            "mkdir -p target/api-contract/contracts && cargo run -q -p {} -- contract > {}",
+            shell_quote(&project.rust_package),
+            quoted_contract_path
+        )),
         api_check = json_string(&format!(
-            "{api_command} check --manifest-path Cargo.toml --package {} --target-dir target --ts-dir app/src --cargo-check",
-            project.rust_package
+            "npm run api:collect && {api_command} check --manifest-path Cargo.toml --contract {quoted_contract_path} --target-dir target --ts-dir app/src --cargo-check"
         )),
         api_gen = json_string(&format!(
-            "{api_command} check --manifest-path Cargo.toml --package {} --target-dir target --ts-dir app/src",
-            project.rust_package
+            "npm run api:collect && {api_command} gen --contract {quoted_contract_path} --target-dir target"
         )),
+        app = json_string(&format!("npm --workspace {}-app run start", project.name)),
         dev_server = json_string(&format!(
             "cargo run -p {} -- serve {}",
             project.rust_package, project.bind_addr
         )),
+        start = json_string(&format!("npm --workspace {}-app run start", project.name)),
         typecheck = json_string(&format!("npm --workspace {}-app run typecheck", project.name)),
         language_server = json_string(&language_server),
     )
@@ -1139,6 +1129,7 @@ fn render_new_app_package_json(project: &NewProject) -> String {
   "private": true,
   "type": "module",
   "scripts": {{
+    "start": "tsx --tsconfig tsconfig.json src/client.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   }},
   "dependencies": {{
@@ -1226,7 +1217,13 @@ Start the server:
 npm run dev:server
 ```
 
-The Rust endpoint lives in `server/src/lib.rs`. The TypeScript usage lives in
+Run the TypeScript app in another terminal:
+
+```sh
+npm run app
+```
+
+The Rust endpoint lives in `server/src/main.rs`. The TypeScript usage lives in
 `app/src/client.ts` and imports the generated package `{ts_package}` after
 `npm run api:check` writes it under `target/api-contract/effect-v4/packages`.
 
@@ -1246,32 +1243,56 @@ workspace.
     )
 }
 
-fn render_new_server_lib(project: &NewProject) -> String {
+fn render_new_server_main(project: &NewProject) -> String {
     format!(
-        r#"use api_axum::{{router, Json, Path}};
-use api_collector::{{collect_contract, CollectorInput}};
+        r#"use std::{{
+    io::{{self, Write}},
+    net::SocketAddr,
+}};
+
+use api_axum::{{router, Json, Path}};
+use api_collector::{{collect_contract, contract_to_json, CollectorInput}};
 use api_core::{{api_module, ir::ApiContract, ApiModule, ApiType}};
 use axum::{{response::Response, Router}};
+use clap::{{Parser, Subcommand}};
 use serde::{{Deserialize, Serialize}};
 
-pub const TS_PACKAGE_NAME: &str = {ts_package};
+const TS_PACKAGE_NAME: &str = {ts_package};
+
+#[derive(Debug, Parser)]
+#[command(name = {rust_package}, about = "Run the sample API server")]
+struct Cli {{
+    #[command(subcommand)]
+    command: Option<Command>,
+}}
+
+#[derive(Debug, Subcommand)]
+enum Command {{
+    /// Print the API contract as JSON.
+    Contract,
+    /// Serve the API over HTTP.
+    Serve {{
+        #[arg(default_value = {bind_addr})]
+        addr: SocketAddr,
+    }},
+}}
 
 #[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
-pub struct Greeting {{
-    pub message: String,
-    pub requested_name: String,
+struct Greeting {{
+    message: String,
+    requested_name: String,
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
 #[serde(tag = "_tag", rename_all = "PascalCase")]
-pub enum GreetingError {{
+enum GreetingError {{
     #[api_error(status = 400)]
     EmptyName,
 }}
 
 #[api_macros::api(method = "GET", path = "/{route_prefix}/{{name}}")]
-pub async fn greet(name: Path<String>) -> Result<Json<Greeting>, GreetingError> {{
+async fn greet(name: Path<String>) -> Result<Json<Greeting>, GreetingError> {{
     let name = name.into_inner();
     if name.trim().is_empty() {{
         return Err(GreetingError::EmptyName);
@@ -1283,13 +1304,39 @@ pub async fn greet(name: Path<String>) -> Result<Json<Greeting>, GreetingError> 
     }}))
 }}
 
-#[must_use]
-pub fn api() -> ApiModule {{
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    match Cli::parse()
+        .command
+        .unwrap_or_else(|| Command::Serve {{ addr: default_addr() }})
+    {{
+        Command::Contract => println!("{{}}", contract_to_json(&contract())?),
+        Command::Serve {{ addr }} => serve(addr).await?,
+    }}
+
+    Ok(())
+}}
+
+fn default_addr() -> SocketAddr {{
+    {bind_addr}.parse().expect("generated default listen address is valid")
+}}
+
+async fn serve(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+
+    println!("LISTENING http://{{local_addr}}");
+    io::stdout().flush()?;
+
+    axum::serve(listener, app()).await?;
+    Ok(())
+}}
+
+fn api() -> ApiModule {{
     api_module!(name = {api_module}, endpoints = [greet])
 }}
 
-#[must_use]
-pub fn contract() -> ApiContract {{
+fn contract() -> ApiContract {{
     collect_contract(CollectorInput {{
         package_name: TS_PACKAGE_NAME.to_owned(),
         root_module: api(),
@@ -1298,8 +1345,7 @@ pub fn contract() -> ApiContract {{
     }})
 }}
 
-#[must_use]
-pub fn app() -> Router {{
+fn app() -> Router {{
     router(api())
         .route(__api_endpoint_greet(), greet_response)
         .into_router()
@@ -1310,85 +1356,10 @@ async fn greet_response(name: Path<String>) -> Response {{
 }}
 "#,
         ts_package = rust_string(&project.ts_package),
+        rust_package = rust_string(&project.rust_package),
+        bind_addr = rust_string(&project.bind_addr),
         api_module = rust_string(&project.api_module),
         route_prefix = project.api_module,
-    )
-}
-
-fn render_new_server_main(project: &NewProject) -> String {
-    format!(
-        r#"use std::{{
-    env,
-    io::{{self, Write}},
-    net::SocketAddr,
-    process::ExitCode,
-}};
-
-use api_collector::contract_to_json;
-
-#[tokio::main]
-async fn main() -> ExitCode {{
-    match run().await {{
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {{
-            eprintln!("{{error}}");
-            ExitCode::FAILURE
-        }}
-    }}
-}}
-
-async fn run() -> Result<(), String> {{
-    let mut args = env::args().skip(1);
-    let command = args.next().unwrap_or_else(|| "serve".to_owned());
-
-    match command.as_str() {{
-        "contract" => {{
-            let json = contract_to_json(&{crate_name}::contract())
-                .map_err(|error| format!("failed to serialize contract: {{error}}"))?;
-            println!("{{json}}");
-            Ok(())
-        }}
-        "serve" => {{
-            let addr = args
-                .next()
-                .unwrap_or_else(|| {bind_addr}.to_owned())
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("invalid listen address: {{error}}"))?;
-            serve(addr).await
-        }}
-        "--help" | "-h" | "help" => {{
-            print_usage();
-            Ok(())
-        }}
-        other => Err(format!("unknown server command `{{other}}`")),
-    }}
-}}
-
-async fn serve(addr: SocketAddr) -> Result<(), String> {{
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|error| format!("failed to bind {{addr}}: {{error}}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|error| format!("failed to read local address: {{error}}"))?;
-
-    println!("LISTENING http://{{local_addr}}");
-    io::stdout()
-        .flush()
-        .map_err(|error| format!("failed to flush listen address: {{error}}"))?;
-
-    axum::serve(listener, {crate_name}::app())
-        .await
-        .map_err(|error| format!("server failed: {{error}}"))
-}}
-
-fn print_usage() {{
-    println!("usage:\n  {rust_package} contract\n  {rust_package} serve [addr]");
-}}
-"#,
-        crate_name = project.crate_name,
-        bind_addr = rust_string(&project.bind_addr),
-        rust_package = project.rust_package,
     )
 }
 
@@ -1454,6 +1425,9 @@ export const loadGreetingMessage = (name: string) =>
 export const program = loadGreetingMessage({sample_name}).pipe(
   Effect.provide(serverLayer({base_url})),
 )
+
+const message = await Effect.runPromise(program)
+console.log(message)
 "#,
         api_module = project.api_module,
         ts_package = json_string(&project.ts_package),
@@ -3187,19 +3161,35 @@ mod tests {
         assert!(root.join("Cargo.toml").is_file());
         assert!(root.join("package.json").is_file());
         assert!(root.join(".api-ls.json").is_file());
-        assert!(root.join("server/src/lib.rs").is_file());
+        assert!(root.join("server/src/main.rs").is_file());
+        assert!(!root.join("server/src/lib.rs").exists());
         assert!(root.join("app/src/client.ts").is_file());
+
+        let root_manifest =
+            fs::read_to_string(root.join("package.json")).expect("read root manifest");
+        assert!(root_manifest.contains("\"api:collect\""));
+        assert!(root_manifest.contains("-- contract >"));
+        assert!(root_manifest.contains("--contract"));
+        assert!(root_manifest.contains("\"app\""));
+        assert!(root_manifest.contains("run start"));
 
         let server_manifest =
             fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
         assert!(server_manifest.contains("name = \"sample-api-server\""));
-        assert!(server_manifest.contains("ts_package = \"@workspace/sample-api\""));
-        assert!(server_manifest.contains("api_root = \"sample_api_server::api\""));
+        assert!(!server_manifest.contains("[lib]"));
+        assert!(!server_manifest.contains("[package.metadata.rust_ts]"));
+        assert!(server_manifest.contains("clap ="));
+
+        let app_manifest =
+            fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
+        assert!(app_manifest.contains("\"start\""));
+        assert!(app_manifest.contains("tsx --tsconfig tsconfig.json src/client.ts"));
 
         let client = fs::read_to_string(root.join("app/src/client.ts")).expect("read client");
         assert!(client.contains("import { ServerApi, greetings } from \"@workspace/sample-api\""));
         assert!(client.contains("yield* greetings.greet({ name })"));
         assert!(client.contains("\"Grace\""));
+        assert!(client.contains("Effect.runPromise(program)"));
 
         let lsp = fs::read_to_string(root.join(".api-ls.json")).expect("read lsp config");
         assert!(lsp.contains("typescript-language-server"));

@@ -1,68 +1,54 @@
 use std::{
-    env,
     io::{self, Write},
     net::SocketAddr,
-    process::ExitCode,
 };
 
 use api_collector::contract_to_json;
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "e2e-axum-effect-server", about = "Run the e2e Axum server")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Print the API contract as JSON.
+    Contract,
+    /// Serve the API over HTTP.
+    Serve {
+        #[arg(default_value = "127.0.0.1:3000")]
+        addr: SocketAddr,
+    },
+}
 
 #[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::FAILURE
-        }
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match Cli::parse().command.unwrap_or_else(|| Command::Serve {
+        addr: default_addr(),
+    }) {
+        Command::Contract => println!("{}", contract_to_json(&e2e_axum_effect_server::contract())?),
+        Command::Serve { addr } => serve(addr).await?,
     }
+
+    Ok(())
 }
 
-async fn run() -> Result<(), String> {
-    let mut args = env::args().skip(1);
-    let command = args.next().unwrap_or_else(|| "serve".to_owned());
-
-    match command.as_str() {
-        "contract" => {
-            let json = contract_to_json(&e2e_axum_effect_server::contract())
-                .map_err(|error| format!("failed to serialize contract: {error}"))?;
-            println!("{json}");
-            Ok(())
-        }
-        "serve" => {
-            let addr = args
-                .next()
-                .unwrap_or_else(|| "127.0.0.1:3000".to_owned())
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("invalid listen address: {error}"))?;
-            serve(addr).await
-        }
-        "--help" | "-h" | "help" => {
-            print_usage();
-            Ok(())
-        }
-        other => Err(format!("unknown e2e server command `{other}`")),
-    }
+fn default_addr() -> SocketAddr {
+    "127.0.0.1:3000"
+        .parse()
+        .expect("default listen address is valid")
 }
 
-async fn serve(addr: SocketAddr) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|error| format!("failed to bind {addr}: {error}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|error| format!("failed to read local address: {error}"))?;
+async fn serve(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
 
     println!("LISTENING http://{local_addr}");
-    io::stdout()
-        .flush()
-        .map_err(|error| format!("failed to flush listen address: {error}"))?;
+    io::stdout().flush()?;
 
-    axum::serve(listener, e2e_axum_effect_server::app())
-        .await
-        .map_err(|error| format!("server failed: {error}"))
-}
-
-fn print_usage() {
-    println!("usage:\n  e2e-axum-effect-server contract\n  e2e-axum-effect-server serve [addr]");
+    axum::serve(listener, e2e_axum_effect_server::app()).await?;
+    Ok(())
 }
