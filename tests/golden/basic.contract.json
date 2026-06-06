@@ -1,0 +1,375 @@
+{
+  "package_name": "@workspace/server-api",
+  "endpoints": [
+    {
+      "id": "fixture:endpoint:getUser",
+      "rust_path": [
+        "fixture",
+        "users",
+        "get_user"
+      ],
+      "rust_name": "get_user",
+      "ts_path": [
+        "users",
+        "getUser"
+      ],
+      "route": "/users/{id}",
+      "method": "Get",
+      "transport": "UnaryHttp",
+      "request": {
+        "path_params": [
+          {
+            "id": "fixture:field:getUser:id",
+            "rust_name": "id",
+            "wire_name": "id",
+            "ts_name": "id",
+            "type_ref": {
+              "id": "primitive:i64",
+              "name": "i64"
+            },
+            "optionality": "Required",
+            "source": {
+              "file": "crates/server/src/types.rs",
+              "start_line": 1,
+              "start_column": 1,
+              "end_line": 1,
+              "end_column": 1
+            }
+          }
+        ],
+        "query_params": [],
+        "body": null
+      },
+      "response": {
+        "Json": {
+          "id": "fixture:User",
+          "name": "User"
+        }
+      },
+      "errors": [
+        {
+          "id": "fixture:GetUserError",
+          "name": "GetUserError"
+        }
+      ],
+      "source": {
+        "file": "crates/server/src/users.rs",
+        "start_line": 18,
+        "start_column": 1,
+        "end_line": 22,
+        "end_column": 2
+      },
+      "allow_unused": false
+    },
+    {
+      "id": "fixture:endpoint:createUser",
+      "rust_path": [
+        "fixture",
+        "users",
+        "create_user"
+      ],
+      "rust_name": "create_user",
+      "ts_path": [
+        "users",
+        "createUser"
+      ],
+      "route": "/users",
+      "method": "Post",
+      "transport": "UnaryHttp",
+      "request": {
+        "path_params": [],
+        "query_params": [],
+        "body": {
+          "id": "fixture:CreateUserRequest",
+          "name": "CreateUserRequest"
+        }
+      },
+      "response": {
+        "Json": {
+          "id": "fixture:User",
+          "name": "User"
+        }
+      },
+      "errors": [
+        {
+          "id": "fixture:GetUserError",
+          "name": "GetUserError"
+        }
+      ],
+      "source": {
+        "file": "crates/server/src/users.rs",
+        "start_line": 24,
+        "start_column": 1,
+        "end_line": 28,
+        "end_column": 2
+      },
+      "allow_unused": false
+    },
+    {
+      "id": "fixture:endpoint:watchUsers",
+      "rust_path": [
+        "fixture",
+        "events",
+        "watch_users"
+      ],
+      "rust_name": "watch_users",
+      "ts_path": [
+        "events",
+        "watchUsers"
+      ],
+      "route": "/users/events",
+      "method": "Get",
+      "transport": "ServerSentEvents",
+      "request": {
+        "path_params": [],
+        "query_params": [],
+        "body": null
+      },
+      "response": {
+        "Stream": {
+          "id": "fixture:UserEvent",
+          "name": "UserEvent"
+        }
+      },
+      "errors": [
+        {
+          "id": "fixture:GetUserError",
+          "name": "GetUserError"
+        }
+      ],
+      "source": {
+        "file": "crates/server/src/events.rs",
+        "start_line": 10,
+        "start_column": 1,
+        "end_line": 14,
+        "end_column": 2
+      },
+      "allow_unused": false
+    }
+  ],
+  "types": [
+    {
+      "id": "fixture:User",
+      "rust_path": [
+        "fixture",
+        "User"
+      ],
+      "rust_name": "User",
+      "ts_name": "User",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "fixture:field:User:id",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ts_name": "id",
+              "type_ref": {
+                "id": "primitive:i64",
+                "name": "i64"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            },
+            {
+              "id": "fixture:field:User:displayName",
+              "rust_name": "display_name",
+              "wire_name": "displayName",
+              "ts_name": "displayName",
+              "type_ref": {
+                "id": "primitive:String",
+                "name": "String"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            }
+          ]
+        }
+      },
+      "source": {
+        "file": "crates/server/src/types.rs",
+        "start_line": 5,
+        "start_column": 1,
+        "end_line": 9,
+        "end_column": 2
+      }
+    },
+    {
+      "id": "fixture:CreateUserRequest",
+      "rust_path": [
+        "fixture",
+        "CreateUserRequest"
+      ],
+      "rust_name": "CreateUserRequest",
+      "ts_name": "CreateUserRequest",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "fixture:field:CreateUserRequest:displayName",
+              "rust_name": "display_name",
+              "wire_name": "displayName",
+              "ts_name": "displayName",
+              "type_ref": {
+                "id": "primitive:String",
+                "name": "String"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            }
+          ]
+        }
+      },
+      "source": {
+        "file": "crates/server/src/types.rs",
+        "start_line": 11,
+        "start_column": 1,
+        "end_line": 14,
+        "end_column": 2
+      }
+    },
+    {
+      "id": "fixture:UserEvent",
+      "rust_path": [
+        "fixture",
+        "UserEvent"
+      ],
+      "rust_name": "UserEvent",
+      "ts_name": "UserEvent",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "fixture:field:UserEvent:id",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ts_name": "id",
+              "type_ref": {
+                "id": "primitive:i64",
+                "name": "i64"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            },
+            {
+              "id": "fixture:field:UserEvent:kind",
+              "rust_name": "kind",
+              "wire_name": "kind",
+              "ts_name": "kind",
+              "type_ref": {
+                "id": "primitive:String",
+                "name": "String"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            }
+          ]
+        }
+      },
+      "source": {
+        "file": "crates/server/src/events.rs",
+        "start_line": 4,
+        "start_column": 1,
+        "end_line": 8,
+        "end_column": 2
+      }
+    }
+  ],
+  "errors": [
+    {
+      "id": "fixture:GetUserError",
+      "rust_path": [
+        "fixture",
+        "GetUserError"
+      ],
+      "rust_name": "GetUserError",
+      "ts_name": "GetUserError",
+      "variants": [
+        {
+          "id": "fixture:error:GetUserError:UserNotFound",
+          "rust_name": "UserNotFound",
+          "tag": "UserNotFound",
+          "status": 404,
+          "fields": [
+            {
+              "id": "fixture:field:GetUserError:UserNotFound:id",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ts_name": "id",
+              "type_ref": {
+                "id": "primitive:i64",
+                "name": "i64"
+              },
+              "optionality": "Required",
+              "source": {
+                "file": "crates/server/src/types.rs",
+                "start_line": 1,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1
+              }
+            }
+          ],
+          "source": {
+            "file": "crates/server/src/errors.rs",
+            "start_line": 7,
+            "start_column": 3,
+            "end_line": 8,
+            "end_column": 4
+          }
+        },
+        {
+          "id": "fixture:error:GetUserError:PermissionDenied",
+          "rust_name": "PermissionDenied",
+          "tag": "PermissionDenied",
+          "status": 403,
+          "fields": [],
+          "source": {
+            "file": "crates/server/src/errors.rs",
+            "start_line": 10,
+            "start_column": 3,
+            "end_line": 10,
+            "end_column": 20
+          }
+        }
+      ],
+      "source": {
+        "file": "crates/server/src/errors.rs",
+        "start_line": 4,
+        "start_column": 1,
+        "end_line": 12,
+        "end_column": 2
+      }
+    }
+  ]
+}

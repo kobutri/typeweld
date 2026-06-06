@@ -897,7 +897,7 @@ Acceptance criteria:
 - Axum server responses match generated schemas.
 - Removing TS usage causes unused endpoint diagnostics.
 
-### J2. Add golden outputs
+### J2. Add golden outputs [done]
 
 Goal: make generator behavior reviewable.
 

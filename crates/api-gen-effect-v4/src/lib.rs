@@ -3800,102 +3800,24 @@ export * from "./layer.js"
     }
 
     #[test]
-    fn fixture_generated_endpoints_snapshot_is_deterministic() {
+    fn basic_golden_outputs_match() {
         let contract = api_test_fixtures::basic_contract();
         let package = render_generated_package(&contract, Path::new("target"));
-        let endpoints = package
-            .files
-            .iter()
-            .find(|file| file.path == "endpoints.ts")
-            .expect("endpoints file");
+        let contract_json =
+            serde_json::to_string_pretty(&contract).expect("serialize basic contract");
 
-        assert_eq!(
-            package
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "package.json",
-                "index.ts",
-                "schemas.ts",
-                "errors.ts",
-                "endpoints.ts",
-                "layer.ts",
-                "tsconfig.paths.json"
-            ]
-        );
-        assert_eq!(
-            endpoints.contents,
-            r#"// Generated API package for @workspace/server-api
-import { Effect, Stream, Schema } from "@rust-ts-integration/effect-runtime/compat"
-import { ServerApi } from "./layer.js"
-import { CreateUserRequest, User, UserEvent } from "./schemas.js"
-import type { ApiClientError, GetUserError } from "./errors.js"
-
-export namespace events {
-  export interface WatchUsersArgs {}
-
-  export const WatchUsersArgsSchema = Schema.Struct({})
-  export type WatchUsersArgsEncoded = Schema.Codec.Encoded<typeof WatchUsersArgsSchema>
-
-  export const watchUsersRoute = {
-    method: "GET",
-    path: "/users/events",
-    transport: "ServerSentEvents",
-  } as const
-
-  export const watchUsers = (
-    args: WatchUsersArgs
-  ): Stream.Stream<UserEvent, ApiClientError | GetUserError, ServerApi> =>
-    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.events.watchUsers(args))))
-
-}
-
-export namespace users {
-  export interface CreateUserArgs {
-    readonly body: CreateUserRequest;
-  }
-
-  export const CreateUserArgsSchema = Schema.Struct({
-    body: CreateUserRequest,
-  })
-  export type CreateUserArgsEncoded = Schema.Codec.Encoded<typeof CreateUserArgsSchema>
-
-  export const createUserRoute = {
-    method: "POST",
-    path: "/users",
-    transport: "UnaryHttp",
-  } as const
-
-  export const createUser = (
-    args: CreateUserArgs
-  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>
-    ServerApi.use((api) => api.users.createUser(args))
-
-  export interface GetUserArgs {
-    readonly id: bigint;
-  }
-
-  export const GetUserArgsSchema = Schema.Struct({
-    id: Schema.BigIntFromString,
-  })
-  export type GetUserArgsEncoded = Schema.Codec.Encoded<typeof GetUserArgsSchema>
-
-  export const getUserRoute = {
-    method: "GET",
-    path: "/users/{id}",
-    transport: "UnaryHttp",
-  } as const
-
-  export const getUser = (
-    args: GetUserArgs
-  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>
-    ServerApi.use((api) => api.users.getUser(args))
-
-}
-"#
-        );
+        for (file_name, contents) in [
+            ("basic.contract.json", contract_json),
+            ("basic.schemas.ts", render_schemas(&contract)),
+            ("basic.errors.ts", render_errors(&contract)),
+            ("basic.endpoints.ts", render_endpoints(&contract)),
+            (
+                "basic.symbols.json",
+                render_symbol_graph(&contract, &package),
+            ),
+        ] {
+            assert_golden(file_name, &ensure_trailing_newline(contents));
+        }
     }
 
     fn generated_typecheck_contract() -> ApiContract {
@@ -4451,6 +4373,37 @@ export const fixture = {
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn assert_golden(file_name: &str, expected: &str) {
+        let path = repo_root().join("tests/golden").join(file_name);
+        if std::env::var_os("API_UPDATE_GOLDENS").is_some() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create golden output directory");
+            }
+            fs::write(&path, expected).expect("write golden output");
+            return;
+        }
+
+        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "read golden output {}: {error}; rerun with API_UPDATE_GOLDENS=1 to create it",
+                path.display()
+            )
+        });
+        assert_eq!(
+            actual,
+            expected,
+            "golden output changed for {}; rerun this test with API_UPDATE_GOLDENS=1 to accept the new output",
+            path.display()
+        );
+    }
+
+    fn ensure_trailing_newline(mut contents: String) -> String {
+        if !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents
     }
 
     fn simple_type(name: &str) -> TypeDef {
