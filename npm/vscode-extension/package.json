@@ -44,13 +44,13 @@
     "package.json"
   ],
   "scripts": {
-    "compile": "npm run typecheck && node esbuild.mjs",
-    "package": "npm run typecheck && node esbuild.mjs --production",
-    "package:vsix": "node scripts/ensure-out-dir.mjs && vsce package --no-dependencies",
-    "prepare:server": "node scripts/prepare-package.mjs",
+    "compile": "npm run typecheck && tsx esbuild.mts",
+    "package": "npm run typecheck && tsx esbuild.mts --production",
+    "package:vsix": "tsx scripts/ensure-out-dir.mts && vsce package --no-dependencies",
+    "prepare:server": "tsx scripts/prepare-package.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "vscode:prepublish": "npm run package",
-    "watch": "node esbuild.mjs --watch"
+    "watch": "tsx esbuild.mts --watch"
   },
   "dependencies": {
     "@rust-ts-integration/language-server": "0.0.0",

@@ -15,7 +15,8 @@ import test from "node:test"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
-const wrapperPath = join(packageRoot, "src", "index.js")
+const wrapperPath = join(packageRoot, "src", "index.ts")
+const tsxCli = join(packageRoot, "..", "node_modules", "tsx", "dist", "cli.mjs")
 const wrapperModule = await import(pathToFileURL(wrapperPath).href)
 const binaryName = process.platform === "win32" ? "api-ls.exe" : "api-ls"
 
@@ -24,14 +25,14 @@ test("package exposes api-ls as an executable bin", () => {
     readFileSync(join(packageRoot, "package.json"), "utf8"),
   )
 
-  assert.equal(packageJson.bin["api-ls"], "./src/index.js")
+  assert.equal(packageJson.bin["api-ls"], "./src/index.ts")
 })
 
 test("resolves a packaged gateway binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
   try {
     const fakePackageRoot = join(temp, "language-server")
-    const fakeWrapper = join(fakePackageRoot, "src", "index.js")
+    const fakeWrapper = join(fakePackageRoot, "src", "index.ts")
     const fakeGateway = join(fakePackageRoot, "bin", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
@@ -55,7 +56,7 @@ test("resolves a local cargo build gateway from the current workspace", () => {
   const temp = createTempDir()
   try {
     const workspace = join(temp, "workspace")
-    const fakeWrapper = join(temp, "package", "src", "index.js")
+    const fakeWrapper = join(temp, "package", "src", "index.ts")
     const fakeGateway = join(workspace, "target", "debug", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
@@ -137,7 +138,7 @@ test("prints clear diagnostics when the configured gateway is missing", () => {
  * @param {string=} input
  */
 function runWrapper(args, env, input = "") {
-  return spawnSync(process.execPath, [wrapperPath, ...args], {
+  return spawnSync(process.execPath, [tsxCli, wrapperPath, ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,

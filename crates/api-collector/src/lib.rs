@@ -688,9 +688,21 @@ fn semantic_endpoint_references(
         .join("crates")
         .join("api-collector")
         .join("scripts")
-        .join("semantic_usage_scanner.mjs");
+        .join("semantic_usage_scanner.mts");
     let npm_dir = repo_root.join("npm");
+    let tsx = npm_dir
+        .join("node_modules")
+        .join("tsx")
+        .join("dist")
+        .join("cli.mjs");
+    if !tsx.is_file() {
+        return Err(format!(
+            "missing local tsx runner at {}; run `npm install` in npm/",
+            tsx.display()
+        ));
+    }
     let mut child = Command::new("node")
+        .arg(&tsx)
         .arg(&script)
         .current_dir(&npm_dir)
         .stdin(Stdio::piped())

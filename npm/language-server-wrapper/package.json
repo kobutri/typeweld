@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "api-ls": "./src/index.js"
+    "api-ls": "./src/index.ts"
   },
   "files": [
     "bin",
@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "test": "npm run typecheck && npm run test:wrapper",
-    "test:wrapper": "node --test test/*.test.mjs",
+    "test:wrapper": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

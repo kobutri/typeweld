@@ -1,8 +1,6 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "allowJs": true,
-    "checkJs": true,
     "rootDir": "src",
     "tsBuildInfoFile": "../node_modules/.cache/language-server-wrapper.tsbuildinfo",
     "types": [
@@ -10,6 +8,6 @@
     ]
   },
   "include": [
-    "src/**/*.js"
+    "src/**/*.ts"
   ]
 }
