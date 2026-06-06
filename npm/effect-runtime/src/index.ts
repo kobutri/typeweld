@@ -1,4 +1,4 @@
-import { Effect, Schema, Stream } from "effect"
+import { Effect, Schema, Stream } from "./compat.js"
 
 export type HttpMethod = "DELETE" | "GET" | "PATCH" | "POST" | "PUT"
 

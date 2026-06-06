@@ -12,6 +12,9 @@ use api_ir::{
 };
 use serde::Serialize;
 
+pub const EFFECT_VERSION: &str = "4.0.0-beta.78";
+const EFFECT_COMPAT_IMPORT: &str = "@rust-ts-integration/effect-runtime/compat";
+
 #[must_use]
 pub fn render_package_banner(contract: &ApiContract) -> String {
     format!("// Generated API package for {}\n", contract.package_name)
@@ -146,6 +149,14 @@ impl TrackedWriter {
             marks: self.marks,
         }
     }
+}
+
+fn write_effect_compat_import(writer: &mut TrackedWriter, imports: &str) {
+    writer.push("import { ");
+    writer.push(imports);
+    writer.push(" } from \"");
+    writer.push(EFFECT_COMPAT_IMPORT);
+    writer.push("\"\n");
 }
 
 /// Builds the generated package files and resolver metadata without writing them.
@@ -687,8 +698,9 @@ pub fn generated_package_dir(target_dir: &Path, package_name: &str) -> PathBuf {
 #[must_use]
 pub fn render_package_json(contract: &ApiContract) -> String {
     format!(
-        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@rust-ts-integration/effect-runtime\": \"0.0.0\",\n    \"effect\": \"^4.0.0-beta.78\"\n  }}\n}}\n",
-        name = ts_string(&contract.package_name)
+        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@rust-ts-integration/effect-runtime\": \"0.0.0\",\n    \"effect\": {effect_version}\n  }}\n}}\n",
+        name = ts_string(&contract.package_name),
+        effect_version = ts_string(EFFECT_VERSION),
     )
 }
 
@@ -719,7 +731,8 @@ pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
 fn render_tracked_schemas(contract: &ApiContract) -> TrackedFile {
     let mut writer = TrackedWriter::new("schemas.ts");
     writer.push(&render_package_banner(contract));
-    writer.push("import { Schema } from \"effect\"\n\n");
+    write_effect_compat_import(&mut writer, "Schema");
+    writer.push("\n");
 
     let mut types = contract.types.iter().collect::<Vec<_>>();
     types.sort_by(|left, right| {
@@ -837,9 +850,9 @@ fn render_tracked_endpoints(contract: &ApiContract) -> TrackedFile {
     let mut writer = TrackedWriter::new("endpoints.ts");
     writer.push(&render_package_banner(contract));
     if contract_has_stream_endpoints(contract) {
-        writer.push("import { Effect, Stream } from \"effect\"\n");
+        write_effect_compat_import(&mut writer, "Effect, Stream");
     } else {
-        writer.push("import { Effect } from \"effect\"\n");
+        write_effect_compat_import(&mut writer, "Effect");
     }
     writer.push("import { ServerApi } from \"./layer\"\n");
 
@@ -983,7 +996,7 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
 fn render_tracked_errors(contract: &ApiContract) -> TrackedFile {
     let mut writer = TrackedWriter::new("errors.ts");
     writer.push(&render_package_banner(contract));
-    writer.push("import { Schema } from \"effect\"\n");
+    write_effect_compat_import(&mut writer, "Schema");
 
     let schema_imports = collect_error_schema_imports(contract);
     if !schema_imports.is_empty() {
@@ -1179,9 +1192,9 @@ fn render_tracked_layer(contract: &ApiContract) -> TrackedFile {
     let mut writer = TrackedWriter::new("layer.ts");
     writer.push(&render_package_banner(contract));
     if contract_has_stream_endpoints(contract) {
-        writer.push("import { Context, Layer, Effect, Stream } from \"effect\"\n");
+        write_effect_compat_import(&mut writer, "Context, Layer, Effect, Stream");
     } else {
-        writer.push("import { Context, Layer, Effect } from \"effect\"\n");
+        write_effect_compat_import(&mut writer, "Context, Layer, Effect");
     }
     let runtime_client_imports = collect_runtime_client_imports(contract);
     if !runtime_client_imports.is_empty() {
@@ -2077,7 +2090,7 @@ mod tests {
         assert_eq!(
             rendered,
             r#"// Generated API package for @workspace/server-api
-import { Schema } from "effect"
+import { Schema } from "@rust-ts-integration/effect-runtime/compat"
 
 export const User = Schema.Struct({
   id: UserId,
@@ -2317,7 +2330,8 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_endpoints(&contract);
 
-        assert!(rendered.contains("import { Effect } from \"effect\""));
+        assert!(rendered
+            .contains("import { Effect } from \"@rust-ts-integration/effect-runtime/compat\""));
         assert!(rendered.contains("import { ServerApi } from \"./layer\""));
         assert!(rendered.contains("import type { User, UserId } from \"./schemas\""));
         assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
@@ -2399,7 +2413,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_endpoints(&contract);
 
-        assert!(rendered.contains("import { Effect, Stream } from \"effect\""));
+        assert!(rendered.contains(
+            "import { Effect, Stream } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
         assert!(rendered.contains(
             "  export const eventsRoute = {\n    method: \"GET\",\n    path: \"/events\",\n    transport: \"ServerSentEvents\",\n  } as const"
         ));
@@ -2442,7 +2458,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_layer(&contract);
 
-        assert!(rendered.contains("import { Context, Layer, Effect } from \"effect\""));
+        assert!(rendered.contains(
+            "import { Context, Layer, Effect } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
         assert!(rendered.contains(
             "import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\""
         ));
@@ -2500,7 +2518,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_layer(&contract);
 
-        assert!(rendered.contains("import { Context, Layer, Effect, Stream } from \"effect\""));
+        assert!(rendered.contains(
+            "import { Context, Layer, Effect, Stream } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
         assert!(rendered
             .contains("import { makeSseClient } from \"@rust-ts-integration/effect-runtime\""));
         assert!(rendered.contains(
@@ -2538,7 +2558,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
   },
   "dependencies": {
     "@rust-ts-integration/effect-runtime": "0.0.0",
-    "effect": "^4.0.0-beta.78"
+    "effect": "4.0.0-beta.78"
   }
 }
 "#
@@ -2551,6 +2571,21 @@ export * from "./errors"
 export * from "./endpoints"
 export * from "./layer"
 "#
+        );
+    }
+
+    #[test]
+    fn generated_effect_version_matches_runtime_package() {
+        let manifest = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../npm/effect-runtime/package.json"),
+        )
+        .expect("read runtime package manifest");
+        let value: serde_json::Value =
+            serde_json::from_str(&manifest).expect("parse runtime package manifest");
+
+        assert_eq!(
+            value["dependencies"]["effect"].as_str(),
+            Some(EFFECT_VERSION)
         );
     }
 
@@ -2716,7 +2751,7 @@ export * from "./layer"
         assert_eq!(
             endpoints.contents,
             r#"// Generated API package for @workspace/server-api
-import { Effect, Stream } from "effect"
+import { Effect, Stream } from "@rust-ts-integration/effect-runtime/compat"
 import { ServerApi } from "./layer"
 import type { CreateUserRequest, User, UserEvent } from "./schemas"
 import type { ApiClientError, GetUserError } from "./errors"

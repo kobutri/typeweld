@@ -413,7 +413,7 @@ Acceptance criteria:
 
 ## Track D: Effect v4 generator and runtime correctness
 
-### D0. Pin Effect v4 beta and isolate version-sensitive API syntax
+### D0. Pin Effect v4 beta and isolate version-sensitive API syntax [done]
 
 Goal: make beta usage reproducible and repo-authoritative.
 
@@ -430,6 +430,8 @@ Acceptance criteria:
 - Runtime and generated packages use the same exact Effect version.
 - Updating the Effect beta changes one compatibility layer plus fixture expectations.
 - The guide and code do not rely on external v4 examples.
+
+Upgrade checklist: [`docs/effect-beta-upgrade-checklist.md`](effect-beta-upgrade-checklist.md).
 
 ### D1. Fix primitive and integer wire mappings
 

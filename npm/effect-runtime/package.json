@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./compat": "./src/compat.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "effect": "^4.0.0-beta.78"
+    "effect": "4.0.0-beta.78"
   }
 }
