@@ -862,7 +862,7 @@ Acceptance criteria:
 
 ## Track J: end-to-end examples and tests
 
-### J1. Add a runnable Axum + Effect example
+### J1. Add a runnable Axum + Effect example [done]
 
 Goal: prove the complete product loop.
 

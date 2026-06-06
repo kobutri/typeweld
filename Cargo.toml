@@ -11,6 +11,7 @@ members = [
   "crates/api-test-fixtures",
   "examples/axum-basic",
   "examples/axum-sse",
+  "examples/e2e-axum-effect/server",
   "examples/monorepo-basic",
 ]
 resolver = "2"
@@ -27,4 +28,3 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
-

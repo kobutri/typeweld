@@ -25,5 +25,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
       - run: ./examples/monorepo-basic/verify.sh
+      - run: ./examples/e2e-axum-effect/verify.sh
       - run: npm test
         working-directory: npm

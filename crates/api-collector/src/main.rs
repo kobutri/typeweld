@@ -2485,11 +2485,32 @@ export const program = Effect.gen(function* () {
     #[test]
     fn collect_requires_explicit_empty_debug_flag() {
         let root = test_root("collect-empty");
-        fs::create_dir_all(&root).expect("create root");
+        let package_dir = root.join("plain");
+        fs::create_dir_all(package_dir.join("src")).expect("create package src");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["plain"]
+resolver = "2"
+"#,
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            package_dir.join("Cargo.toml"),
+            r#"[package]
+name = "plain"
+edition = "2021"
+version = "0.0.0"
+"#,
+        )
+        .expect("write package manifest");
+        fs::write(package_dir.join("src/lib.rs"), "").expect("write package lib");
         let contract_path = root.join("contract.json");
 
         let error = run_with_args(vec![
             "collect".to_owned(),
+            "--manifest-path".to_owned(),
+            root.join("Cargo.toml").display().to_string(),
             "--package-name".to_owned(),
             "@workspace/server-api".to_owned(),
             "--out".to_owned(),

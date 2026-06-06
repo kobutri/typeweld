@@ -1,0 +1,29 @@
+[package]
+name = "e2e-axum-effect-server"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = "e2e_axum_effect_server"
+path = "src/lib.rs"
+
+[dependencies]
+api-axum = { path = "../../../crates/api-axum" }
+api-collector = { path = "../../../crates/api-collector" }
+api-core = { path = "../../../crates/api-core" }
+api-macros = { path = "../../../crates/api-macros" }
+axum = "0.8"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
+
+[package.metadata.rust_ts]
+ts_package = "@workspace/e2e-api"
+api_root = "e2e_axum_effect_server::api"
+features = []
+
+[lints]
+workspace = true

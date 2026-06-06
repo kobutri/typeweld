@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": true,
+    "lib": ["DOM", "ES2022", "ESNext.Disposable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022",
+    "paths": {
+      "@rust-ts-integration/effect-runtime": [
+        "../../../npm/effect-runtime/src/index.ts"
+      ],
+      "@rust-ts-integration/effect-runtime/compat": [
+        "../../../npm/effect-runtime/src/compat.ts"
+      ],
+      "@rust-ts-integration/effect-runtime/*": [
+        "../../../npm/effect-runtime/src/*"
+      ],
+      "@workspace/e2e-api": [
+        "../../../target/api-contract/effect-v4/packages/_workspace_e2e-api/index.ts"
+      ],
+      "@workspace/e2e-api/*": [
+        "../../../target/api-contract/effect-v4/packages/_workspace_e2e-api/*"
+      ],
+      "effect": [
+        "../../../npm/node_modules/effect/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
