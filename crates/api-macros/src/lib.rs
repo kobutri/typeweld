@@ -428,9 +428,11 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let transport = args.transport_tokens();
     let route_params = route_params(&args.path);
     let request = endpoint_request(&input.sig.inputs, &route_params)?;
+    args.validate_request_policy(&request, &input.sig)?;
     let request_shape = request.shape;
     let request_registrations = request.registrations;
     let endpoint_return = endpoint_return(&input.sig.output)?;
+    args.validate_return_policy(&endpoint_return, &input.sig.output)?;
     let response = endpoint_return.response;
     let errors = endpoint_return.errors;
     let return_registrations = endpoint_return.registrations;
@@ -479,6 +481,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 struct EndpointRequest {
     shape: proc_macro2::TokenStream,
     registrations: Vec<proc_macro2::TokenStream>,
+    has_body: bool,
 }
 
 fn endpoint_request(
@@ -499,7 +502,10 @@ fn endpoint_request(
             ));
         };
         let syn::Pat::Ident(pat_ident) = input.pat.as_ref() else {
-            continue;
+            return Err(syn::Error::new_spanned(
+                input,
+                "#[api] endpoint parameters must use simple identifiers with Path<T>, Query<T>, or Body<T>",
+            ));
         };
         let name = pat_ident.ident.to_string();
 
@@ -519,18 +525,48 @@ fn endpoint_request(
             }
             body = Some(quote!(Some(<#inner as ::api_core::ApiType>::type_ref())));
             registrations.push(contract_register_type_call(inner));
+        } else {
+            return Err(syn::Error::new_spanned(
+                input.ty.as_ref(),
+                "#[api] endpoint parameters must use Path<T>, Query<T>, or Body<T> extractors",
+            ));
         }
     }
 
     for route_param in route_params {
-        if !seen_path_params.iter().any(|seen| seen == route_param) {
+        let matches = seen_path_params
+            .iter()
+            .filter(|seen| *seen == route_param)
+            .count();
+        if matches == 0 {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 format!("route parameter `{route_param}` requires a matching Path<T> argument"),
             ));
         }
+        if matches > 1 {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "route parameter `{route_param}` can only have one matching Path<T> argument"
+                ),
+            ));
+        }
     }
 
+    for seen_path_param in &seen_path_params {
+        if !route_params
+            .iter()
+            .any(|route_param| route_param == seen_path_param)
+        {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("Path<T> argument `{seen_path_param}` does not match any route parameter"),
+            ));
+        }
+    }
+
+    let has_body = body.is_some();
     let body = body.unwrap_or_else(|| quote!(None));
 
     Ok(EndpointRequest {
@@ -542,6 +578,7 @@ fn endpoint_request(
             }
         },
         registrations,
+        has_body,
     })
 }
 
@@ -635,6 +672,7 @@ struct EndpointReturn {
     response: proc_macro2::TokenStream,
     errors: Vec<proc_macro2::TokenStream>,
     registrations: Vec<proc_macro2::TokenStream>,
+    is_stream: bool,
 }
 
 fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
@@ -643,6 +681,7 @@ fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
             response: quote!(::api_core::ir::ResponseShape::Empty),
             errors: Vec::new(),
             registrations: Vec::new(),
+            is_stream: false,
         }),
         ReturnType::Type(_, ty) => return_for_type(ty),
     }
@@ -654,6 +693,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             response: quote!(::api_core::ir::ResponseShape::Empty),
             errors: Vec::new(),
             registrations: Vec::new(),
+            is_stream: false,
         });
     }
 
@@ -664,6 +704,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             },
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
+            is_stream: false,
         });
     }
 
@@ -674,6 +715,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             },
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
+            is_stream: false,
         });
     }
 
@@ -684,6 +726,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             },
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
+            is_stream: true,
         });
     }
 
@@ -696,6 +739,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             response: ok_return.response,
             errors: vec![quote!(<#err as ::api_core::ApiError>::error_ref())],
             registrations,
+            is_stream: ok_return.is_stream,
         });
     }
 
@@ -976,6 +1020,51 @@ impl ApiAttr {
 
     fn is_sse(&self) -> bool {
         self.method == "SSE"
+    }
+
+    fn validate_request_policy(
+        &self,
+        request: &EndpointRequest,
+        signature: &syn::Signature,
+    ) -> syn::Result<()> {
+        if request.has_body && !self.allows_body() {
+            return Err(syn::Error::new_spanned(
+                signature,
+                format!(
+                    "#[api] {} endpoints cannot declare Body<T> extractors; use Query<T> or \
+                     change the endpoint method to POST, PUT, or PATCH",
+                    self.method
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_return_policy(
+        &self,
+        endpoint_return: &EndpointReturn,
+        output: &ReturnType,
+    ) -> syn::Result<()> {
+        if self.is_sse() && !endpoint_return.is_stream {
+            return Err(syn::Error::new_spanned(
+                output,
+                "#[api(method = \"SSE\")] endpoints must return Sse<T> or Result<Sse<T>, E>",
+            ));
+        }
+
+        if !self.is_sse() && endpoint_return.is_stream {
+            return Err(syn::Error::new_spanned(
+                output,
+                "#[api] endpoints returning Sse<T> must use method = \"SSE\"",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn allows_body(&self) -> bool {
+        matches!(self.method.as_str(), "PATCH" | "POST" | "PUT")
     }
 }
 

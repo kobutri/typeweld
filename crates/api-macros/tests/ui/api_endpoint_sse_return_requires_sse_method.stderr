@@ -1,0 +1,5 @@
+error: #[api] endpoints returning Sse<T> must use method = "SSE"
+ --> tests/ui/api_endpoint_sse_return_requires_sse_method.rs:7:24
+  |
+7 | async fn user_events() -> api_core::Sse<User> {
+  |                        ^^^^^^^^^^^^^^^^^^^^^^

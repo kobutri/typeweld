@@ -394,7 +394,7 @@ Acceptance criteria:
 - Public endpoint errors must be typed domain enums or mapped explicitly.
 - Shared and endpoint-specific error enums both work.
 
-### C4. Validate endpoint signatures
+### C4. Validate endpoint signatures [done]
 
 Goal: catch route/request/transport mistakes at Rust compile time.
 
