@@ -16,6 +16,7 @@ path = "src/main.rs"
 lsp-types = "0.97"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1.0", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 api-gen-effect-v4 = { path = "../api-gen-effect-v4" }

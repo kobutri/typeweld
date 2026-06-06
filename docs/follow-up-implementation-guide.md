@@ -611,7 +611,7 @@ Acceptance criteria:
 - No soft fallback exists.
 - Missing backends fail initialization clearly.
 
-### F2. Replace synchronous proxying with an async JSON-RPC core
+### F2. Replace synchronous proxying with an async JSON-RPC core [done]
 
 Goal: handle real editor concurrency.
 

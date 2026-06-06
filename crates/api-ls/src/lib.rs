@@ -1,11 +1,12 @@
 //! Language server gateway for Rust API contracts and generated TypeScript.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env, fs,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader as StdBufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::Stdio,
+    time::Duration,
 };
 
 use lsp_types::{
@@ -15,6 +16,14 @@ use lsp_types::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::{
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+        BufReader as AsyncBufReader,
+    },
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::mpsc,
+};
 
 const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
 
@@ -64,20 +73,11 @@ pub enum UsageLintLevel {
 }
 
 /// External language-server command configuration.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BackendCommand {
     pub command: String,
     pub args: Vec<String>,
-}
-
-impl Default for BackendCommand {
-    fn default() -> Self {
-        Self {
-            command: String::new(),
-            args: Vec::new(),
-        }
-    }
 }
 
 /// Resolved workspace and cache paths used by the gateway.
@@ -120,15 +120,19 @@ pub fn discover_workspace_config(
 
 /// Runs the stdio JSON-RPC language server loop.
 pub fn run_stdio() -> Result<(), String> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    run(stdin.lock(), stdout.lock())
+    runtime()?.block_on(run_stdio_async())
 }
 
 /// Runs the JSON-RPC language server loop over arbitrary streams.
 pub fn run(input: impl Read, output: impl Write) -> Result<(), String> {
-    let mut server = LspServer::new(output);
-    server.run(input)
+    let mut reader = StdBufReader::new(input);
+    let mut messages = Vec::new();
+    while let Some(message) = read_message(&mut reader)? {
+        messages.push(message);
+    }
+
+    let output_messages = runtime()?.block_on(run_messages_async(messages))?;
+    write_output_messages(output, output_messages)
 }
 
 #[derive(Debug)]
@@ -139,73 +143,153 @@ struct LspMessage {
     raw: Value,
 }
 
-struct LspServer<W> {
-    writer: W,
+struct AsyncLspServer {
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    event_rx: mpsc::UnboundedReceiver<GatewayEvent>,
+    output_tx: mpsc::UnboundedSender<Value>,
     workspace: Option<WorkspaceConfig>,
-    rust_analyzer: Option<BackendProcess>,
-    typescript: Option<BackendProcess>,
-    shutdown_requested: bool,
+    rust_analyzer: Option<AsyncBackend>,
+    typescript: Option<AsyncBackend>,
+    pending_requests: HashMap<BackendRequestKey, PendingRequest>,
+    client_requests: HashMap<String, BackendRequestKey>,
+    backend_requests_by_client_id: HashMap<String, BackendRequestKey>,
+    backend_request_client_ids: HashMap<BackendRequestKey, Value>,
+    pending_shutdown: Option<PendingShutdown>,
+    exit_received: bool,
+    client_eof: bool,
+    next_backend_client_id: u64,
 }
 
-impl<W: Write> LspServer<W> {
-    fn new(writer: W) -> Self {
+impl AsyncLspServer {
+    fn new(
+        event_tx: mpsc::UnboundedSender<GatewayEvent>,
+        event_rx: mpsc::UnboundedReceiver<GatewayEvent>,
+        output_tx: mpsc::UnboundedSender<Value>,
+    ) -> Self {
         Self {
-            writer,
+            event_tx,
+            event_rx,
+            output_tx,
             workspace: None,
             rust_analyzer: None,
             typescript: None,
-            shutdown_requested: false,
+            pending_requests: HashMap::new(),
+            client_requests: HashMap::new(),
+            backend_requests_by_client_id: HashMap::new(),
+            backend_request_client_ids: HashMap::new(),
+            pending_shutdown: None,
+            exit_received: false,
+            client_eof: false,
+            next_backend_client_id: 1,
         }
     }
 
-    fn run(&mut self, input: impl Read) -> Result<(), String> {
-        let mut reader = BufReader::new(input);
-
-        while let Some(message) = read_message(&mut reader)? {
-            if self.handle_message(message)? {
-                break;
+    async fn run(mut self) -> Result<(), String> {
+        while let Some(event) = self.event_rx.recv().await {
+            self.handle_event(event).await?;
+            if self.should_finish() {
+                self.stop_backends().await;
+                return Ok(());
             }
         }
 
+        self.stop_backends().await;
         Ok(())
     }
 
-    fn handle_message(&mut self, message: LspMessage) -> Result<bool, String> {
-        let Some(method) = message.method.as_deref() else {
-            return Ok(false);
+    async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), String> {
+        match event {
+            GatewayEvent::ClientMessage(message) => self.handle_client_message(message).await,
+            GatewayEvent::ClientEof => {
+                self.client_eof = true;
+                Ok(())
+            }
+            GatewayEvent::BackendMessage(kind, message) => {
+                self.handle_backend_message(kind, message)
+            }
+            GatewayEvent::BackendExited(kind) => {
+                self.fail_backend(kind, "backend exited".to_owned()).await
+            }
+            GatewayEvent::BackendFailed(kind, error) => self.fail_backend(kind, error).await,
+            GatewayEvent::BackendLog(message) => self.write_notification(
+                "window/logMessage",
+                json!({
+                    "type": 3,
+                    "message": message,
+                }),
+            ),
+        }
+    }
+
+    fn should_finish(&self) -> bool {
+        (self.exit_received && self.pending_shutdown.is_none())
+            || (self.client_eof
+                && self.pending_requests.is_empty()
+                && self.pending_shutdown.is_none())
+    }
+
+    async fn handle_client_message(&mut self, message: LspMessage) -> Result<(), String> {
+        let Some(method) = message.method.clone() else {
+            if let Some(id) = message.id.as_ref() {
+                self.forward_client_response_to_backend(id, message.raw)?;
+            }
+            return Ok(());
         };
 
+        if method == "$/cancelRequest" {
+            self.forward_cancel_request(message.params)?;
+            return Ok(());
+        }
+
+        self.handle_method_message(&method, message).await
+    }
+
+    async fn handle_method_message(
+        &mut self,
+        method: &str,
+        message: LspMessage,
+    ) -> Result<(), String> {
         match method {
             "initialize" => {
                 let Some(id) = message.id else {
-                    return Ok(false);
+                    return Ok(());
                 };
                 match initialize_workspace(&message.params) {
                     Ok(workspace) => {
+                        let log_file = workspace_log_file(&workspace);
                         let rust_backend = match start_required_backend(
+                            BackendKind::Rust,
                             "rust-analyzer",
                             &workspace.config.rust_analyzer,
                             message.params.clone(),
-                        ) {
+                            self.event_tx.clone(),
+                            log_file.clone(),
+                        )
+                        .await
+                        {
                             Ok(backend) => backend,
                             Err(error) => {
                                 self.write_error(id, -32_602, error)?;
-                                return Ok(false);
+                                return Ok(());
                             }
                         };
                         let typescript_params =
                             typescript_initialize_params(&message.params, &workspace);
                         let typescript_backend = match start_required_backend(
+                            BackendKind::TypeScript,
                             "TypeScript/Effect",
                             &workspace.config.typescript,
                             typescript_params,
-                        ) {
+                            self.event_tx.clone(),
+                            log_file,
+                        )
+                        .await
+                        {
                             Ok(backend) => backend,
                             Err(error) => {
-                                let mut rust_backend = rust_backend;
-                                rust_backend.shutdown();
+                                rust_backend.stop().await;
                                 self.write_error(id, -32_602, error)?;
-                                return Ok(false);
+                                return Ok(());
                             }
                         };
                         self.workspace = Some(workspace);
@@ -217,30 +301,17 @@ impl<W: Write> LspServer<W> {
                 }
             }
             "initialized" => {
-                self.forward_notification_to_rust_analyzer(method, message.params)?;
+                self.forward_notification_to_rust_analyzer(method, message.params.clone())?;
                 self.forward_notification_to_typescript(method, Value::Null)?;
                 self.publish_unused_endpoint_diagnostics()?;
             }
             "shutdown" => {
                 if let Some(id) = message.id {
-                    self.shutdown_requested = true;
-                    if let Some(backend) = &mut self.rust_analyzer {
-                        backend.shutdown();
-                    }
-                    if let Some(backend) = &mut self.typescript {
-                        backend.shutdown();
-                    }
-                    self.write_response(id, Value::Null)?;
+                    self.begin_shutdown(id)?;
                 }
             }
             "exit" => {
-                if let Some(backend) = &mut self.rust_analyzer {
-                    backend.exit();
-                }
-                if let Some(backend) = &mut self.typescript {
-                    backend.exit();
-                }
-                return Ok(self.shutdown_requested);
+                self.exit_received = true;
             }
             "api-ls/generatedPackageFile" => {
                 if let Some(id) = message.id {
@@ -251,38 +322,22 @@ impl<W: Write> LspServer<W> {
                 if let Some(id) = message.id {
                     if let Some(locations) = self.cross_language_definition(&message.params)? {
                         self.write_response(id, locations)?;
-                    } else if is_rust_message(method, &message.params) {
-                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
-                    } else if self.is_typescript_message(method, &message.params) {
-                        self.forward_request_to_typescript(method, message.params, id)?;
                     } else {
-                        self.write_response(id, Value::Null)?;
+                        self.route_or_default_response(method, message.params, id, Value::Null)?;
                     }
                 }
             }
             "textDocument/references" => {
                 if let Some(id) = message.id {
-                    if let Some(locations) = self.cross_language_references(&message.params)? {
-                        self.write_response(id, locations)?;
-                    } else if is_rust_message(method, &message.params) {
-                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
-                    } else if self.is_typescript_message(method, &message.params) {
-                        self.forward_request_to_typescript(method, message.params, id)?;
-                    } else {
-                        self.write_response(id, json!([]))?;
-                    }
+                    self.handle_references_request(message.params, id)?;
                 }
             }
             "textDocument/hover" => {
                 if let Some(id) = message.id {
                     if let Some(hover) = self.cross_language_hover(&message.params)? {
                         self.write_response(id, hover)?;
-                    } else if is_rust_message(method, &message.params) {
-                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
-                    } else if self.is_typescript_message(method, &message.params) {
-                        self.forward_request_to_typescript(method, message.params, id)?;
                     } else {
-                        self.write_response(id, Value::Null)?;
+                        self.route_or_default_response(method, message.params, id, Value::Null)?;
                     }
                 }
             }
@@ -290,12 +345,8 @@ impl<W: Write> LspServer<W> {
                 if let Some(id) = message.id {
                     if let Some(rename) = self.cross_language_prepare_rename(&message.params)? {
                         self.write_response(id, rename)?;
-                    } else if is_rust_message(method, &message.params) {
-                        self.forward_request_to_rust_analyzer(method, message.params, id)?;
-                    } else if self.is_typescript_message(method, &message.params) {
-                        self.forward_request_to_typescript(method, message.params, id)?;
                     } else {
-                        self.write_response(id, Value::Null)?;
+                        self.route_or_default_response(method, message.params, id, Value::Null)?;
                     }
                 }
             }
@@ -303,99 +354,81 @@ impl<W: Write> LspServer<W> {
                 if let Some(id) = message.id {
                     match self.cross_language_rename(&message.params) {
                         Ok(Some(edit)) => self.write_response(id, edit)?,
-                        Ok(None) if is_rust_message(method, &message.params) => {
-                            self.forward_request_to_rust_analyzer(method, message.params, id)?;
+                        Ok(None) => {
+                            self.route_or_default_response(
+                                method,
+                                message.params,
+                                id,
+                                json!({ "changes": {} }),
+                            )?;
                         }
-                        Ok(None) if self.is_typescript_message(method, &message.params) => {
-                            self.forward_request_to_typescript(method, message.params, id)?;
-                        }
-                        Ok(None) => self.write_response(id, json!({ "changes": {} }))?,
                         Err(error) => self.write_error(id, -32_602, error)?,
                     }
                 }
             }
-            _ => {
-                if is_rust_message(method, &message.params) {
-                    match message.id {
-                        Some(id) => {
-                            self.forward_request_to_rust_analyzer(method, message.params, id)?;
-                        }
-                        None => {
-                            self.forward_notification_to_rust_analyzer(method, message.params)?;
-                        }
+            _ => match message.id {
+                Some(id) => {
+                    if let Some(kind) = self.route_backend(method, &message.params) {
+                        self.forward_request_to_backend(
+                            kind,
+                            method,
+                            message.params,
+                            id,
+                            PendingRequestKind::Forward,
+                            true,
+                        )?;
+                    } else {
+                        self.write_error(
+                            id,
+                            -32_601,
+                            format!("api-ls has no handler for `{method}` yet"),
+                        )?;
                     }
-                } else if self.is_typescript_message(method, &message.params) {
-                    match message.id {
-                        Some(id) => {
-                            self.forward_request_to_typescript(method, message.params, id)?;
-                        }
-                        None => {
-                            self.forward_notification_to_typescript(method, message.params)?;
-                        }
-                    }
-                } else if let Some(id) = message.id {
-                    self.write_error(
-                        id,
-                        -32_601,
-                        format!("api-ls has no handler for `{method}` yet"),
-                    )?;
                 }
-            }
+                None => {
+                    if let Some(kind) = self.route_backend(method, &message.params) {
+                        self.forward_notification_to_backend(kind, method, message.params)?;
+                    } else {
+                        self.forward_notification_to_all(method, message.params)?;
+                    }
+                }
+            },
         }
 
-        Ok(false)
+        Ok(())
     }
 
-    fn write_response(&mut self, id: Value, result: Value) -> Result<(), String> {
-        write_framed(
-            &mut self.writer,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result,
-            }),
-        )
+    fn write_response(&self, id: Value, result: Value) -> Result<(), String> {
+        self.emit(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
     }
 
-    fn write_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
-        write_framed(
-            &mut self.writer,
-            &json!({
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params,
-            }),
-        )
+    fn write_notification(&self, method: &str, params: Value) -> Result<(), String> {
+        self.emit(json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
     }
 
-    fn write_error(&mut self, id: Value, code: i64, message: String) -> Result<(), String> {
-        write_framed(
-            &mut self.writer,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {
-                    "code": code,
-                    "message": message,
-                },
-            }),
-        )
+    fn write_error(&self, id: Value, code: i64, message: String) -> Result<(), String> {
+        self.emit(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }))
     }
 
-    fn forward_request_to_rust_analyzer(
-        &mut self,
-        method: &str,
-        params: Value,
-        id: Value,
-    ) -> Result<(), String> {
-        match &mut self.rust_analyzer {
-            Some(backend) => backend.forward_request(method, params, id, &mut self.writer),
-            None => self.write_error(
-                id,
-                -32_003,
-                "rust-analyzer backend is not available".to_owned(),
-            ),
-        }
+    fn emit(&self, value: Value) -> Result<(), String> {
+        self.output_tx
+            .send(value)
+            .map_err(|error| format!("failed to queue LSP output: {error}"))
     }
 
     fn forward_notification_to_rust_analyzer(
@@ -403,26 +436,7 @@ impl<W: Write> LspServer<W> {
         method: &str,
         params: Value,
     ) -> Result<(), String> {
-        if let Some(backend) = &mut self.rust_analyzer {
-            backend.forward_notification(method, params)?;
-        }
-        Ok(())
-    }
-
-    fn forward_request_to_typescript(
-        &mut self,
-        method: &str,
-        params: Value,
-        id: Value,
-    ) -> Result<(), String> {
-        match &mut self.typescript {
-            Some(backend) => backend.forward_request(method, params, id, &mut self.writer),
-            None => self.write_error(
-                id,
-                -32_003,
-                "TypeScript backend is not available".to_owned(),
-            ),
-        }
+        self.forward_notification_to_backend(BackendKind::Rust, method, params)
     }
 
     fn forward_notification_to_typescript(
@@ -430,10 +444,354 @@ impl<W: Write> LspServer<W> {
         method: &str,
         params: Value,
     ) -> Result<(), String> {
-        if let Some(backend) = &mut self.typescript {
-            backend.forward_notification(method, params)?;
+        self.forward_notification_to_backend(BackendKind::TypeScript, method, params)
+    }
+
+    fn forward_notification_to_all(&mut self, method: &str, params: Value) -> Result<(), String> {
+        self.forward_notification_to_backend(BackendKind::Rust, method, params.clone())?;
+        self.forward_notification_to_backend(BackendKind::TypeScript, method, params)
+    }
+
+    fn forward_notification_to_backend(
+        &mut self,
+        kind: BackendKind,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        let Some(backend) = self.backend_mut(kind) else {
+            return Ok(());
+        };
+        backend.send_notification(method, params)
+    }
+
+    fn route_or_default_response(
+        &mut self,
+        method: &str,
+        params: Value,
+        id: Value,
+        default: Value,
+    ) -> Result<(), String> {
+        if let Some(kind) = self.route_backend(method, &params) {
+            self.forward_request_to_backend(
+                kind,
+                method,
+                params,
+                id,
+                PendingRequestKind::Forward,
+                true,
+            )
+        } else {
+            self.write_response(id, default)
+        }
+    }
+
+    fn handle_references_request(&mut self, params: Value, id: Value) -> Result<(), String> {
+        if let Some((locations, workspace)) = self.cross_language_references_base(&params)? {
+            if let Some(kind) = self.route_backend("textDocument/references", &params) {
+                self.forward_request_to_backend(
+                    kind,
+                    "textDocument/references",
+                    params,
+                    id,
+                    PendingRequestKind::References {
+                        local_locations: locations,
+                        workspace: Box::new(workspace),
+                    },
+                    true,
+                )
+            } else {
+                self.write_response(id, dedupe_locations(locations, &workspace))
+            }
+        } else {
+            self.route_or_default_response("textDocument/references", params, id, json!([]))
+        }
+    }
+
+    fn route_backend(&self, method: &str, params: &Value) -> Option<BackendKind> {
+        if is_rust_message(method, params) {
+            Some(BackendKind::Rust)
+        } else if self.is_typescript_message(method, params) {
+            Some(BackendKind::TypeScript)
+        } else {
+            None
+        }
+    }
+
+    fn forward_request_to_backend(
+        &mut self,
+        kind: BackendKind,
+        method: &str,
+        params: Value,
+        client_id: Value,
+        pending_kind: PendingRequestKind,
+        track_client_request: bool,
+    ) -> Result<(), String> {
+        let Some(backend) = self.backend_mut(kind) else {
+            return self.write_error(
+                client_id,
+                -32_003,
+                format!("{} backend is not available", kind.display_name()),
+            );
+        };
+        let backend_id = backend.allocate_id();
+        let backend_id_value = json!(backend_id);
+        let key = BackendRequestKey::new(kind, &backend_id_value);
+        backend.send_request(backend_id, method, params)?;
+        if track_client_request {
+            self.client_requests
+                .insert(rpc_id_key(&client_id), key.clone());
+        }
+        self.pending_requests.insert(
+            key,
+            PendingRequest {
+                client_id,
+                method: method.to_owned(),
+                kind: pending_kind,
+            },
+        );
+        Ok(())
+    }
+
+    fn forward_cancel_request(&mut self, params: Value) -> Result<(), String> {
+        let Some(cancelled_id) = params.get("id") else {
+            return Ok(());
+        };
+        let Some(key) = self.client_requests.get(&rpc_id_key(cancelled_id)).cloned() else {
+            return Ok(());
+        };
+        let mut backend_params = params;
+        backend_params["id"] = rpc_id_from_key(&key.id);
+        self.forward_notification_to_backend(key.kind, "$/cancelRequest", backend_params)
+    }
+
+    fn forward_client_response_to_backend(
+        &mut self,
+        client_id: &Value,
+        mut raw: Value,
+    ) -> Result<(), String> {
+        let Some(key) = self
+            .backend_requests_by_client_id
+            .remove(&rpc_id_key(client_id))
+        else {
+            return Ok(());
+        };
+        self.backend_request_client_ids.remove(&key);
+        raw["id"] = rpc_id_from_key(&key.id);
+        let Some(backend) = self.backend_mut(key.kind) else {
+            return Ok(());
+        };
+        backend.send_raw(raw)
+    }
+
+    fn handle_backend_message(
+        &mut self,
+        kind: BackendKind,
+        message: LspMessage,
+    ) -> Result<(), String> {
+        let method = message.method.clone();
+        let id = message.id.clone();
+        match (method.as_deref(), id.as_ref()) {
+            (Some(method), Some(id)) => {
+                self.forward_backend_request_to_client(kind, method, id, message.raw)
+            }
+            (Some("$/cancelRequest"), None) => {
+                self.forward_backend_cancel_request(kind, message.raw)
+            }
+            (Some(_), None) => self.emit(message.raw),
+            (None, Some(id)) => self.handle_backend_response(kind, id, message.raw),
+            (None, None) => Ok(()),
+        }
+    }
+
+    fn forward_backend_request_to_client(
+        &mut self,
+        kind: BackendKind,
+        _method: &str,
+        backend_id: &Value,
+        mut raw: Value,
+    ) -> Result<(), String> {
+        let key = BackendRequestKey::new(kind, backend_id);
+        let client_id = Value::String(format!(
+            "api-ls:{}:{}",
+            kind.wire_label(),
+            self.next_backend_client_id
+        ));
+        self.next_backend_client_id += 1;
+        self.backend_requests_by_client_id
+            .insert(rpc_id_key(&client_id), key.clone());
+        self.backend_request_client_ids
+            .insert(key, client_id.clone());
+        raw["id"] = client_id;
+        self.emit(raw)
+    }
+
+    fn forward_backend_cancel_request(
+        &mut self,
+        kind: BackendKind,
+        mut raw: Value,
+    ) -> Result<(), String> {
+        let Some(cancelled_id) = raw.get("params").and_then(|params| params.get("id")) else {
+            return self.emit(raw);
+        };
+        let key = BackendRequestKey::new(kind, cancelled_id);
+        if let Some(client_id) = self.backend_request_client_ids.get(&key) {
+            raw["params"]["id"] = client_id.clone();
+        }
+        self.emit(raw)
+    }
+
+    fn handle_backend_response(
+        &mut self,
+        kind: BackendKind,
+        backend_id: &Value,
+        mut raw: Value,
+    ) -> Result<(), String> {
+        let key = BackendRequestKey::new(kind, backend_id);
+        let Some(pending) = self.pending_requests.remove(&key) else {
+            return Ok(());
+        };
+        self.client_requests.remove(&rpc_id_key(&pending.client_id));
+
+        match pending.kind {
+            PendingRequestKind::Forward => {
+                raw["id"] = pending.client_id;
+                self.emit(raw)
+            }
+            PendingRequestKind::References {
+                mut local_locations,
+                workspace,
+            } => {
+                local_locations.extend(
+                    raw.get("result")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                self.write_response(
+                    pending.client_id,
+                    dedupe_locations(local_locations, workspace.as_ref()),
+                )
+            }
+            PendingRequestKind::Shutdown => self.finish_backend_shutdown(kind),
+        }
+    }
+
+    fn begin_shutdown(&mut self, id: Value) -> Result<(), String> {
+        let mut remaining = BTreeSet::new();
+        for kind in [BackendKind::Rust, BackendKind::TypeScript] {
+            if self.backend(kind).is_some() {
+                remaining.insert(kind);
+            }
+        }
+
+        if remaining.is_empty() {
+            return self.write_response(id, Value::Null);
+        }
+
+        self.pending_shutdown = Some(PendingShutdown {
+            client_id: id.clone(),
+            remaining: remaining.clone(),
+        });
+        for kind in remaining {
+            self.forward_request_to_backend(
+                kind,
+                "shutdown",
+                Value::Null,
+                id.clone(),
+                PendingRequestKind::Shutdown,
+                false,
+            )?;
         }
         Ok(())
+    }
+
+    fn finish_backend_shutdown(&mut self, kind: BackendKind) -> Result<(), String> {
+        let Some(shutdown) = &mut self.pending_shutdown else {
+            return Ok(());
+        };
+        shutdown.remaining.remove(&kind);
+        if shutdown.remaining.is_empty() {
+            let client_id = shutdown.client_id.clone();
+            self.pending_shutdown = None;
+            self.write_response(client_id, Value::Null)?;
+        }
+        Ok(())
+    }
+
+    async fn fail_backend(&mut self, kind: BackendKind, error: String) -> Result<(), String> {
+        self.write_notification(
+            "window/logMessage",
+            json!({
+                "type": 1,
+                "message": format!("api-ls {} backend unavailable: {error}", kind.display_name()),
+            }),
+        )?;
+
+        let failed_keys = self
+            .pending_requests
+            .keys()
+            .filter(|key| key.kind == kind)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in failed_keys {
+            if let Some(pending) = self.pending_requests.remove(&key) {
+                self.client_requests.remove(&rpc_id_key(&pending.client_id));
+                match pending.kind {
+                    PendingRequestKind::Forward | PendingRequestKind::References { .. } => {
+                        self.write_error(
+                            pending.client_id,
+                            -32_003,
+                            format!(
+                                "{} backend stopped while handling `{}`: {error}",
+                                kind.display_name(),
+                                pending.method
+                            ),
+                        )?;
+                    }
+                    PendingRequestKind::Shutdown => {
+                        self.finish_backend_shutdown(kind)?;
+                    }
+                }
+            }
+        }
+
+        match kind {
+            BackendKind::Rust => {
+                if let Some(backend) = self.rust_analyzer.take() {
+                    backend.reap().await;
+                }
+            }
+            BackendKind::TypeScript => {
+                if let Some(backend) = self.typescript.take() {
+                    backend.reap().await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn stop_backends(&mut self) {
+        if let Some(backend) = self.rust_analyzer.take() {
+            backend.stop().await;
+        }
+        if let Some(backend) = self.typescript.take() {
+            backend.stop().await;
+        }
+    }
+
+    fn backend(&self, kind: BackendKind) -> Option<&AsyncBackend> {
+        match kind {
+            BackendKind::Rust => self.rust_analyzer.as_ref(),
+            BackendKind::TypeScript => self.typescript.as_ref(),
+        }
+    }
+
+    fn backend_mut(&mut self, kind: BackendKind) -> Option<&mut AsyncBackend> {
+        match kind {
+            BackendKind::Rust => self.rust_analyzer.as_mut(),
+            BackendKind::TypeScript => self.typescript.as_mut(),
+        }
     }
 
     fn read_generated_package_file(&mut self, params: Value, id: Value) -> Result<(), String> {
@@ -493,7 +851,10 @@ impl<W: Write> LspServer<W> {
         Ok(graph.definition(&query, workspace))
     }
 
-    fn cross_language_references(&mut self, params: &Value) -> Result<Option<Value>, String> {
+    fn cross_language_references_base(
+        &self,
+        params: &Value,
+    ) -> Result<Option<(Vec<Value>, WorkspaceConfig)>, String> {
         let Some(workspace) = self.workspace.clone() else {
             return Ok(None);
         };
@@ -503,45 +864,11 @@ impl<W: Write> LspServer<W> {
         let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
             return Ok(None);
         };
-        let Some(mut locations) = graph.references(&query, &workspace) else {
+        let Some(locations) = graph.references(&query, &workspace) else {
             return Ok(None);
         };
 
-        let backend_locations = if is_rust_message("textDocument/references", params) {
-            self.backend_reference_locations(BackendKind::Rust, params.clone())?
-        } else if self.is_typescript_message("textDocument/references", params) {
-            self.backend_reference_locations(BackendKind::TypeScript, params.clone())?
-        } else {
-            Vec::new()
-        };
-        locations.extend(backend_locations);
-        Ok(Some(dedupe_locations(locations, &workspace)))
-    }
-
-    fn backend_reference_locations(
-        &mut self,
-        backend: BackendKind,
-        params: Value,
-    ) -> Result<Vec<Value>, String> {
-        let response = match backend {
-            BackendKind::Rust => self
-                .rust_analyzer
-                .as_mut()
-                .map(|backend| backend.request_raw("textDocument/references", params)),
-            BackendKind::TypeScript => self
-                .typescript
-                .as_mut()
-                .map(|backend| backend.request_raw("textDocument/references", params)),
-        };
-        let Some(response) = response else {
-            return Ok(Vec::new());
-        };
-        let response = response?;
-        Ok(response
-            .get("result")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
+        Ok(Some((locations, workspace)))
     }
 
     fn cross_language_hover(&self, params: &Value) -> Result<Option<Value>, String> {
@@ -618,10 +945,74 @@ impl<W: Write> LspServer<W> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum BackendKind {
     Rust,
     TypeScript,
+}
+
+impl BackendKind {
+    const fn display_name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust-analyzer",
+            Self::TypeScript => "TypeScript/Effect",
+        }
+    }
+
+    const fn wire_label(self) -> &'static str {
+        match self {
+            Self::Rust => "rust-analyzer",
+            Self::TypeScript => "typescript-effect",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum GatewayEvent {
+    ClientMessage(LspMessage),
+    ClientEof,
+    BackendMessage(BackendKind, LspMessage),
+    BackendExited(BackendKind),
+    BackendFailed(BackendKind, String),
+    BackendLog(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct BackendRequestKey {
+    kind: BackendKind,
+    id: String,
+}
+
+impl BackendRequestKey {
+    fn new(kind: BackendKind, id: &Value) -> Self {
+        Self {
+            kind,
+            id: rpc_id_key(id),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingRequest {
+    client_id: Value,
+    method: String,
+    kind: PendingRequestKind,
+}
+
+#[derive(Debug)]
+enum PendingRequestKind {
+    Forward,
+    References {
+        local_locations: Vec<Value>,
+        workspace: Box<WorkspaceConfig>,
+    },
+    Shutdown,
+}
+
+#[derive(Debug)]
+struct PendingShutdown {
+    client_id: Value,
+    remaining: BTreeSet<BackendKind>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1083,24 +1474,23 @@ impl TextPositionQuery {
     }
 }
 
-struct BackendProcess {
+struct AsyncBackend {
     name: String,
     child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdin_tx: mpsc::UnboundedSender<Value>,
     next_id: u64,
 }
 
-fn start_required_backend(
+async fn start_required_backend(
+    kind: BackendKind,
     label: &str,
     command: &BackendCommand,
     initialize_params: Value,
-) -> Result<BackendProcess, String> {
-    BackendProcess::start(label, command)
-        .and_then(|mut backend| {
-            backend.initialize(initialize_params)?;
-            Ok(backend)
-        })
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    log_file: Option<PathBuf>,
+) -> Result<AsyncBackend, String> {
+    AsyncBackend::start(kind, label, command, initialize_params, event_tx, log_file)
+        .await
         .map_err(|error| {
             format!(
                 "api-ls requires the {label} backend to start and initialize; configured command: {}; error: {error}; help: install the backend or update `.api-ls.json` for this workspace",
@@ -1109,18 +1499,15 @@ fn start_required_backend(
         })
 }
 
-fn backend_command_label(command: &BackendCommand) -> String {
-    if command.command.is_empty() {
-        return "<empty command>".to_owned();
-    }
-    std::iter::once(command.command.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-impl BackendProcess {
-    fn start(name: &str, command: &BackendCommand) -> Result<Self, String> {
+impl AsyncBackend {
+    async fn start(
+        kind: BackendKind,
+        name: &str,
+        command: &BackendCommand,
+        initialize_params: Value,
+        event_tx: mpsc::UnboundedSender<GatewayEvent>,
+        log_file: Option<PathBuf>,
+    ) -> Result<Self, String> {
         if command.command.is_empty() {
             return Err("backend command is empty".to_owned());
         }
@@ -1129,7 +1516,7 @@ impl BackendProcess {
             .args(&command.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to start `{}`: {error}", command.command))?;
         let stdin = child
@@ -1140,120 +1527,235 @@ impl BackendProcess {
             .stdout
             .take()
             .ok_or_else(|| format!("{name} stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("{name} stderr was not piped"))?;
+        spawn_backend_stderr_task(kind, name.to_owned(), stderr, event_tx.clone(), log_file);
+
+        let mut stdin = stdin;
+        let mut stdout = AsyncBufReader::new(stdout);
+        let initialize_id = 1;
+        if let Err(error) =
+            write_request_async(&mut stdin, initialize_id, "initialize", initialize_params).await
+        {
+            terminate_child(&mut child).await;
+            return Err(error);
+        }
+        if let Err(error) =
+            read_initialize_response(name, &mut stdout, initialize_id, kind, &event_tx).await
+        {
+            terminate_child(&mut child).await;
+            return Err(error);
+        }
+
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+        spawn_backend_writer(kind, name.to_owned(), stdin, stdin_rx, event_tx.clone());
+        spawn_backend_stdout_reader(kind, name.to_owned(), stdout, event_tx);
 
         Ok(Self {
             name: name.to_owned(),
             child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
+            stdin_tx,
+            next_id: initialize_id + 1,
         })
     }
 
-    fn initialize(&mut self, params: Value) -> Result<(), String> {
-        let id = self.allocate_id();
-        self.write_request(id, "initialize", params)?;
-        self.read_until_response(id).map(|_| ())
+    fn send_request(&self, id: u64, method: &str, params: Value) -> Result<(), String> {
+        self.send_raw(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
     }
 
-    fn forward_request(
-        &mut self,
-        method: &str,
-        params: Value,
-        client_id: Value,
-        writer: &mut impl Write,
-    ) -> Result<(), String> {
-        let (response, notifications) = self.request_raw_with_notifications(method, params)?;
-        for notification in notifications {
-            write_framed(writer, &notification)?;
-        }
-        let mut raw = response;
-        raw["id"] = client_id;
-        write_framed(writer, &raw)
-    }
-
-    fn request_raw(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        self.request_raw_with_notifications(method, params)
-            .map(|(response, _)| response)
-    }
-
-    fn request_raw_with_notifications(
-        &mut self,
-        method: &str,
-        params: Value,
-    ) -> Result<(Value, Vec<Value>), String> {
-        let backend_id = self.allocate_id();
-        self.write_request(backend_id, method, params)?;
-        let mut notifications = Vec::new();
-
-        loop {
-            let message = read_message(&mut self.stdout)?
-                .ok_or_else(|| format!("{} exited while handling `{method}`", self.name))?;
-            if message.id.as_ref() == Some(&json!(backend_id)) {
-                return Ok((message.raw, notifications));
-            }
-            if message.id.is_none() {
-                notifications.push(message.raw);
-            }
-        }
-    }
-
-    fn forward_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
-        write_framed(
-            &mut self.stdin,
-            &json!({
+    fn send_notification(&self, method: &str, params: Value) -> Result<(), String> {
+        self.send_raw(json!({
                 "jsonrpc": "2.0",
                 "method": method,
                 "params": params,
-            }),
-        )
+        }))
     }
 
-    fn shutdown(&mut self) {
-        let id = self.allocate_id();
-        if self.write_request(id, "shutdown", Value::Null).is_ok() {
-            let _ = self.read_until_response(id);
+    fn send_raw(&self, message: Value) -> Result<(), String> {
+        self.stdin_tx
+            .send(message)
+            .map_err(|error| format!("{} stdin is unavailable: {error}", self.name))
+    }
+
+    async fn stop(mut self) {
+        let _ = self.send_notification("exit", Value::Null);
+        self.wait_or_kill(Duration::from_millis(500)).await;
+    }
+
+    async fn reap(mut self) {
+        self.wait_or_kill(Duration::from_millis(100)).await;
+    }
+
+    async fn wait_or_kill(&mut self, timeout: Duration) {
+        if tokio::time::timeout(timeout, self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.start_kill();
+            let _ = self.child.wait().await;
         }
     }
 
-    fn exit(&mut self) {
-        let _ = self.forward_notification("exit", Value::Null);
-    }
-
-    fn write_request(&mut self, id: u64, method: &str, params: Value) -> Result<(), String> {
-        write_framed(
-            &mut self.stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params,
-            }),
-        )
-    }
-
-    fn read_until_response(&mut self, id: u64) -> Result<Value, String> {
-        loop {
-            let message = read_message(&mut self.stdout)?
-                .ok_or_else(|| format!("{} exited before responding", self.name))?;
-            if message.id.as_ref() == Some(&json!(id)) {
-                return Ok(message.raw);
-            }
-        }
-    }
-
-    const fn allocate_id(&mut self) -> u64 {
+    fn allocate_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
     }
 }
 
-impl Drop for BackendProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+async fn terminate_child(child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+async fn read_initialize_response(
+    name: &str,
+    stdout: &mut AsyncBufReader<ChildStdout>,
+    initialize_id: u64,
+    kind: BackendKind,
+    event_tx: &mpsc::UnboundedSender<GatewayEvent>,
+) -> Result<(), String> {
+    loop {
+        let message = read_message_async(stdout)
+            .await?
+            .ok_or_else(|| format!("{name} exited before responding to initialize"))?;
+        if message.id.as_ref() == Some(&json!(initialize_id)) {
+            if let Some(error) = message.raw.get("error") {
+                return Err(format!("initialize returned error: {error}"));
+            }
+            return Ok(());
+        }
+        event_tx
+            .send(GatewayEvent::BackendMessage(kind, message))
+            .map_err(|error| format!("failed to queue {name} initialize message: {error}"))?;
     }
+}
+
+fn spawn_backend_writer(
+    kind: BackendKind,
+    name: String,
+    mut stdin: ChildStdin,
+    mut stdin_rx: mpsc::UnboundedReceiver<Value>,
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(message) = stdin_rx.recv().await {
+            if let Err(error) = write_framed_async(&mut stdin, &message).await {
+                let _ = event_tx.send(GatewayEvent::BackendFailed(
+                    kind,
+                    format!("{name} stdin write failed: {error}"),
+                ));
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_backend_stdout_reader(
+    kind: BackendKind,
+    name: String,
+    mut stdout: AsyncBufReader<ChildStdout>,
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match read_message_async(&mut stdout).await {
+                Ok(Some(message)) => {
+                    if event_tx
+                        .send(GatewayEvent::BackendMessage(kind, message))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    let _ = event_tx.send(GatewayEvent::BackendExited(kind));
+                    break;
+                }
+                Err(error) => {
+                    let _ = event_tx.send(GatewayEvent::BackendFailed(
+                        kind,
+                        format!("{name} stdout read failed: {error}"),
+                    ));
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_backend_stderr_task(
+    kind: BackendKind,
+    name: String,
+    stderr: tokio::process::ChildStderr,
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    log_file: Option<PathBuf>,
+) {
+    tokio::spawn(async move {
+        let mut lines = AsyncBufReader::new(stderr).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let message = format!("{name} stderr: {line}");
+                    if let Some(path) = &log_file {
+                        if let Err(error) = append_log_line(path, &message).await {
+                            let _ = event_tx.send(GatewayEvent::BackendLog(format!(
+                                "{} stderr log write failed: {error}",
+                                kind.display_name()
+                            )));
+                        }
+                    } else if event_tx.send(GatewayEvent::BackendLog(message)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = event_tx.send(GatewayEvent::BackendLog(format!(
+                        "{} stderr read failed: {error}",
+                        kind.display_name()
+                    )));
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn append_log_line(path: &Path, line: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("failed to create log dir `{}`: {error}", parent.display()))?;
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .map_err(|error| format!("failed to open log file `{}`: {error}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write log file `{}`: {error}", path.display()))?;
+    file.write_all(b"\n")
+        .await
+        .map_err(|error| format!("failed to write log file `{}`: {error}", path.display()))
+}
+
+fn backend_command_label(command: &BackendCommand) -> String {
+    if command.command.is_empty() {
+        return "<empty command>".to_owned();
+    }
+    std::iter::once(command.command.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn initialize_workspace(params: &Value) -> Result<WorkspaceConfig, String> {
@@ -1367,6 +1869,14 @@ fn resolve_workspace_config(
         symbol_graph,
         usage_index,
     }
+}
+
+fn workspace_log_file(workspace: &WorkspaceConfig) -> Option<PathBuf> {
+    workspace
+        .config
+        .log_file
+        .as_ref()
+        .map(|path| absolutize_from(&workspace.root, path))
 }
 
 fn absolutize_from(root: &Path, path: &Path) -> PathBuf {
@@ -1592,6 +2102,63 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<LspMessage>, String>
     }))
 }
 
+async fn read_message_async<R>(reader: &mut R) -> Result<Option<LspMessage>, String>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut content_length = None;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|error| format!("failed to read LSP header: {error}"))?;
+        if read == 0 {
+            return Ok(None);
+        }
+
+        let header = line.trim_end_matches(['\r', '\n']);
+        if header.is_empty() {
+            break;
+        }
+
+        let Some((name, value)) = header.split_once(':') else {
+            return Err(format!("malformed LSP header `{header}`"));
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|error| format!("invalid Content-Length `{value}`: {error}"))?,
+            );
+        }
+    }
+
+    let content_length =
+        content_length.ok_or_else(|| "missing Content-Length header".to_owned())?;
+    let mut body = vec![0; content_length];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|error| format!("failed to read LSP body: {error}"))?;
+
+    let value = serde_json::from_slice::<Value>(&body)
+        .map_err(|error| format!("failed to parse LSP JSON body: {error}"))?;
+
+    Ok(Some(LspMessage {
+        id: value.get("id").cloned(),
+        method: value
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        params: value.get("params").cloned().unwrap_or(Value::Null),
+        raw: value,
+    }))
+}
+
 fn write_framed(writer: &mut impl Write, value: &Value) -> Result<(), String> {
     let body = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     write!(writer, "Content-Length: {}\r\n\r\n", body.len())
@@ -1602,6 +2169,152 @@ fn write_framed(writer: &mut impl Write, value: &Value) -> Result<(), String> {
     writer
         .flush()
         .map_err(|error| format!("failed to flush LSP body: {error}"))
+}
+
+async fn write_framed_async<W>(writer: &mut W, value: &Value) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    writer
+        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+        .await
+        .map_err(|error| format!("failed to write LSP header: {error}"))?;
+    writer
+        .write_all(&body)
+        .await
+        .map_err(|error| format!("failed to write LSP body: {error}"))?;
+    writer
+        .flush()
+        .await
+        .map_err(|error| format!("failed to flush LSP body: {error}"))
+}
+
+async fn write_request_async<W>(
+    writer: &mut W,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_framed_async(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }),
+    )
+    .await
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to create async runtime: {error}"))
+}
+
+async fn run_stdio_async() -> Result<(), String> {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (output_tx, output_rx) = mpsc::unbounded_channel();
+    let client_reader = tokio::spawn(read_client_loop(tokio::io::stdin(), event_tx.clone()));
+    let output_writer = tokio::spawn(write_output_loop(tokio::io::stdout(), output_rx));
+
+    let result = AsyncLspServer::new(event_tx, event_rx, output_tx)
+        .run()
+        .await;
+    client_reader.abort();
+    let _ = client_reader.await;
+    let writer_result = output_writer
+        .await
+        .map_err(|error| format!("LSP output task failed: {error}"))?;
+
+    result?;
+    writer_result
+}
+
+async fn run_messages_async(messages: Vec<LspMessage>) -> Result<Vec<Value>, String> {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let client_tx = event_tx.clone();
+    let server = AsyncLspServer::new(event_tx, event_rx, output_tx);
+
+    for message in messages {
+        client_tx
+            .send(GatewayEvent::ClientMessage(message))
+            .map_err(|error| format!("failed to queue test LSP input: {error}"))?;
+    }
+    client_tx
+        .send(GatewayEvent::ClientEof)
+        .map_err(|error| format!("failed to queue test LSP EOF: {error}"))?;
+    drop(client_tx);
+
+    server.run().await?;
+
+    let mut output = Vec::new();
+    while let Ok(message) = output_rx.try_recv() {
+        output.push(message);
+    }
+    Ok(output)
+}
+
+async fn read_client_loop<R>(input: R, event_tx: mpsc::UnboundedSender<GatewayEvent>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = AsyncBufReader::new(input);
+    loop {
+        match read_message_async(&mut reader).await {
+            Ok(Some(message)) => {
+                if event_tx.send(GatewayEvent::ClientMessage(message)).is_err() {
+                    break;
+                }
+            }
+            Ok(None) => {
+                let _ = event_tx.send(GatewayEvent::ClientEof);
+                break;
+            }
+            Err(error) => {
+                let _ = event_tx.send(GatewayEvent::BackendLog(format!(
+                    "client input read failed: {error}"
+                )));
+                let _ = event_tx.send(GatewayEvent::ClientEof);
+                break;
+            }
+        }
+    }
+}
+
+async fn write_output_loop<W>(
+    mut writer: W,
+    mut output_rx: mpsc::UnboundedReceiver<Value>,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(message) = output_rx.recv().await {
+        write_framed_async(&mut writer, &message).await?;
+    }
+    Ok(())
+}
+
+fn write_output_messages(mut output: impl Write, messages: Vec<Value>) -> Result<(), String> {
+    for message in messages {
+        write_framed(&mut output, &message)?;
+    }
+    Ok(())
+}
+
+fn rpc_id_key(id: &Value) -> String {
+    serde_json::to_string(id).expect("JSON-RPC id serializes")
+}
+
+fn rpc_id_from_key(key: &str) -> Value {
+    serde_json::from_str(key).unwrap_or_else(|_| Value::String(key.to_owned()))
 }
 
 #[cfg(test)]
@@ -1898,6 +2611,153 @@ mod tests {
         assert!(output.contains("\"uri\":\"file:///mock-definition.rs\""));
         assert!(output.contains("\"id\":3"));
         assert!(output.contains("export const generated = true"));
+    }
+
+    #[test]
+    fn concurrent_rust_and_typescript_requests_do_not_block_each_other() {
+        let root = test_root("concurrent-proxy");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(&root, SLOW_RUST_BACKEND, FAST_BACKEND, None);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let ts_uri = path_to_file_uri(&root.join("src/client.ts"));
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 0, "character": 3 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": ts_uri },
+                    "position": { "line": 0, "character": 10 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("file:///fast-definition.ts"));
+        assert!(output.contains("file:///slow-definition.rs"));
+        assert_output_order(&output, "\"id\":3", "\"id\":2");
+    }
+
+    #[test]
+    fn forwards_cancel_request_to_backend_while_request_is_pending() {
+        let root = test_root("cancel-proxy");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(&root, CANCELLABLE_BACKEND, FAST_BACKEND, None);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": "slow",
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": rust_uri },
+                    "position": { "line": 0, "character": 3 }
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": { "id": "slow" }
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let output = String::from_utf8(output).expect("utf8 output");
+
+        assert!(output.contains("cancelled:2"));
+        assert!(output.contains("\"id\":\"slow\""));
+        assert_output_order(&output, "cancelled:2", "\"id\":\"slow\"");
+    }
+
+    #[test]
+    fn captures_backend_stderr_to_configured_log_file() {
+        let root = test_root("stderr-log");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(
+            &root,
+            STDERR_BACKEND,
+            STDERR_BACKEND,
+            Some("target/api-ls.log"),
+        );
+
+        let input = [
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": path_to_file_uri(&root),
+                    "capabilities": {}
+                }
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "shutdown"
+            })),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            })),
+        ]
+        .join("");
+        let mut output = Vec::new();
+
+        run(input.as_bytes(), &mut output).expect("run server");
+        let log = fs::read_to_string(root.join("target/api-ls.log")).expect("read log");
+
+        assert!(log.contains("rust-analyzer stderr: backend stderr hello"));
+        assert!(log.contains("TypeScript/Effect stderr: backend stderr hello"));
     }
 
     #[test]
@@ -2545,6 +3405,15 @@ mod tests {
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
     }
 
+    fn assert_output_order(output: &str, first: &str, second: &str) {
+        let first_index = output.find(first).expect("first output marker");
+        let second_index = output.find(second).expect("second output marker");
+        assert!(
+            first_index < second_index,
+            "expected `{first}` before `{second}` in {output}"
+        );
+    }
+
     fn initialize_output(root: &Path) -> String {
         let input = framed(&json!({
             "jsonrpc": "2.0",
@@ -2642,6 +3511,33 @@ mod tests {
 
     fn write_mock_backend_config(root: &Path) {
         write_mock_backend_config_with_lint(root, None);
+    }
+
+    fn write_backend_config(
+        root: &Path,
+        rust_backend_source: &str,
+        typescript_backend_source: &str,
+        log_file: Option<&str>,
+    ) {
+        let rust_backend = root.join("rust_backend.py");
+        let typescript_backend = root.join("typescript_backend.py");
+        fs::write(&rust_backend, rust_backend_source).expect("write rust backend");
+        fs::write(&typescript_backend, typescript_backend_source)
+            .expect("write typescript backend");
+        let mut config = json!({
+            "rustAnalyzer": {
+                "command": "python3",
+                "args": [rust_backend.to_string_lossy()]
+            },
+            "typescript": {
+                "command": "python3",
+                "args": [typescript_backend.to_string_lossy()]
+            }
+        });
+        if let Some(log_file) = log_file {
+            config["logFile"] = json!(log_file);
+        }
+        fs::write(root.join(".api-ls.json"), config.to_string()).expect("write config");
     }
 
     fn write_mock_backend_config_with_lint(root: &Path, lint: Option<&str>) {
@@ -2759,6 +3655,200 @@ while True:
                 "range":{"start":{"line":3,"character":0},"end":{"line":3,"character":4}}
             }]
         })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const FAST_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "textDocument/definition":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "uri":"file:///fast-definition.ts",
+                "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+            }]
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const SLOW_RUST_BACKEND: &str = r#"
+import json
+import sys
+import time
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "textDocument/definition":
+        time.sleep(0.25)
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "uri":"file:///slow-definition.rs",
+                "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+            }]
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const CANCELLABLE_BACKEND: &str = r#"
+import json
+import sys
+import threading
+import time
+
+write_lock = threading.Lock()
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    with write_lock:
+        sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+        sys.stdout.buffer.write(body)
+        sys.stdout.buffer.flush()
+
+def delayed_definition(request_id):
+    time.sleep(0.2)
+    write_message({
+        "jsonrpc":"2.0",
+        "id":request_id,
+        "result":[{
+            "uri":"file:///cancel-definition.rs",
+            "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+        }]
+    })
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "textDocument/definition":
+        threading.Thread(target=delayed_definition, args=(message["id"],), daemon=True).start()
+    elif method == "$/cancelRequest":
+        write_message({
+            "jsonrpc":"2.0",
+            "method":"window/logMessage",
+            "params":{"type":3,"message":f"cancelled:{message['params']['id']}"}
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const STDERR_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        sys.stderr.write("backend stderr hello\n")
+        sys.stderr.flush()
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
     elif method == "shutdown":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
     elif method == "exit":
