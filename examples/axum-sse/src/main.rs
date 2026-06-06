@@ -1,5 +1,5 @@
-use api_axum::{router, Sse};
-use api_core::{api_module, ApiType};
+use api_axum::{ApiRouter, Sse};
+use api_core::ApiType;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
@@ -33,13 +33,13 @@ fn events() -> Result<Sse<UserEvent, EventStream>, EventError> {
     ])))
 }
 
+#[api_macros::api_router]
+fn routes() -> ApiRouter {
+    ApiRouter::new("events").endpoint(events)
+}
+
 fn main() {
-    let module = api_module!(name = "events", endpoints = [events]);
-    let _app = router(module)
-        .route(__api_endpoint_events(), || async {
-            api_axum::success_or_error(events())
-        })
-        .into_router();
+    let _app = routes().into_router();
 
     println!("registered SSE endpoint /events");
 }

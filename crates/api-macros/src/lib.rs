@@ -3,8 +3,9 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse::Parser, parse_macro_input, Attribute, Data, DeriveInput, Fields, FnArg, GenericArgument,
-    ItemFn, LitStr, PathArguments, ReturnType, Type,
+    parse::Parser, parse_macro_input, parse_quote, visit_mut, Attribute, Data, DeriveInput, Expr,
+    ExprMethodCall, ExprPath, Fields, FnArg, GenericArgument, ItemFn, LitStr, PathArguments,
+    ReturnType, Type,
 };
 
 #[proc_macro_derive(ApiType, attributes(serde))]
@@ -36,6 +37,128 @@ pub fn api(args: TokenStream, input: TokenStream) -> TokenStream {
     expand_api_endpoint(args, input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+#[proc_macro_attribute]
+pub fn api_router(args: TokenStream, input: TokenStream) -> TokenStream {
+    if !args.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[api_router] does not accept arguments",
+        )
+        .into_compile_error()
+        .into();
+    }
+    let input = parse_macro_input!(input as ItemFn);
+
+    expand_api_router(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_api_router(mut input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let mut rewriter = ApiRouterEndpointRewriter { errors: Vec::new() };
+    visit_mut::VisitMut::visit_block_mut(&mut rewriter, &mut input.block);
+    if let Some(error) = combine_errors(rewriter.errors) {
+        return Err(error);
+    }
+
+    Ok(quote!(#input))
+}
+
+struct ApiRouterEndpointRewriter {
+    errors: Vec<syn::Error>,
+}
+
+impl visit_mut::VisitMut for ApiRouterEndpointRewriter {
+    fn visit_expr_method_call_mut(&mut self, call: &mut ExprMethodCall) {
+        visit_mut::visit_expr_method_call_mut(self, call);
+
+        if call.method != "endpoint" {
+            return;
+        }
+
+        if call.args.len() != 1 {
+            self.errors.push(syn::Error::new_spanned(
+                &call.args,
+                "#[api_router] .endpoint(...) expects exactly one handler path",
+            ));
+            return;
+        }
+
+        let Some(handler) = call.args.first() else {
+            return;
+        };
+        let Expr::Path(ExprPath {
+            qself: None, path, ..
+        }) = handler
+        else {
+            self.errors.push(unsupported_endpoint_arg(handler));
+            return;
+        };
+        if path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+        {
+            self.errors.push(unsupported_endpoint_arg(handler));
+            return;
+        }
+
+        if path.segments.is_empty() {
+            self.errors.push(unsupported_endpoint_arg(handler));
+            return;
+        }
+        let descriptor_path = generated_router_helper_path(path, "__api_endpoint_descriptor_");
+        let adapter_path = generated_router_helper_path(path, "__api_axum_handler_");
+        let source = router_mount_source_range();
+
+        call.method = format_ident!("endpoint_descriptor");
+        call.args.clear();
+        call.args.push(parse_quote!(#descriptor_path()));
+        call.args.push(parse_quote!(#adapter_path));
+        call.args.push(source);
+    }
+}
+
+fn generated_router_helper_path(path: &syn::Path, prefix: &str) -> syn::Path {
+    let mut helper = path.clone();
+    let last = helper
+        .segments
+        .last_mut()
+        .expect("validated handler paths contain a last segment");
+    let handler_ident = last.ident.clone();
+    last.ident = format_ident!("{prefix}{handler_ident}");
+    helper
+}
+
+fn router_mount_source_range() -> Expr {
+    parse_quote! {
+        ::api_core::ir::SourceRange {
+            file: file!().to_owned(),
+            start_line: line!(),
+            start_column: column!(),
+            end_line: line!(),
+            end_column: column!(),
+            full_range: None,
+        }
+    }
+}
+
+fn unsupported_endpoint_arg(expr: &Expr) -> syn::Error {
+    syn::Error::new_spanned(
+        expr,
+        "#[api_router] .endpoint(...) only supports a handler path like `get_user` or `admin::get_user`",
+    )
+}
+
+fn combine_errors(errors: Vec<syn::Error>) -> Option<syn::Error> {
+    let mut iter = errors.into_iter();
+    let mut combined = iter.next()?;
+    for error in iter {
+        combined.combine(error);
+    }
+    Some(combined)
 }
 
 fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {

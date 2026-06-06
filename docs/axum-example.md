@@ -1,15 +1,18 @@
 # Axum Example Guide
 
-The Axum adapter converts explicit API metadata into Axum routes while keeping
-the contract layer framework-neutral.
+The Axum adapter mounts annotated handlers directly while keeping the contract
+tree available for TypeScript generation.
 
 ## Runnable shape
 
 ```rust
-use api_axum::{router, Json, Path};
-use api_core::api_module;
-use api_macros::{api, ApiError, ApiType};
+use api_axum::{ApiRouter, Json, Path};
+use api_collector::{collect_contract, CollectorInput};
+use api_core::ir::ApiContract;
+use api_macros::{api, api_router, ApiError, ApiType};
 use serde::{Deserialize, Serialize};
+
+const TS_PACKAGE_NAME: &str = "@workspace/server-api";
 
 #[derive(Clone, Debug, Deserialize, Serialize, ApiType)]
 #[serde(rename_all = "camelCase")]
@@ -34,13 +37,16 @@ async fn get_user(Path(id): Path<i64>) -> Result<Json<User>, GetUserError> {
 }
 
 fn app() -> axum::Router {
-    let module = api_module!(name = "users", endpoints = [get_user]);
+    routes().into_router()
+}
 
-    router(module)
-        .route(__api_endpoint_get_user(), |path: Path<i64>| async move {
-            api_axum::success_or_error(get_user(path).await)
-        })
-        .into_router()
+#[api_router]
+fn routes() -> ApiRouter {
+    ApiRouter::new("users").endpoint(get_user)
+}
+
+fn contract() -> ApiContract {
+    collect_contract(CollectorInput::from_root(TS_PACKAGE_NAME, routes()))
 }
 
 #[tokio::main]
@@ -67,9 +73,13 @@ See `examples/axum-sse` for the current SSE shape.
 
 ## Notes
 
-- Endpoints are registered only when included in an `api_module!`.
+- Endpoints are exported only when mounted in an `ApiRouter`.
 - Domain errors should derive `ApiError` and declare HTTP status metadata.
 - The generated TypeScript success type is the decoded response body.
 - In runnable Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`,
   `NoContent`, and `Sse` from `api_axum`; the `api_core` wrappers are
   framework-neutral markers for contract-only code.
+- Legacy `api_module!` roots and manual
+  `.route(__api_endpoint_get_user(), get_user_response)` mounts remain
+  supported for compatibility, but new Axum code should prefer
+  `#[api_router]` plus `.endpoint(get_user)`.

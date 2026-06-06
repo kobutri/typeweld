@@ -23,7 +23,7 @@ tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
 
 [package.metadata.rust_ts]
 ts_package = "@workspace/e2e-api"
-api_root = "e2e_axum_effect_server::api"
+api_root = "e2e_axum_effect_server::routes"
 features = []
 
 [lints]

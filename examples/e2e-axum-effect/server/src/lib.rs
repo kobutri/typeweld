@@ -1,9 +1,7 @@
-use std::convert::Infallible;
-
-use api_axum::{router, Body, Created, Json, Path, Sse};
+use api_axum::{ApiRouter, Body, Created, Json, Path, Sse};
 use api_collector::{collect_contract, CollectorInput};
-use api_core::{api_module, ir::ApiContract, ApiModule, ApiType};
-use axum::{response::Response, Router};
+use api_core::{ir::ApiContract, ApiModule, ApiType};
+use axum::Router;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
@@ -121,46 +119,27 @@ pub async fn audit_log() -> Json<AuditLog> {
 }
 
 #[must_use]
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {
+    ApiRouter::new("e2e")
+        .endpoint(get_user)
+        .endpoint(create_user)
+        .endpoint(watch_users)
+        .endpoint(audit_log)
+}
+
+#[must_use]
 pub fn api() -> ApiModule {
-    api_module!(
-        name = "e2e",
-        endpoints = [get_user, create_user, watch_users, audit_log]
-    )
+    routes().into_api_module()
 }
 
 #[must_use]
 pub fn contract() -> ApiContract {
-    collect_contract(CollectorInput {
-        package_name: TS_PACKAGE_NAME.to_owned(),
-        root_module: api(),
-        types: Vec::new(),
-        errors: Vec::new(),
-    })
+    collect_contract(CollectorInput::from_root(TS_PACKAGE_NAME, routes()))
 }
 
 pub fn app() -> Router {
-    router(api())
-        .route(__api_endpoint_get_user(), get_user_response)
-        .route(__api_endpoint_create_user(), create_user_response)
-        .route(__api_endpoint_watch_users(), watch_users_response)
-        .route(__api_endpoint_audit_log(), audit_log_response)
-        .into_router()
-}
-
-async fn get_user_response(id: Path<i32>) -> Response {
-    api_axum::success_or_error(get_user(id).await)
-}
-
-async fn create_user_response(request: Body<CreateUserRequest>) -> Response {
-    api_axum::success_or_error(create_user(request).await)
-}
-
-async fn watch_users_response() -> Response {
-    api_axum::success_or_error(watch_users())
-}
-
-async fn audit_log_response() -> Result<Json<AuditLog>, Infallible> {
-    Ok(audit_log().await)
+    routes().into_router()
 }
 
 fn user(id: i32, display_name: &str, role: &str) -> User {

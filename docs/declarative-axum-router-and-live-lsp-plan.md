@@ -975,6 +975,8 @@ Acceptance:
 
 ### Phase 4: `#[api_router]` Macro
 
+Status: Done.
+
 Files:
 
 - `crates/api-macros/src/lib.rs`
@@ -984,18 +986,18 @@ Files:
 
 Steps:
 
-1. Parse functions annotated with `#[api_router]`.
-2. Rewrite `.endpoint(handler)` calls to hidden descriptor/adapter calls.
-3. Attach source range metadata for the handler identifier.
-4. Reject unsupported `.endpoint(...)` forms with clear errors:
+- [x] Parse functions annotated with `#[api_router]`.
+- [x] Rewrite `.endpoint(handler)` calls to hidden descriptor/adapter calls.
+- [x] Attach source range metadata for the handler identifier.
+- [x] Reject unsupported `.endpoint(...)` forms with clear errors:
 
    - closures
    - dynamic expressions
    - method calls
    - non-path expressions
 
-5. Migrate examples to `.endpoint(handler)`.
-6. Keep legacy `api_module!` docs as compatibility notes.
+- [x] Migrate examples to `.endpoint(handler)`.
+- [x] Keep legacy `api_module!` docs as compatibility notes.
 
 Acceptance:
 

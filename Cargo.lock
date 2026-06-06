@@ -175,6 +175,7 @@ dependencies = [
  "serde_json",
  "syn",
  "tokio",
+ "tower",
  "trybuild",
 ]
 

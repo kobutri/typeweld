@@ -128,6 +128,14 @@ async fn axum_upload_file(
     api_axum::Json(User { id: 17 })
 }
 
+#[api_macros::api_router]
+fn declarative_routes() -> api_axum::ApiRouter {
+    api_axum::ApiRouter::new("users")
+        .endpoint(axum_plain_user)
+        .endpoint(axum_result_user)
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+}
+
 #[api_macros::api(method = "POST", path = "/files/{id}")]
 #[allow(dead_code)]
 async fn upload_file(
@@ -292,6 +300,42 @@ fn api_endpoint_macro_emits_axum_handler_adapters() {
     accepts_handler(__api_axum_handler_axum_result_events);
     accepts_handler(__api_axum_handler_axum_download_file);
     accepts_handler(__api_axum_handler_axum_upload_file);
+}
+
+#[test]
+fn api_router_macro_collects_mounted_endpoints() {
+    let module = declarative_routes().into_api_module();
+    let routes = module
+        .endpoints
+        .iter()
+        .map(|endpoint| endpoint.route.0.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(module.name, "users");
+    assert_eq!(routes, ["/axum-users/plain", "/axum-users/result"]);
+}
+
+#[tokio::test]
+async fn api_router_macro_mounts_generated_axum_adapters() {
+    use tower::ServiceExt;
+
+    let app = declarative_routes().into_router();
+    let response = app
+        .oneshot(
+            axum::extract::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri("/axum-users/plain")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(std::str::from_utf8(&body).expect("utf8"), r#"{"id":7}"#);
 }
 
 #[tokio::test]
