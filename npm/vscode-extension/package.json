@@ -46,7 +46,7 @@
   "scripts": {
     "compile": "npm run typecheck && vite build --config vite.config.mts --mode development",
     "package": "npm run typecheck && vite build --config vite.config.mts --mode production",
-    "package:vsix": "tsx scripts/ensure-out-dir.mts && vsce package --no-dependencies",
+    "package:vsix": "tsx scripts/ensure-out-dir.mts && vsce package --no-dependencies && tsx scripts/patch-vsix-typescript-plugin.mts",
     "prepare:server": "tsx scripts/prepare-package.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "vscode:prepublish": "npm run package",
@@ -112,6 +112,12 @@
           "description": "Workspace marker paths that allow the api-ls client to start. An empty list starts the client for every workspace folder."
         }
       }
-    }
+    },
+    "typescriptServerPlugins": [
+      {
+        "name": "@rust-ts-integration/typescript-plugin",
+        "enableForWorkspaceTypeScriptVersions": true
+      }
+    ]
   }
 }

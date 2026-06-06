@@ -36,10 +36,16 @@ type ClientEntry = {
   disposables: vscode.Disposable[]
 }
 
-type ApiDocumentSelector = Array<{
+type ApiClientDocumentSelector = Array<{
   scheme: "file"
   language: string
   pattern: string
+}>
+
+type ApiDirectDocumentSelector = Array<{
+  scheme: "file"
+  language: string
+  pattern: vscode.GlobPattern
 }>
 
 const clients = new Map<string, ClientEntry>()
@@ -167,7 +173,7 @@ function registerDirectNavigationProviders(
   client: LanguageClient,
   folder: vscode.WorkspaceFolder,
 ): vscode.Disposable[] {
-  const selector = documentSelector(folder)
+  const selector = directDocumentSelector(folder)
 
   const disposables = [
     vscode.languages.registerHoverProvider(selector, {
@@ -197,7 +203,7 @@ function registerDirectNavigationProviders(
           if (token.isCancellationRequested) {
             return undefined
           }
-          return lspLocations(result)
+          return lspLocations(result, folder)
         } catch (error) {
           log(`api-ls direct definition failed: ${formatError(error)}`)
           return undefined
@@ -219,7 +225,7 @@ function registerDirectNavigationProviders(
           if (token.isCancellationRequested) {
             return undefined
           }
-          return lspLocations(result)
+          return lspLocations(result, folder)
         } catch (error) {
           log(`api-ls direct references failed: ${formatError(error)}`)
           return undefined
@@ -227,7 +233,7 @@ function registerDirectNavigationProviders(
       },
     }),
   ]
-  log(`Registered direct api-ls navigation providers for ${folder.name}.`)
+  log(`Registered direct api-ls navigation providers for ${folder.name} with workspace-relative selectors.`)
   return disposables
 }
 
@@ -249,16 +255,23 @@ function textDocumentPositionParams(
   }
 }
 
-function lspLocations(result: unknown): vscode.Location[] | undefined {
+function lspLocations(
+  result: unknown,
+  folder: vscode.WorkspaceFolder,
+): vscode.Location[] | undefined {
   if (Array.isArray(result)) {
     return result.flatMap((location) => {
       const converted = lspLocation(location)
-      return converted === undefined ? [] : [converted]
+      return converted === undefined || isGeneratedPackageLocation(converted, folder)
+        ? []
+        : [converted]
     })
   }
 
   const converted = lspLocation(result)
-  return converted === undefined ? undefined : [converted]
+  return converted === undefined || isGeneratedPackageLocation(converted, folder)
+    ? undefined
+    : [converted]
 }
 
 function lspLocation(value: unknown): vscode.Location | undefined {
@@ -271,6 +284,24 @@ function lspLocation(value: unknown): vscode.Location | undefined {
   }
 
   return new vscode.Location(vscode.Uri.parse(value.uri), range)
+}
+
+function isGeneratedPackageLocation(
+  location: vscode.Location,
+  folder: vscode.WorkspaceFolder,
+): boolean {
+  if (location.uri.scheme !== "file") {
+    return false
+  }
+
+  const generatedRoot = path.join(
+    folder.uri.fsPath,
+    "target",
+    "api-contract",
+    "effect-v4",
+    "packages",
+  )
+  return location.uri.fsPath === generatedRoot || location.uri.fsPath.startsWith(`${generatedRoot}${path.sep}`)
 }
 
 function lspHover(result: unknown): vscode.Hover | undefined {
@@ -370,11 +401,19 @@ function clientOptions(
   }
 }
 
-function documentSelector(folder: vscode.WorkspaceFolder): ApiDocumentSelector {
+function documentSelector(folder: vscode.WorkspaceFolder): ApiClientDocumentSelector {
   return supportedLanguages.map((language) => ({
     scheme: "file",
     language,
     pattern: workspaceGlob(folder),
+  }))
+}
+
+function directDocumentSelector(folder: vscode.WorkspaceFolder): ApiDirectDocumentSelector {
+  return supportedLanguages.map((language) => ({
+    scheme: "file",
+    language,
+    pattern: new vscode.RelativePattern(folder, "**/*"),
   }))
 }
 

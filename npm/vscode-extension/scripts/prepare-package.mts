@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -35,6 +35,13 @@ const launcherTarget = join(extensionRoot, "server", "index.js")
 const launcherPackageTarget = join(extensionRoot, "server", "package.json")
 const binaryTarget = join(extensionRoot, "bin", platformDir, languageServerBinaryName)
 const apiBinaryTarget = join(extensionRoot, "bin", platformDir, apiBinaryName)
+const typescriptPluginSource = join(extensionRoot, "typescript-plugin")
+const typescriptPluginTarget = join(
+  extensionRoot,
+  "node_modules",
+  "@rust-ts-integration",
+  "typescript-plugin",
+)
 
 mkdirSync(dirname(launcherTarget), { recursive: true })
 mkdirSync(dirname(binaryTarget), { recursive: true })
@@ -51,6 +58,7 @@ await esbuild.build({
 writeFileSync(launcherPackageTarget, `${JSON.stringify({ type: "module" }, null, 2)}\n`)
 copyFileSync(binaryPath, binaryTarget)
 const copiedApiBinary = maybeCopyApiBinary(apiBinaryPath, apiBinaryTarget)
+copyDirectory(typescriptPluginSource, typescriptPluginTarget)
 
 if (process.platform !== "win32") {
   chmodSync(launcherTarget, 0o755)
@@ -62,6 +70,7 @@ if (process.platform !== "win32") {
 
 console.log(`Prepared api-ls launcher at ${launcherTarget}`)
 console.log(`Prepared ${platformDir} api-ls binary at ${binaryTarget}`)
+console.log(`Prepared TypeScript server plugin at ${typescriptPluginTarget}`)
 if (copiedApiBinary) {
   console.log(`Prepared ${platformDir} api binary at ${apiBinaryTarget}`)
 }
@@ -88,6 +97,12 @@ function maybeCopyApiBinary(source, target) {
 
   copyFileSync(source, target)
   return true
+}
+
+function copyDirectory(source, target) {
+  rmSync(target, { force: true, recursive: true })
+  mkdirSync(dirname(target), { recursive: true })
+  cpSync(source, target, { recursive: true })
 }
 
 function assertFile(path, label) {
