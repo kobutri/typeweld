@@ -10,13 +10,10 @@
 //! `target/api-contract/server-api.json`. The neighboring `app/` directory
 //! shows the TypeScript half that imports the generated package.
 
+use api_axum::{ApiRouter, Body, Json, Path};
 use api_collector::{collect_contract, contract_to_json, CollectorInput};
-use api_core::{api_module, ApiModule, ApiType, Body, Json, Path};
+use api_core::ApiType;
 use serde::{Deserialize, Serialize};
-
-// This contract-only example uses framework-neutral `api_core` marker wrappers.
-// Runnable Axum handlers should import the matching runtime wrappers from
-// `api_axum` instead.
 
 /// This is a DTO: a data type that crosses the Rust/TypeScript boundary.
 ///
@@ -105,17 +102,16 @@ async fn create_user(request: Body<CreateUserRequest>) -> Result<Json<User>, Use
     }
 }
 
-/// The root API module is intentionally explicit.
-///
-/// This contract-only example keeps the legacy `api_module!` root as
-/// compatibility coverage. New Axum applications should prefer
-/// `#[api_router]` with `ApiRouter::new(...).endpoint(handler)`.
+/// The root router is intentionally explicit.
 ///
 /// Only endpoints listed here are exported to TypeScript and tracked by unused
 /// endpoint analysis. This avoids surprising "everything public is an API"
 /// behavior in larger workspaces.
-fn api() -> ApiModule {
-    api_module!(name = "server", endpoints = [get_user, create_user])
+#[api_macros::api_router]
+fn routes() -> ApiRouter {
+    ApiRouter::new("server")
+        .endpoint(get_user)
+        .endpoint(create_user)
 }
 
 fn main() {
@@ -123,12 +119,7 @@ fn main() {
     //
     // This example performs the same core operation in-process so you can run
     // one binary and inspect the resulting contract.
-    let contract = collect_contract(CollectorInput {
-        package_name: "@workspace/server-api".to_owned(),
-        root_module: api(),
-        types: Vec::new(),
-        errors: Vec::new(),
-    });
+    let contract = collect_contract(CollectorInput::from_root("@workspace/server-api", routes()));
 
     eprintln!("Collected {} endpoint(s)", contract.endpoints.len());
     println!(

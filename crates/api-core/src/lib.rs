@@ -9,11 +9,6 @@ use api_ir::{
     TypeShape,
 };
 
-#[doc(hidden)]
-pub mod __private {
-    pub use paste::paste;
-}
-
 /// Rust type that can cross the generated API boundary.
 ///
 /// Implementations are pure metadata providers. They do not depend on any web
@@ -503,12 +498,6 @@ pub trait IntoApiRoot {
     }
 }
 
-impl IntoApiRoot for ApiModule {
-    fn into_api_module(self) -> ApiModule {
-        self
-    }
-}
-
 impl IntoApiRoot for ApiRouteTree {
     fn into_api_module(self) -> ApiModule {
         ApiRouteTree::into_api_module(self)
@@ -551,22 +540,17 @@ pub struct Query<T>(pub T);
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Body<T>(pub T);
 
-/// Explicit root module for exported API endpoints.
+/// Flattened collection representation produced from an API route tree.
+#[doc(hidden)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ApiModule {
-    pub name: String,
-    pub endpoints: Vec<Endpoint>,
-    pub registry: ContractRegistry,
-}
-
-/// Reachability summary for exported endpoint collection.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct EndpointReachability {
-    pub root_module: String,
-    pub endpoint_ids: Vec<SymbolId>,
+    name: String,
+    endpoints: Vec<Endpoint>,
+    registry: ContractRegistry,
 }
 
 impl ApiModule {
+    #[doc(hidden)]
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -576,34 +560,30 @@ impl ApiModule {
         }
     }
 
+    #[doc(hidden)]
     #[must_use]
-    pub fn with_endpoint(mut self, endpoint: Endpoint) -> Self {
-        self.endpoints.push(endpoint);
-        self
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
+    #[doc(hidden)]
     #[must_use]
-    pub fn with_endpoint_descriptor(mut self, descriptor: EndpointDescriptor) -> Self {
-        descriptor.register_types_and_errors(&mut self.registry);
-        self.endpoints.push(descriptor.endpoint);
-        self
+    pub fn endpoints(&self) -> &[Endpoint] {
+        &self.endpoints
     }
 
-    #[must_use]
-    pub fn with_registry(mut self, registry: ContractRegistry) -> Self {
-        self.registry = registry;
-        self
-    }
-
+    #[doc(hidden)]
     #[must_use]
     pub const fn registry(&self) -> &ContractRegistry {
         &self.registry
     }
 
+    #[doc(hidden)]
     pub const fn registry_mut(&mut self) -> &mut ContractRegistry {
         &mut self.registry
     }
 
+    #[doc(hidden)]
     #[must_use]
     pub fn endpoint_irs(&self) -> Vec<api_ir::Endpoint> {
         self.endpoints
@@ -611,18 +591,6 @@ impl ApiModule {
             .cloned()
             .map(Endpoint::into_ir)
             .collect()
-    }
-
-    #[must_use]
-    pub fn reachability_graph(&self) -> EndpointReachability {
-        EndpointReachability {
-            root_module: self.name.clone(),
-            endpoint_ids: self
-                .endpoints
-                .iter()
-                .map(|endpoint| endpoint.id.clone())
-                .collect(),
-        }
     }
 }
 
@@ -669,40 +637,6 @@ pub fn join_route_paths(prefix: &str, path: &str) -> String {
         (false, true) => prefix.to_owned(),
         (false, false) => format!("{prefix}/{path}"),
     }
-}
-
-/// Compose the explicit root API module exported by a crate.
-///
-/// This macro remains for legacy compatibility. New Axum projects should prefer
-/// `api_axum::ApiRouter` with `#[api_macros::api_router]` and
-/// `.endpoint(handler)` so runtime routes and exported contract metadata share
-/// one tree.
-#[macro_export]
-macro_rules! api_module {
-    (name = $name:literal, endpoints = [$($endpoint:ident),* $(,)?]) => {{
-        let mut module = $crate::ApiModule::new($name);
-        $crate::__private::paste! {
-            $(
-                let _ = $endpoint;
-                module = module.with_endpoint_descriptor([<__api_endpoint_descriptor_ $endpoint>]());
-            )*
-        }
-        module
-    }};
-    (name = $name:literal, endpoint_descriptors = [$($endpoint:path),* $(,)?]) => {{
-        let mut module = $crate::ApiModule::new($name);
-        $(
-            module = module.with_endpoint_descriptor($endpoint());
-        )*
-        module
-    }};
-    (name = $name:literal, endpoint_helpers = [$($endpoint:path),* $(,)?]) => {{
-        let mut module = $crate::ApiModule::new($name);
-        $(
-            module = module.with_endpoint($endpoint());
-        )*
-        module
-    }};
 }
 
 impl<T: ApiType> ApiType for Json<T> {
@@ -1252,54 +1186,6 @@ mod tests {
         assert_eq!(endpoint.method.as_str(), "GET");
         assert_eq!(endpoint.route.0, "/users/{id}");
         assert!(endpoint.allow_unused);
-    }
-
-    #[test]
-    fn api_module_exports_endpoint_ir() {
-        let module =
-            ApiModule::new("users").with_endpoint(Endpoint::new(HttpMethod::Post, "/users"));
-
-        assert_eq!(module.endpoint_irs().len(), 1);
-    }
-
-    #[test]
-    fn api_module_macro_exports_only_listed_endpoint_descriptors() {
-        fn register_get_user(_: &mut ContractRegistry) {}
-
-        fn get_user() -> EndpointDescriptor {
-            EndpointDescriptor::new(
-                Endpoint::new(HttpMethod::Get, "/users/{id}").named(["crate", "get_user"]),
-                register_get_user,
-            )
-        }
-
-        fn delete_user() -> EndpointDescriptor {
-            EndpointDescriptor::new(
-                Endpoint::new(HttpMethod::Delete, "/users/{id}").named(["crate", "delete_user"]),
-                register_get_user,
-            )
-        }
-
-        let module = api_module!(name = "users", endpoint_descriptors = [get_user]);
-        let graph = module.reachability_graph();
-
-        assert_eq!(module.name, "users");
-        assert_eq!(module.endpoints.len(), 1);
-        assert_eq!(module.endpoints[0].rust_name, "get_user");
-        assert_eq!(graph.endpoint_ids, vec![get_user().endpoint.id]);
-        assert_ne!(module.endpoints[0].id, delete_user().endpoint.id);
-    }
-
-    #[test]
-    fn api_module_macro_keeps_legacy_endpoint_helper_path_explicit() {
-        fn get_user() -> Endpoint {
-            Endpoint::new(HttpMethod::Get, "/users/{id}").named(["crate", "get_user"])
-        }
-
-        let module = api_module!(name = "users", endpoint_helpers = [get_user]);
-
-        assert_eq!(module.endpoints.len(), 1);
-        assert_eq!(module.endpoints[0].rust_name, "get_user");
     }
 
     #[test]

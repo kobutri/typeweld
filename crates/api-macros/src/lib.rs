@@ -544,7 +544,6 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     }
 
     let fn_ident = &input.sig.ident;
-    let metadata_ident = format_ident!("__api_endpoint_{fn_ident}");
     let register_ident = format_ident!("__api_register_endpoint_{fn_ident}");
     let descriptor_ident = format_ident!("__api_endpoint_descriptor_{fn_ident}");
     let axum_handler_ident = format_ident!("__api_axum_handler_{fn_ident}");
@@ -576,21 +575,23 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
 
         #[doc(hidden)]
         #[allow(non_snake_case)]
-        pub fn #metadata_ident() -> ::api_core::Endpoint {
+        pub fn #descriptor_ident() -> ::api_core::EndpointDescriptor {
             let request = #request_shape;
             let mut rust_path = module_path!()
                 .split("::")
                 .collect::<Vec<_>>();
             rust_path.push(stringify!(#fn_ident));
 
-            ::api_core::Endpoint::new(#method, #path)
+            let endpoint = ::api_core::Endpoint::new(#method, #path)
                 .named(rust_path)
                 .ts_path([#ts_namespace, #ts_function])
                 .transport(#transport)
                 .request(request)
                 .response(#response)
                 .errors(vec![#(#errors),*])
-                .allow_unused(#allow_unused)
+                .allow_unused(#allow_unused);
+
+            ::api_core::EndpointDescriptor::new(endpoint, #register_ident)
         }
 
         #[doc(hidden)]
@@ -599,12 +600,6 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
             let registry = registry;
             #(#request_registrations)*
             #(#return_registrations)*
-        }
-
-        #[doc(hidden)]
-        #[allow(non_snake_case)]
-        pub fn #descriptor_ident() -> ::api_core::EndpointDescriptor {
-            ::api_core::EndpointDescriptor::new(#metadata_ident(), #register_ident)
         }
 
         #[doc(hidden)]

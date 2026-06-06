@@ -1,6 +1,6 @@
 use api_axum::{ApiRouter, Body, Created, Json, Path, Sse};
 use api_collector::{collect_contract, CollectorInput};
-use api_core::{ir::ApiContract, ApiModule, ApiType};
+use api_core::{ir::ApiContract, ApiType};
 use axum::Router;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -126,11 +126,6 @@ pub fn routes() -> ApiRouter {
         .endpoint(create_user)
         .endpoint(watch_users)
         .endpoint(audit_log)
-}
-
-#[must_use]
-pub fn api() -> ApiModule {
-    routes().into_api_module()
 }
 
 #[must_use]

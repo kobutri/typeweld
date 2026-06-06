@@ -79,7 +79,3 @@ See `examples/axum-sse` for the current SSE shape.
 - In runnable Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`,
   `NoContent`, and `Sse` from `api_axum`; the `api_core` wrappers are
   framework-neutral markers for contract-only code.
-- Legacy `api_module!` roots and manual
-  `.route(__api_endpoint_get_user(), get_user_response)` mounts remain
-  supported for compatibility, but new Axum code should prefer
-  `#[api_router]` plus `.endpoint(get_user)`.

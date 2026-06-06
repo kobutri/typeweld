@@ -179,39 +179,7 @@ fn watch_command(mut options: WatchOptions) -> Result<(), String> {
 }
 
 fn check_command(options: CheckOptions) -> Result<(), String> {
-    if options.legacy_stale_check() {
-        let contract = options
-            .contract
-            .as_ref()
-            .expect("legacy check requires contract");
-        return check_generated_package_is_current(contract, &options.target_dir);
-    }
-
     run_full_check(&options)
-}
-
-fn check_generated_package_is_current(
-    contract_path: &Path,
-    target_dir: &Path,
-) -> Result<(), String> {
-    let contract = read_contract(contract_path)?;
-    let expected = render_generated_package(&contract, target_dir);
-    let stale = stale_generated_files(&expected)?;
-
-    if stale.is_empty() {
-        println!(
-            "generated package is current: {}",
-            expected.package_dir.display()
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "generated package is stale; run `api gen --contract {} --target-dir {}`\n{}",
-            contract_path.display(),
-            target_dir.display(),
-            stale.join("\n")
-        ))
-    }
 }
 
 fn run_full_check(options: &CheckOptions) -> Result<(), String> {
@@ -631,21 +599,6 @@ impl CheckOptions {
         } else {
             UsageLintLevel::Warn
         };
-    }
-
-    fn legacy_stale_check(&self) -> bool {
-        self.contract.is_some()
-            && !self.workspace
-            && self.cargo_package.is_none()
-            && self.package_name.is_none()
-            && self.api_root.is_none()
-            && self.features.is_empty()
-            && !self.all_features
-            && !self.no_default_features
-            && self.ts_files.is_empty()
-            && self.ts_dirs.is_empty()
-            && matches!(self.unused_endpoint_lints, UsageLintLevel::Warn)
-            && !self.cargo_check
     }
 
     fn collect_options(&self) -> CollectOptions {
@@ -3129,29 +3082,6 @@ fn merge_symbol_graphs(graphs: &[String]) -> Result<String, String> {
     .map_err(|error| format!("failed to serialize merged symbol graph: {error}"))
 }
 
-fn stale_generated_files(package: &GeneratedPackage) -> Result<Vec<String>, String> {
-    let mut stale = Vec::new();
-
-    for file in &package.files {
-        let path = package.package_dir.join(&file.path);
-        match fs::read_to_string(&path) {
-            Ok(contents) if contents == file.contents => {}
-            Ok(_) => stale.push(format!("stale: {}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                stale.push(format!("missing: {}", path.display()));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "failed to read generated package file `{}`: {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(stale)
-}
-
 fn collect_ts_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|error| {
         format!(
@@ -3262,8 +3192,6 @@ mod tests {
         assert!(server_lib.contains("#[api_macros::api_router]"));
         assert!(server_lib.contains("pub fn routes() -> ApiRouter"));
         assert!(server_lib.contains("ApiRouter::new(\"greetings\").endpoint(greet)"));
-        assert!(!server_lib.contains("greet_response"));
-        assert!(!server_lib.contains("__api_endpoint_greet"));
         assert!(server_lib.contains("pub fn contract() -> ApiContract"));
 
         let server_main =
@@ -3548,33 +3476,6 @@ export const program = Effect.gen(function* () {
     }
 
     #[test]
-    fn check_reports_stale_generated_package() {
-        let root = test_root("stale");
-        fs::create_dir_all(&root).expect("create root");
-        let contract_path = root.join("contract.json");
-        let target_dir = root.join("target");
-        fs::write(
-            &contract_path,
-            serde_json::to_string_pretty(&api_test_fixtures::basic_contract())
-                .expect("serialize contract"),
-        )
-        .expect("write contract");
-
-        let error = run_with_args(vec![
-            "check".to_owned(),
-            "--contract".to_owned(),
-            contract_path.display().to_string(),
-            "--target-dir".to_owned(),
-            target_dir.display().to_string(),
-        ])
-        .expect_err("missing generated package should be stale");
-
-        assert!(error.contains("generated package is stale"));
-        assert!(error.contains("api gen --contract"));
-        assert!(error.contains("missing:"));
-    }
-
-    #[test]
     fn collect_requires_explicit_empty_debug_flag() {
         let root = test_root("collect-empty");
         let package_dir = root.join("plain");
@@ -3655,7 +3556,7 @@ extra = []
 
 [package.metadata.rust_ts]
 ts_package = "@metadata/server-api"
-api_root = "server::api"
+api_root = "server::routes"
 features = ["extra"]
 
 [dependencies]
@@ -3675,7 +3576,8 @@ serde = {{ version = "1.0", features = ["derive"] }}
         .expect("write server manifest");
         fs::write(
             server_dir.join("src/lib.rs"),
-            r#"use api_core::{api_module, ApiModule, ApiType, Json, Path};
+            r#"use api_axum::{ApiRouter, Json, Path};
+use api_core::ApiType;
 use serde::Serialize;
 
 #[derive(api_macros::ApiType, Serialize)]
@@ -3710,13 +3612,17 @@ pub async fn get_audit_event(id: Path<i64>) -> Result<Json<AuditEvent>, GetUserE
 }
 
 #[cfg(feature = "extra")]
-pub fn api() -> ApiModule {
-    api_module!(name = "server", endpoints = [get_user, get_audit_event])
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {
+    ApiRouter::new("server")
+        .endpoint(get_user)
+        .endpoint(get_audit_event)
 }
 
 #[cfg(not(feature = "extra"))]
-pub fn api() -> ApiModule {
-    api_module!(name = "server", endpoints = [get_user])
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {
+    ApiRouter::new("server").endpoint(get_user)
 }
 "#,
         )
@@ -3766,7 +3672,7 @@ pub fn api() -> ApiModule {
             "--package".to_owned(),
             "server".to_owned(),
             "--api-root".to_owned(),
-            "api".to_owned(),
+            "routes".to_owned(),
             "--package-name".to_owned(),
             "@override/server-api".to_owned(),
             "--out".to_owned(),
@@ -3821,7 +3727,7 @@ edition = "2021"
 
 [package.metadata.rust_ts]
 ts_package = "@workspace/server-api"
-api_root = "server::api"
+api_root = "server::routes"
 
 [dependencies]
 api-axum = {{ path = {api_axum_path} }}
@@ -3842,13 +3748,14 @@ serde = {{ version = "1.0", features = ["derive"] }}
             server_dir.join("src/lib.rs"),
             r#"pub mod users;
 
-pub fn api() -> api_core::ApiModule {
-    users::api()
+pub fn routes() -> api_axum::ApiRouter {
+    users::routes()
 }
 "#,
         )
         .expect("write lib");
-        let users_rs = r#"use api_core::{api_module, ApiModule, ApiType, Json, Path};
+        let users_rs = r#"use api_axum::{ApiRouter, Json, Path};
+use api_core::ApiType;
 use serde::Serialize;
 
 #[derive(api_macros::ApiType, Serialize)]
@@ -3870,8 +3777,9 @@ pub async fn get_user(id: Path<i64>) -> Result<Json<User>, GetUserError> {
     todo!()
 }
 
-pub fn api() -> ApiModule {
-    api_module!(name = "server", endpoints = [get_user])
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {
+    ApiRouter::new("server").endpoint(get_user)
 }
 "#;
         fs::write(server_dir.join("src/users.rs"), users_rs).expect("write users module");
@@ -3958,7 +3866,7 @@ edition = "2021"
 
 [package.metadata.rust_ts]
 ts_package = "@workspace/{package}-api"
-api_root = "{package}::api"
+api_root = "{package}::routes"
 "#
                 ),
             )
@@ -4118,7 +4026,7 @@ edition = "2021"
 
 [package.metadata.rust_ts]
 ts_package = "{ts_package}"
-api_root = "{package}::api"
+api_root = "{package}::routes"
 
 [dependencies]
 api-axum = {{ path = {api_axum_path} }}
@@ -4139,7 +4047,7 @@ serde = {{ version = "1.0", features = ["derive"] }}
         fs::write(
             package_dir.join("src/lib.rs"),
             format!(
-                r#"use api_core::{{api_module, ApiModule, Json}};
+                r#"use api_axum::{{ApiRouter, Json}};
 use serde::Serialize;
 
 #[derive(api_macros::ApiType, Serialize)]
@@ -4152,8 +4060,9 @@ pub async fn {endpoint}() -> Json<{dto}> {{
     todo!()
 }}
 
-pub fn api() -> ApiModule {{
-    api_module!(name = "{package}", endpoints = [{endpoint}])
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {{
+    ApiRouter::new("{package}").endpoint({endpoint})
 }}
 "#
             ),

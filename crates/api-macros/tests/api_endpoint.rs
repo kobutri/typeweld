@@ -4,6 +4,10 @@ use api_core::{
 };
 use axum::{body::to_bytes, http::StatusCode};
 
+fn endpoint(descriptor: api_core::EndpointDescriptor) -> api_core::Endpoint {
+    descriptor.into_endpoint()
+}
+
 #[derive(api_macros::ApiType, serde::Deserialize, serde::Serialize)]
 #[allow(dead_code)]
 struct User {
@@ -149,7 +153,7 @@ async fn upload_file(
 
 #[test]
 fn api_endpoint_macro_emits_metadata() {
-    let endpoint = __api_endpoint_get_user();
+    let endpoint = endpoint(__api_endpoint_descriptor_get_user());
 
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.route.0, "/users/{id}");
@@ -168,7 +172,7 @@ fn api_endpoint_macro_emits_metadata() {
 
 #[test]
 fn api_endpoint_macro_emits_sse_metadata() {
-    let endpoint = __api_endpoint_user_events();
+    let endpoint = endpoint(__api_endpoint_descriptor_user_events());
 
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.transport, Transport::ServerSentEvents);
@@ -184,7 +188,7 @@ fn api_endpoint_macro_emits_sse_metadata() {
 
 #[test]
 fn api_endpoint_macro_preserves_created_response_shape() {
-    let endpoint = __api_endpoint_create_user();
+    let endpoint = endpoint(__api_endpoint_descriptor_create_user());
 
     assert_eq!(endpoint.method, HttpMethod::Post);
     let ResponseShape::Created(response) = endpoint.response else {
@@ -195,7 +199,7 @@ fn api_endpoint_macro_preserves_created_response_shape() {
 
 #[test]
 fn api_endpoint_macro_accepts_endpoint_specific_error_enum() {
-    let endpoint = __api_endpoint_search_users();
+    let endpoint = endpoint(__api_endpoint_descriptor_search_users());
 
     assert_eq!(endpoint.errors[0].name, "SearchUsersError");
     assert_eq!(endpoint.ts_path, ["users", "searchUsers"]);
@@ -203,7 +207,7 @@ fn api_endpoint_macro_accepts_endpoint_specific_error_enum() {
 
 #[test]
 fn api_endpoint_macro_accepts_axum_handler_wrappers() {
-    let endpoint = __api_endpoint_axum_wrapped_create_user();
+    let endpoint = endpoint(__api_endpoint_descriptor_axum_wrapped_create_user());
 
     assert_eq!(endpoint.method, HttpMethod::Post);
     assert_eq!(endpoint.route.0, "/axum-users/{id}");
@@ -217,7 +221,7 @@ fn api_endpoint_macro_accepts_axum_handler_wrappers() {
 
 #[test]
 fn api_endpoint_macro_accepts_axum_sse_wrapper() {
-    let endpoint = __api_endpoint_axum_wrapped_user_events();
+    let endpoint = endpoint(__api_endpoint_descriptor_axum_wrapped_user_events());
 
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.transport, Transport::ServerSentEvents);
@@ -229,7 +233,7 @@ fn api_endpoint_macro_accepts_axum_sse_wrapper() {
 
 #[test]
 fn api_endpoint_macro_emits_binary_download_metadata() {
-    let endpoint = __api_endpoint_download_file();
+    let endpoint = endpoint(__api_endpoint_descriptor_download_file());
 
     assert_eq!(endpoint.method, HttpMethod::Get);
     assert_eq!(endpoint.transport, Transport::BinaryDownload);
@@ -242,7 +246,7 @@ fn api_endpoint_macro_emits_binary_download_metadata() {
 
 #[test]
 fn api_endpoint_macro_emits_binary_upload_metadata() {
-    let endpoint = __api_endpoint_upload_file();
+    let endpoint = endpoint(__api_endpoint_descriptor_upload_file());
 
     assert_eq!(endpoint.method, HttpMethod::Post);
     assert_eq!(endpoint.transport, Transport::BinaryUpload);
@@ -274,17 +278,6 @@ fn api_endpoint_macro_registers_reachable_types_and_errors() {
 }
 
 #[test]
-fn api_module_accepts_endpoint_functions_directly() {
-    let module = api_core::api_module!(name = "users", endpoints = [get_user]);
-
-    assert_eq!(module.endpoints.len(), 1);
-    assert_eq!(module.endpoints[0].rust_name, "get_user");
-    assert_eq!(module.endpoints[0].ts_path, ["users", "getUser"]);
-    assert_eq!(module.registry().type_defs()[0].rust_name, "User");
-    assert_eq!(module.registry().error_defs()[0].rust_name, "GetUserError");
-}
-
-#[test]
 fn api_endpoint_macro_emits_axum_handler_adapters() {
     fn accepts_handler<H, T>(_: H)
     where
@@ -304,14 +297,14 @@ fn api_endpoint_macro_emits_axum_handler_adapters() {
 
 #[test]
 fn api_router_macro_collects_mounted_endpoints() {
-    let module = declarative_routes().into_api_module();
+    let module = declarative_routes().into_route_tree().into_api_module();
     let routes = module
-        .endpoints
+        .endpoints()
         .iter()
         .map(|endpoint| endpoint.route.0.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(module.name, "users");
+    assert_eq!(module.name(), "users");
     assert_eq!(routes, ["/axum-users/plain", "/axum-users/result"]);
 }
 

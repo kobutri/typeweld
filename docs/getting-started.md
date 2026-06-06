@@ -81,10 +81,8 @@ cargo run -p api-collector --bin api -- collect \
   --out target/api-contract/server-api.json
 ```
 
-Legacy roots built with `api_module!` still compile and can remain on
-`api_root = "server::api"` during migration. New Axum code should prefer
-`#[api_router]` plus `.endpoint(get_user)` so the runtime router and exported
-contract stay in one tree.
+`#[api_router]` plus `.endpoint(get_user)` is the API export path. The runtime
+router and generated contract come from the same route tree.
 
 ## 3. Generate the hidden TypeScript package
 

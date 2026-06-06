@@ -138,7 +138,6 @@ separate `npm install` in `examples/monorepo-basic/app`.
 - `Result<Json<User>, UserError>` becomes
   `Effect.Effect<User, UserError | ApiClientError, ServerApi>`.
 - Domain errors are values in the Effect error channel, not thrown promises.
-- This contract-only example intentionally uses the legacy `api_module!` root
-  to show compatibility; new Axum apps should use `#[api_router]` with
+- The explicit `#[api_router]` root controls what gets exported through
   `ApiRouter::new(...).endpoint(handler)`.
 - Generated files are hidden because they are deterministic build output.

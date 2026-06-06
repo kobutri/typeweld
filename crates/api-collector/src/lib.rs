@@ -28,10 +28,10 @@ pub fn collect_empty_contract(package_name: impl Into<String>) -> ApiContract {
 /// Explicit metadata provided to the first collector.
 #[derive(Clone, Debug, Default)]
 pub struct CollectorInput {
-    pub package_name: String,
-    pub root_module: ApiModule,
-    pub types: Vec<TypeDef>,
-    pub errors: Vec<ErrorDef>,
+    package_name: String,
+    root_module: ApiModule,
+    types: Vec<TypeDef>,
+    errors: Vec<ErrorDef>,
 }
 
 impl CollectorInput {
@@ -971,20 +971,34 @@ mod tests {
 
     fn noop_register(_registry: &mut ContractRegistry) {}
 
+    fn register_user_and_unused(registry: &mut ContractRegistry) {
+        registry.register_type::<User>();
+        registry.register_type::<Unused>();
+    }
+
+    fn route_tree_with_descriptor(descriptor: EndpointDescriptor) -> ApiRouteTree {
+        ApiRouteTree {
+            module_name: "users".to_owned(),
+            nodes: vec![ApiRouteNode::Endpoint(MountedEndpoint {
+                descriptor,
+                source: SourceRange::default(),
+                effective_method: HttpMethod::Get,
+                effective_path: "/users/{id}".to_owned(),
+            })],
+        }
+    }
+
     #[test]
-    fn collector_exports_reachable_endpoint_and_transitive_types() {
-        let module = ApiModule::new("users").with_endpoint(
+    fn collector_exports_reachable_endpoint_and_registered_types() {
+        let descriptor = EndpointDescriptor::new(
             Endpoint::new(HttpMethod::Get, "/users/{id}")
                 .named(["crate", "get_user"])
                 .response(ResponseShape::Json(User::type_ref())),
+            register_user_and_unused,
         );
+        let root = route_tree_with_descriptor(descriptor);
 
-        let contract = collect_contract(CollectorInput {
-            package_name: "@workspace/server-api".to_owned(),
-            root_module: module,
-            types: vec![User::type_def(), Unused::type_def()],
-            errors: Vec::new(),
-        });
+        let contract = collect_contract(CollectorInput::from_root("@workspace/server-api", root));
 
         assert_eq!(contract.endpoints.len(), 1);
         assert_eq!(contract.types.len(), 1);
@@ -992,23 +1006,16 @@ mod tests {
     }
 
     #[test]
-    fn collector_uses_types_registered_on_module() {
-        let mut registry = ContractRegistry::new();
-        registry.register_type::<User>();
-        let module = ApiModule::new("users")
-            .with_endpoint(
-                Endpoint::new(HttpMethod::Get, "/users/{id}")
-                    .named(["crate", "get_user"])
-                    .response(ResponseShape::Json(User::type_ref())),
-            )
-            .with_registry(registry);
+    fn collector_filters_registered_types_to_reachable_shapes() {
+        let descriptor = EndpointDescriptor::new(
+            Endpoint::new(HttpMethod::Get, "/users/{id}")
+                .named(["crate", "get_user"])
+                .response(ResponseShape::Json(User::type_ref())),
+            register_user_and_unused,
+        );
+        let root = route_tree_with_descriptor(descriptor);
 
-        let contract = collect_contract(CollectorInput {
-            package_name: "@workspace/server-api".to_owned(),
-            root_module: module,
-            types: Vec::new(),
-            errors: Vec::new(),
-        });
+        let contract = collect_contract(CollectorInput::from_root("@workspace/server-api", root));
 
         assert_eq!(contract.types.len(), 1);
         assert_eq!(contract.types[0].rust_name, "User");
