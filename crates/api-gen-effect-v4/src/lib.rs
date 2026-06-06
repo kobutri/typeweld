@@ -795,10 +795,10 @@ pub fn render_package_json(contract: &ApiContract) -> String {
 #[must_use]
 pub fn render_package_index(contract: &ApiContract) -> String {
     let mut output = render_package_banner(contract);
-    output.push_str("export * from \"./schemas\"\n");
-    output.push_str("export * from \"./errors\"\n");
-    output.push_str("export * from \"./endpoints\"\n");
-    output.push_str("export * from \"./layer\"\n");
+    output.push_str("export * from \"./schemas.js\"\n");
+    output.push_str("export * from \"./errors.js\"\n");
+    output.push_str("export * from \"./endpoints.js\"\n");
+    output.push_str("export * from \"./layer.js\"\n");
     output
 }
 
@@ -821,6 +821,15 @@ fn render_tracked_schemas(contract: &ApiContract, options: &EffectRenderOptions)
     write_effect_compat_import(&mut writer, "Schema");
     writer.push("\n");
 
+    for type_def in sort_type_defs_for_render(contract) {
+        write_tracked_type_def(&mut writer, type_def, options);
+        writer.push("\n");
+    }
+
+    writer.into_tracked_file()
+}
+
+fn sort_type_defs_for_render(contract: &ApiContract) -> Vec<&TypeDef> {
     let mut types = contract.types.iter().collect::<Vec<_>>();
     types.sort_by(|left, right| {
         left.ts_name
@@ -828,12 +837,115 @@ fn render_tracked_schemas(contract: &ApiContract, options: &EffectRenderOptions)
             .then_with(|| left.id.as_str().cmp(right.id.as_str()))
     });
 
-    for type_def in types {
-        write_tracked_type_def(&mut writer, type_def, options);
-        writer.push("\n");
+    let defined_names = types
+        .iter()
+        .map(|type_def| type_def.ts_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut visiting = BTreeSet::new();
+    let mut emitted = BTreeSet::new();
+    let mut output = Vec::new();
+
+    for type_def in &types {
+        visit_type_def_for_render(
+            type_def,
+            &types,
+            &defined_names,
+            &mut visiting,
+            &mut emitted,
+            &mut output,
+        );
     }
 
-    writer.into_tracked_file()
+    output
+}
+
+fn visit_type_def_for_render<'a>(
+    type_def: &'a TypeDef,
+    types: &[&'a TypeDef],
+    defined_names: &BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    emitted: &mut BTreeSet<String>,
+    output: &mut Vec<&'a TypeDef>,
+) {
+    if emitted.contains(&type_def.ts_name) {
+        return;
+    }
+    if !visiting.insert(type_def.ts_name.clone()) {
+        return;
+    }
+
+    let mut dependencies = Vec::new();
+    collect_type_shape_dependencies(&type_def.shape, defined_names, &mut dependencies);
+    dependencies.sort();
+    dependencies.dedup();
+
+    for dependency in dependencies {
+        if dependency == type_def.ts_name {
+            continue;
+        }
+        if let Some(dependency_type) = types
+            .iter()
+            .copied()
+            .find(|candidate| candidate.ts_name == dependency)
+        {
+            visit_type_def_for_render(
+                dependency_type,
+                types,
+                defined_names,
+                visiting,
+                emitted,
+                output,
+            );
+        }
+    }
+
+    visiting.remove(&type_def.ts_name);
+    emitted.insert(type_def.ts_name.clone());
+    output.push(type_def);
+}
+
+fn collect_type_shape_dependencies(
+    shape: &TypeShape,
+    defined_names: &BTreeSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+    match shape {
+        TypeShape::Primitive(_) | TypeShape::External(_) => {}
+        TypeShape::Struct(shape) => {
+            for field in &shape.fields {
+                collect_type_ref_dependency(&field.type_ref, defined_names, dependencies);
+            }
+        }
+        TypeShape::Enum(shape) => {
+            for variant in &shape.variants {
+                for field in &variant.fields {
+                    collect_type_ref_dependency(&field.type_ref, defined_names, dependencies);
+                }
+            }
+        }
+        TypeShape::Newtype(inner) | TypeShape::List(inner) | TypeShape::Option(inner) => {
+            collect_type_ref_dependency(inner, defined_names, dependencies);
+        }
+        TypeShape::Tuple(items) => {
+            for item in items {
+                collect_type_ref_dependency(item, defined_names, dependencies);
+            }
+        }
+        TypeShape::Map { key, value } => {
+            collect_type_ref_dependency(key, defined_names, dependencies);
+            collect_type_ref_dependency(value, defined_names, dependencies);
+        }
+    }
+}
+
+fn collect_type_ref_dependency(
+    type_ref: &TypeRef,
+    defined_names: &BTreeSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+    if defined_names.contains(&type_ref.name) {
+        dependencies.push(type_ref.name.clone());
+    }
 }
 
 fn write_tracked_type_def(
@@ -963,7 +1075,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
     } else {
         write_effect_compat_import(&mut writer, "Effect, Schema");
     }
-    writer.push("import { ServerApi } from \"./layer\"\n");
+    writer.push("import { ServerApi } from \"./layer.js\"\n");
 
     let schema_imports = collect_endpoint_schema_imports(contract);
     if !schema_imports.is_empty() {
@@ -975,7 +1087,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas\"\n");
+        writer.push(" } from \"./schemas.js\"\n");
     }
 
     let error_imports = collect_endpoint_error_imports(contract);
@@ -987,7 +1099,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
             .collect::<Vec<_>>()
             .join(", "),
     );
-    writer.push(" } from \"./errors\"\n\n");
+    writer.push(" } from \"./errors.js\"\n\n");
 
     let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
     endpoints.sort_by(|left, right| {
@@ -1046,11 +1158,20 @@ fn write_tracked_endpoint(
     writer.push(&args_name);
     writer.push("\n  ): ");
     writer.push(&render_endpoint_return_type(endpoint, "ServerApi", options));
-    writer.push(" =>\n    ServerApi.use((api) => api.");
+    if matches!(endpoint.response, ResponseShape::Stream(_)) {
+        writer.push(" =>\n    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.");
+    } else {
+        writer.push(" =>\n    ServerApi.use((api) => api.");
+    }
     writer.push(&namespace);
     writer.push(".");
     writer.mark(&endpoint.id, "endpoint", &function_name);
-    writer.push("(args))\n\n");
+    writer.push("(args)");
+    if matches!(endpoint.response, ResponseShape::Stream(_)) {
+        writer.push(")))\n\n");
+    } else {
+        writer.push(")\n\n");
+    }
 }
 
 fn write_tracked_endpoint_args(
@@ -1174,7 +1295,7 @@ fn render_tracked_errors(contract: &ApiContract, options: &EffectRenderOptions) 
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas\"\n");
+        writer.push(" } from \"./schemas.js\"\n");
     }
     writer.push("\n");
     writer.push(&render_client_errors());
@@ -1393,7 +1514,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./endpoints\"\n");
+        writer.push(" } from \"./endpoints.js\"\n");
     }
 
     let schema_imports = collect_service_schema_imports(contract);
@@ -1406,7 +1527,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas\"\n");
+        writer.push(" } from \"./schemas.js\"\n");
     }
 
     let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
@@ -1419,7 +1540,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./errors\"\n");
+        writer.push(" } from \"./errors.js\"\n");
     }
 
     let error_type_imports = collect_endpoint_error_imports(contract);
@@ -1431,7 +1552,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
             .collect::<Vec<_>>()
             .join(", "),
     );
-    writer.push(" } from \"./errors\"\n\n");
+    writer.push(" } from \"./errors.js\"\n\n");
 
     writer.push("export interface ServerApiConfig {\n");
     writer.push("  readonly baseUrl: string\n");
@@ -2357,15 +2478,23 @@ fn trim_trailing_blank_lines(mut output: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use api_ir::{
-        ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant, Field,
-        HttpMethod, HttpStatus, Optionality, Primitive, RequestShape, ResponseShape, RoutePattern,
-        SourceRange, StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
+        ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant,
+        ExternalType, Field, HttpMethod, HttpStatus, Optionality, Primitive, RequestShape,
+        ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId, Transport, TypeDef,
+        TypeRef, TypeShape,
     };
 
     use super::*;
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn renders_struct_schemas_with_aliases() {
@@ -2723,7 +2852,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_errors(&contract);
 
-        assert!(rendered.contains("import { UserId } from \"./schemas\""));
+        assert!(rendered.contains("import { UserId } from \"./schemas.js\""));
         assert!(rendered.contains(
             "export class GetUserNotFound extends Schema.TaggedErrorClass<GetUserNotFound>()(\n  \"notFound\","
         ));
@@ -2797,9 +2926,11 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "import { Effect, Schema } from \"@rust-ts-integration/effect-runtime/compat\""
         ));
-        assert!(rendered.contains("import { ServerApi } from \"./layer\""));
-        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
-        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains("import { ServerApi } from \"./layer.js\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas.js\""));
+        assert!(
+            rendered.contains("import type { ApiClientError, GetUserError } from \"./errors.js\"")
+        );
         assert!(rendered.contains("export namespace users {"));
         assert!(rendered.contains(
             "  export interface GetUserArgs {\n    readonly id: UserId;\n    readonly includePosts?: boolean;\n  }"
@@ -2894,7 +3025,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             "  export const eventsRoute = {\n    method: \"GET\",\n    path: \"/events\",\n    transport: \"ServerSentEvents\",\n  } as const"
         ));
         assert!(rendered.contains(
-            "  export const events = (\n    args: EventsArgs\n  ): Stream.Stream<UserEvent, ApiClientError | EventError, ServerApi> =>\n    ServerApi.use((api) => api.events.events(args))"
+            "  export const events = (\n    args: EventsArgs\n  ): Stream.Stream<UserEvent, ApiClientError | EventError, ServerApi> =>\n    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.events.events(args))))"
         ));
     }
 
@@ -2938,9 +3069,11 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\""
         ));
-        assert!(rendered.contains("import { users } from \"./endpoints\""));
-        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
-        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains("import { users } from \"./endpoints.js\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas.js\""));
+        assert!(
+            rendered.contains("import type { ApiClientError, GetUserError } from \"./errors.js\"")
+        );
         assert!(rendered.contains(
             "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()(\"@workspace/server-api::ServerApi\") {}"
         ));
@@ -3044,10 +3177,10 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert_eq!(
             render_package_index(&contract),
             r#"// Generated API package for @workspace/server-api
-export * from "./schemas"
-export * from "./errors"
-export * from "./endpoints"
-export * from "./layer"
+export * from "./schemas.js"
+export * from "./errors.js"
+export * from "./endpoints.js"
+export * from "./layer.js"
 "#
         );
     }
@@ -3065,6 +3198,18 @@ export * from "./layer"
             value["dependencies"]["effect"].as_str(),
             Some(EFFECT_VERSION)
         );
+    }
+
+    #[test]
+    fn generated_package_typecheck_fixture_compiles_against_pinned_effect_beta() {
+        let root = test_root("generated-typecheck");
+        let target_dir = root.join("target");
+        let contract = generated_typecheck_contract();
+        let package = render_generated_package(&contract, &target_dir);
+        write_generated_package_fixture(&package);
+        write_typecheck_consumer(&root, &package);
+
+        run_tsc_no_emit(&root);
     }
 
     #[test]
@@ -3230,9 +3375,9 @@ export * from "./layer"
             endpoints.contents,
             r#"// Generated API package for @workspace/server-api
 import { Effect, Stream, Schema } from "@rust-ts-integration/effect-runtime/compat"
-import { ServerApi } from "./layer"
-import { CreateUserRequest, User, UserEvent } from "./schemas"
-import type { ApiClientError, GetUserError } from "./errors"
+import { ServerApi } from "./layer.js"
+import { CreateUserRequest, User, UserEvent } from "./schemas.js"
+import type { ApiClientError, GetUserError } from "./errors.js"
 
 export namespace events {
   export interface WatchUsersArgs {}
@@ -3249,7 +3394,7 @@ export namespace events {
   export const watchUsers = (
     args: WatchUsersArgs
   ): Stream.Stream<UserEvent, ApiClientError | GetUserError, ServerApi> =>
-    ServerApi.use((api) => api.events.watchUsers(args))
+    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.events.watchUsers(args))))
 
 }
 
@@ -3297,6 +3442,482 @@ export namespace users {
 }
 "#
         );
+    }
+
+    fn generated_typecheck_contract() -> ApiContract {
+        let user_id = type_ref("UserId");
+        let string = type_ref("String");
+        let bool_ref = type_ref("bool");
+        let uuid = type_ref("Uuid");
+        let date_time = type_ref("DateTimeUtc");
+        let decimal = type_ref("Decimal");
+        let json_value = type_ref("JsonValue");
+        let bytes = type_ref("Bytes");
+        let item = type_ref("CatalogItem");
+        let create_item = type_ref("CreateCatalogItem");
+        let event = type_ref("CatalogEvent");
+        let error_ref = ErrorRef {
+            id: symbol("error", &["CatalogError"]),
+            name: "CatalogError".to_owned(),
+        };
+
+        ApiContract {
+            package_name: "@workspace/generated-fixture-api".to_owned(),
+            types: vec![
+                external_type("Uuid", &["uuid", "Uuid"], "string", "Uuid"),
+                external_type(
+                    "DateTimeUtc",
+                    &["chrono", "DateTime", "Utc"],
+                    "string",
+                    "DateTimeUtc",
+                ),
+                external_type("Decimal", &["rust_decimal", "Decimal"], "string", "Decimal"),
+                external_type(
+                    "JsonValue",
+                    &["serde_json", "Value"],
+                    "unknown",
+                    "JsonValue",
+                ),
+                external_type("Bytes", &["bytes", "Bytes"], "string", "Bytes"),
+                TypeDef {
+                    id: user_id.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "UserId".to_owned()],
+                    rust_name: "UserId".to_owned(),
+                    ts_name: "UserId".to_owned(),
+                    shape: TypeShape::Newtype(Box::new(type_ref("i64"))),
+                    source: source(),
+                },
+                TypeDef {
+                    id: item.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CatalogItem".to_owned()],
+                    rust_name: "CatalogItem".to_owned(),
+                    ts_name: "CatalogItem".to_owned(),
+                    shape: TypeShape::Struct(StructShape {
+                        fields: vec![
+                            field("id", "id", user_id.clone(), Optionality::Required),
+                            field(
+                                "display_name",
+                                "displayName",
+                                string.clone(),
+                                Optionality::Required,
+                            ),
+                            field(
+                                "nickname",
+                                "nickname",
+                                string.clone(),
+                                Optionality::Optional,
+                            ),
+                            field(
+                                "created_at",
+                                "createdAt",
+                                date_time.clone(),
+                                Optionality::Required,
+                            ),
+                            field("price", "price", decimal.clone(), Optionality::Required),
+                            field(
+                                "metadata",
+                                "metadata",
+                                json_value.clone(),
+                                Optionality::OptionalNullable,
+                            ),
+                            field(
+                                "attachment",
+                                "attachment",
+                                bytes.clone(),
+                                Optionality::Optional,
+                            ),
+                        ],
+                    }),
+                    source: source(),
+                },
+                TypeDef {
+                    id: create_item.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CreateCatalogItem".to_owned()],
+                    rust_name: "CreateCatalogItem".to_owned(),
+                    ts_name: "CreateCatalogItem".to_owned(),
+                    shape: TypeShape::Struct(StructShape {
+                        fields: vec![
+                            field(
+                                "display_name",
+                                "displayName",
+                                string.clone(),
+                                Optionality::Required,
+                            ),
+                            field(
+                                "owner_id",
+                                "ownerId",
+                                user_id.clone(),
+                                Optionality::Required,
+                            ),
+                            field("price", "price", decimal.clone(), Optionality::Required),
+                            field(
+                                "metadata",
+                                "metadata",
+                                json_value.clone(),
+                                Optionality::OptionalNullable,
+                            ),
+                            field(
+                                "attachment",
+                                "attachment",
+                                bytes.clone(),
+                                Optionality::Optional,
+                            ),
+                        ],
+                    }),
+                    source: source(),
+                },
+                TypeDef {
+                    id: event.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CatalogEvent".to_owned()],
+                    rust_name: "CatalogEvent".to_owned(),
+                    ts_name: "CatalogEvent".to_owned(),
+                    shape: TypeShape::Enum(EnumShape {
+                        variants: vec![
+                            EnumVariant {
+                                id: symbol("variant", &["CatalogEvent", "Created"]),
+                                rust_name: "Created".to_owned(),
+                                wire_name: "created".to_owned(),
+                                fields: vec![field(
+                                    "item",
+                                    "item",
+                                    item.clone(),
+                                    Optionality::Required,
+                                )],
+                                source: source(),
+                            },
+                            EnumVariant {
+                                id: symbol("variant", &["CatalogEvent", "Deleted"]),
+                                rust_name: "Deleted".to_owned(),
+                                wire_name: "deleted".to_owned(),
+                                fields: vec![field(
+                                    "id",
+                                    "id",
+                                    user_id.clone(),
+                                    Optionality::Required,
+                                )],
+                                source: source(),
+                            },
+                        ],
+                    }),
+                    source: source(),
+                },
+            ],
+            errors: vec![ErrorDef {
+                id: error_ref.id.clone(),
+                rust_path: vec!["fixture".to_owned(), "CatalogError".to_owned()],
+                rust_name: "CatalogError".to_owned(),
+                ts_name: "CatalogError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "NotFound"]),
+                        rust_name: "NotFound".to_owned(),
+                        tag: "NotFound".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "reason",
+                            "reason",
+                            string.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "Conflict"]),
+                        rust_name: "Conflict".to_owned(),
+                        tag: "Conflict".to_owned(),
+                        status: HttpStatus(409),
+                        fields: vec![field(
+                            "item_id",
+                            "itemId",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "RateLimited"]),
+                        rust_name: "RateLimited".to_owned(),
+                        tag: "RateLimited".to_owned(),
+                        status: HttpStatus(429),
+                        fields: vec![field(
+                            "retry_after",
+                            "retryAfter",
+                            date_time.clone(),
+                            Optionality::Optional,
+                        )],
+                        source: source(),
+                    },
+                ],
+                source: source(),
+            }],
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "get_item"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "get_item".to_owned(),
+                    ],
+                    rust_name: "get_item".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "getItem".to_owned()],
+                    route: RoutePattern("/catalog/{id}".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: vec![
+                            field(
+                                "include_audit",
+                                "includeAudit",
+                                bool_ref,
+                                Optionality::Optional,
+                            ),
+                            field(
+                                "request_id",
+                                "requestId",
+                                uuid.clone(),
+                                Optionality::Optional,
+                            ),
+                            field("at", "at", date_time.clone(), Optionality::Optional),
+                        ],
+                        body: None,
+                    },
+                    response: ResponseShape::Json(item.clone()),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "create_item"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "create_item".to_owned(),
+                    ],
+                    rust_name: "create_item".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "createItem".to_owned()],
+                    route: RoutePattern("/catalog".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape {
+                        path_params: Vec::new(),
+                        query_params: Vec::new(),
+                        body: Some(create_item),
+                    },
+                    response: ResponseShape::Created(item),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["events", "watch_catalog"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "events".to_owned(),
+                        "watch_catalog".to_owned(),
+                    ],
+                    rust_name: "watch_catalog".to_owned(),
+                    ts_path: vec!["events".to_owned(), "watchCatalog".to_owned()],
+                    route: RoutePattern("/catalog/events".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::ServerSentEvents,
+                    request: RequestShape {
+                        path_params: Vec::new(),
+                        query_params: vec![field(
+                            "after",
+                            "after",
+                            date_time,
+                            Optionality::Optional,
+                        )],
+                        body: None,
+                    },
+                    response: ResponseShape::Stream(event),
+                    errors: vec![error_ref],
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["admin", "reindex"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "admin".to_owned(),
+                        "reindex".to_owned(),
+                    ],
+                    rust_name: "reindex".to_owned(),
+                    ts_path: vec!["admin".to_owned(), "reindex".to_owned()],
+                    route: RoutePattern("/admin/reindex".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape::default(),
+                    response: ResponseShape::Empty,
+                    errors: Vec::new(),
+                    source: source(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        }
+    }
+
+    fn write_generated_package_fixture(package: &GeneratedPackage) {
+        for file in &package.files {
+            let path = package.package_dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create generated package directory");
+            }
+            fs::write(path, &file.contents).expect("write generated package file");
+        }
+    }
+
+    fn write_typecheck_consumer(root: &Path, package: &GeneratedPackage) {
+        fs::create_dir_all(root).expect("create generated typecheck fixture root");
+        fs::write(
+            root.join("package.json"),
+            format!(
+                "{{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {{\n    \"@rust-ts-integration/effect-runtime\": \"file:{}\",\n    \"effect\": {}\n  }}\n}}\n",
+                normalize_path(&repo_root().join("npm/effect-runtime")),
+                ts_string(EFFECT_VERSION),
+            ),
+        )
+        .expect("write fixture package manifest");
+
+        fs::write(
+            root.join("tsconfig.json"),
+            format!(
+                "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n      {package_name}: [{package_index}],\n      {package_glob}: [{package_dir_glob}],\n      \"@rust-ts-integration/effect-runtime\": [{runtime_index}],\n      \"@rust-ts-integration/effect-runtime/compat\": [{runtime_compat}],\n      \"@rust-ts-integration/effect-runtime/*\": [{runtime_glob}]\n    }}\n  }},\n  \"include\": [\"consumer.ts\"]\n}}\n",
+                package_name = ts_string(&package.tsconfig_paths.package_name),
+                package_index = ts_string(&normalize_path(&package.package_dir.join("index.ts"))),
+                package_glob = ts_string(&format!("{}/*", package.tsconfig_paths.package_name)),
+                package_dir_glob = ts_string(&format!("{}/*", normalize_path(&package.package_dir))),
+                runtime_index = ts_string(&normalize_path(
+                    &repo_root().join("npm/effect-runtime/src/index.ts")
+                )),
+                runtime_compat = ts_string(&normalize_path(
+                    &repo_root().join("npm/effect-runtime/src/compat.ts")
+                )),
+                runtime_glob = ts_string(&format!(
+                    "{}/*",
+                    normalize_path(&repo_root().join("npm/effect-runtime/src"))
+                )),
+            ),
+        )
+        .expect("write fixture tsconfig");
+
+        fs::write(root.join("consumer.ts"), generated_typecheck_consumer())
+            .expect("write fixture consumer");
+    }
+
+    fn generated_typecheck_consumer() -> &'static str {
+        r#"import { Effect, Schema, Stream } from "@rust-ts-integration/effect-runtime/compat"
+import {
+  CatalogConflict,
+  DateTimeUtc,
+  Decimal,
+  Bytes,
+  JsonValue,
+  ServerApi,
+  Uuid,
+  UserId,
+  admin,
+  catalog,
+  events,
+} from "@workspace/generated-fixture-api"
+
+const id = Schema.decodeUnknownSync(UserId)("42")
+const requestId = Schema.decodeUnknownSync(Uuid)("550e8400-e29b-41d4-a716-446655440000")
+const at = Schema.decodeUnknownSync(DateTimeUtc)("2026-06-06T00:00:00Z")
+const price = Schema.decodeUnknownSync(Decimal)("12.50")
+const attachment = Schema.decodeUnknownSync(Bytes)("aGVsbG8=")
+const metadata = Schema.decodeUnknownSync(JsonValue)({ source: "fixture", stable: true })
+const layer = ServerApi.layer({ baseUrl: "https://api.example.test" })
+
+const handledGet = catalog.getItem({
+  id,
+  includeAudit: true,
+  requestId,
+  at,
+}).pipe(
+  Effect.catchTag("NotFound", (error) => Effect.succeed(error.reason)),
+  Effect.catchTag("Conflict", (error) => Effect.succeed(String(error.itemId))),
+)
+
+const writeProgram = Effect.gen(function* () {
+  const created = yield* catalog.createItem({
+    body: {
+      displayName: "Ada",
+      ownerId: id,
+      price,
+      metadata,
+      attachment,
+    },
+  })
+
+  yield* admin.reindex({})
+  return created.displayName
+})
+
+const streamProgram = events.watchCatalog({ after: at }).pipe(
+  Stream.take(1),
+  Stream.runCollect,
+)
+
+const providedRead = handledGet.pipe(Effect.provide(layer))
+const providedWrite = writeProgram.pipe(Effect.provide(layer))
+const providedStream = streamProgram.pipe(Effect.provide(layer))
+
+const conflict = new CatalogConflict({ itemId: id })
+const conflictTag: "Conflict" = conflict._tag
+
+export const fixture = {
+  providedRead,
+  providedWrite,
+  providedStream,
+  conflictTag,
+}
+"#
+    }
+
+    fn run_tsc_no_emit(root: &Path) {
+        let tsc = repo_root().join("npm/node_modules/typescript/bin/tsc");
+        assert!(
+            tsc.is_file(),
+            "missing local TypeScript compiler at {}; run `npm install` in npm/",
+            tsc.display()
+        );
+
+        let output = Command::new("node")
+            .arg(&tsc)
+            .arg("--noEmit")
+            .arg("-p")
+            .arg(root.join("tsconfig.json"))
+            .current_dir(root)
+            .output()
+            .expect("run generated package typecheck fixture");
+        assert!(
+            output.status.success(),
+            "generated package typecheck failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = repo_root()
+            .join("target/tests/api-gen-effect-v4")
+            .join(format!("{name}-{id}"));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
     fn simple_type(name: &str) -> TypeDef {

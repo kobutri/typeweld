@@ -479,7 +479,7 @@ Acceptance criteria:
 - Branded/newtype/date/decimal values encode correctly.
 - Path/query/body values are encoded consistently.
 
-### D4. Add generated-package typecheck fixtures
+### D4. Add generated-package typecheck fixtures [done]
 
 Goal: prove generated code compiles against the pinned beta.
 
