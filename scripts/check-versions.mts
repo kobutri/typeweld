@@ -38,7 +38,9 @@ type NpmManifest = {
   publishConfig?: {
     access?: string
   }
-  repository?: unknown
+  repository?: {
+    url?: string
+  }
   types?: string
 }
 
@@ -87,6 +89,7 @@ const npmPublicPackages = new Set<string>([
   "@typeweld/effect-runtime",
   "@typeweld/language-server",
 ])
+const expectedNpmRepositoryUrl = "https://github.com/typeweld/typeweld.git"
 
 const checkedInternalRustDependencies = new Set(releaseCrates)
 checkedInternalRustDependencies.add("typeweld-test-fixtures")
@@ -202,6 +205,14 @@ for (const [packageName, manifestPath] of npmReleasePackages) {
   }
   if (!manifest.repository) {
     errors.push(`${packageName} is missing npm repository metadata`)
+  }
+  if (
+    npmPublicPackages.has(packageName) &&
+    manifest.repository?.url !== expectedNpmRepositoryUrl
+  ) {
+    errors.push(
+      `${packageName} repository.url must be ${expectedNpmRepositoryUrl} for npm trusted publishing`,
+    )
   }
   if (!manifest.files?.length) {
     errors.push(`${packageName} is missing npm files metadata`)

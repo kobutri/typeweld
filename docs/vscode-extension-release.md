@@ -12,8 +12,9 @@ npm launcher into `server/index.js`, and runs `vsce package`.
 
 ## Release Outputs
 
-Publishing a GitHub Release starts `.github/workflows/release-vscode-extension.yml`.
-The workflow builds these VSIX assets:
+Publishing a GitHub Release starts both the package registry workflow documented
+in `docs/publishing.md` and `.github/workflows/release-vscode-extension.yml`.
+The VS Code workflow builds these VSIX assets:
 
 - `typeweld-<version>-linux-x64.vsix`
 - `typeweld-<version>-darwin-x64.vsix`
@@ -69,8 +70,8 @@ release job can continue after a partially successful publish.
 2. Run the release preflight from `docs/publishing.md`.
 3. Create a protected semver tag such as `v0.1.0`.
 4. Create a GitHub Release for that tag.
-5. Publish the release. Draft creation alone does not upload assets or publish
-   marketplaces.
+5. Publish the release. Draft creation alone does not upload assets, publish
+   package registries, or publish marketplaces.
 6. Approve the `release` environment deployment when the marketplace publish job
    requests it.
 7. Wait for the `Release Artifacts` workflow to finish.
