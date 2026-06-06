@@ -1,7 +1,0 @@
-error: Path<T> argument `id` does not match any route parameter
- --> tests/ui/api_endpoint_extra_path.rs:6:1
-  |
-6 | #[api_macros::api(method = "GET", path = "/users")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the attribute macro `api_macros::api` (in Nightly builds, run with -Z macro-backtrace for more info)

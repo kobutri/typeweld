@@ -1,4 +1,4 @@
-# Rust TypeScript Integration Docs
+# Typeweld Docs
 
 Start here:
 

@@ -3,8 +3,8 @@ use std::{
     net::SocketAddr,
 };
 
-use api_collector::contract_to_json;
 use clap::{Parser, Subcommand};
+use typeweld_cli::contract_to_json;
 
 #[derive(Debug, Parser)]
 #[command(name = "e2e-axum-effect-server", about = "Run the e2e Axum server")]

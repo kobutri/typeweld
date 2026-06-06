@@ -7,7 +7,7 @@ version.workspace = true
 publish = false
 
 [dependencies]
-api-core = { path = "../../crates/api-core" }
+typeweld-core = { path = "../../crates/typeweld-core" }
 
 [lints]
 workspace = true

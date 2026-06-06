@@ -1,5 +1,0 @@
-error: #[api] endpoint errors must be typed ApiError enums; `String` errors are not finite or catchable in generated Effect clients. Derive ApiError for a domain enum or map the error into one before returning it.
- --> tests/ui/api_endpoint_string_error.rs:7:53
-  |
-7 | async fn get_user() -> Result<api_core::Json<User>, String> {
-  |                                                     ^^^^^^

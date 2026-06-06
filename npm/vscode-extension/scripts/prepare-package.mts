@@ -8,11 +8,11 @@ const scriptDir = dirname(fileURLToPath(import.meta.url))
 const extensionRoot = resolve(scriptDir, "..")
 const npmRoot = resolve(extensionRoot, "..")
 const repositoryRoot = resolve(npmRoot, "..")
-const languageServerBinaryName = process.platform === "win32" ? "api-ls.exe" : "api-ls"
-const apiBinaryName = process.platform === "win32" ? "api.exe" : "api"
+const languageServerBinaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
+const typeweldBinaryName = process.platform === "win32" ? "typeweld.exe" : "typeweld"
 
 type PreparePackageOptions = {
-  readonly apiBinary?: string
+  readonly typeweldBinary?: string
   readonly binary?: string
   readonly platformDir?: string
 }
@@ -21,15 +21,16 @@ const options = parseArgs(process.argv.slice(2))
 const platformDir = options.platformDir ?? `${process.platform}-${process.arch}`
 const binaryPath = resolve(
   extensionRoot,
-  options.binary ?? process.env.API_LS_BINARY ?? defaultLanguageServerBinaryPath(),
+  options.binary ?? process.env.TYPEWELD_LS_BINARY ?? defaultLanguageServerBinaryPath(),
 )
-const configuredApiBinary = options.apiBinary ?? process.env.API_CLI_BINARY
-const apiBinaryPath =
-  configuredApiBinary !== undefined
-    ? resolve(extensionRoot, configuredApiBinary)
-    : defaultApiBinaryPath()
+const configuredTypeweldBinary =
+  options.typeweldBinary ?? process.env.TYPEWELD_BINARY ?? process.env.API_CLI_BINARY
+const typeweldBinaryPath =
+  configuredTypeweldBinary !== undefined
+    ? resolve(extensionRoot, configuredTypeweldBinary)
+    : defaultTypeweldBinaryPath()
 
-assertFile(binaryPath, "api-ls binary", "Build api-ls first or pass --binary.")
+assertFile(binaryPath, "typeweld-ls binary", "Build typeweld-ls first or pass --binary.")
 
 const launcherSource = resolve(
   npmRoot,
@@ -40,12 +41,12 @@ const launcherSource = resolve(
 const launcherTarget = join(extensionRoot, "server", "index.js")
 const launcherPackageTarget = join(extensionRoot, "server", "package.json")
 const binaryTarget = join(extensionRoot, "bin", platformDir, languageServerBinaryName)
-const apiBinaryTarget = join(extensionRoot, "bin", platformDir, apiBinaryName)
+const typeweldBinaryTarget = join(extensionRoot, "bin", platformDir, typeweldBinaryName)
 const typescriptPluginSource = join(extensionRoot, "typescript-plugin")
 const typescriptPluginTarget = join(
   extensionRoot,
   "node_modules",
-  "@rust-ts-integration",
+  "@typeweld",
   "typescript-plugin",
 )
 
@@ -63,40 +64,44 @@ await esbuild.build({
 })
 writeFileSync(launcherPackageTarget, `${JSON.stringify({ type: "module" }, null, 2)}\n`)
 copyFileSync(binaryPath, binaryTarget)
-const copiedApiBinary = maybeCopyApiBinary(apiBinaryPath, apiBinaryTarget)
+const copiedTypeweldBinary = maybeCopyTypeweldBinary(typeweldBinaryPath, typeweldBinaryTarget)
 await buildTypescriptPlugin(typescriptPluginSource, typescriptPluginTarget)
 
 if (process.platform !== "win32") {
   chmodSync(launcherTarget, 0o755)
   chmodSync(binaryTarget, 0o755)
-  if (copiedApiBinary) {
-    chmodSync(apiBinaryTarget, 0o755)
+  if (copiedTypeweldBinary) {
+    chmodSync(typeweldBinaryTarget, 0o755)
   }
 }
 
-console.log(`Prepared api-ls launcher at ${launcherTarget}`)
-console.log(`Prepared ${platformDir} api-ls binary at ${binaryTarget}`)
+console.log(`Prepared typeweld-ls launcher at ${launcherTarget}`)
+console.log(`Prepared ${platformDir} typeweld-ls binary at ${binaryTarget}`)
 console.log(`Prepared TypeScript server plugin at ${typescriptPluginTarget}`)
-if (copiedApiBinary) {
-  console.log(`Prepared ${platformDir} api binary at ${apiBinaryTarget}`)
+if (copiedTypeweldBinary) {
+  console.log(`Prepared ${platformDir} typeweld binary at ${typeweldBinaryTarget}`)
 }
 
 function defaultLanguageServerBinaryPath(): string {
   return join(repositoryRoot, "target", "release", languageServerBinaryName)
 }
 
-function defaultApiBinaryPath(): string {
-  return join(repositoryRoot, "target", "release", apiBinaryName)
+function defaultTypeweldBinaryPath(): string {
+  return join(repositoryRoot, "target", "release", typeweldBinaryName)
 }
 
-function maybeCopyApiBinary(source: string, target: string): boolean {
+function maybeCopyTypeweldBinary(source: string, target: string): boolean {
   try {
     if (!statSync(source).isFile()) {
       return false
     }
   } catch {
-    if (options.apiBinary !== undefined || process.env.API_CLI_BINARY !== undefined) {
-      throw new Error(`Missing api binary: ${source}. Build api first or omit --api-binary.`)
+    if (
+      options.typeweldBinary !== undefined ||
+      process.env.TYPEWELD_BINARY !== undefined ||
+      process.env.API_CLI_BINARY !== undefined
+    ) {
+      throw new Error(`Missing typeweld binary: ${source}. Build typeweld first or omit --typeweld-binary.`)
     }
     return false
   }
@@ -139,7 +144,7 @@ function assertFile(path: string, label: string, hint = ""): void {
 
 function parseArgs(args: readonly string[]): PreparePackageOptions {
   const parsed: {
-    apiBinary?: string
+    typeweldBinary?: string
     binary?: string
     platformDir?: string
   } = {}
@@ -147,8 +152,8 @@ function parseArgs(args: readonly string[]): PreparePackageOptions {
     const arg = args[index]
     if (arg === "--binary") {
       parsed.binary = requireValue(args, ++index, arg)
-    } else if (arg === "--api-binary") {
-      parsed.apiBinary = requireValue(args, ++index, arg)
+    } else if (arg === "--typeweld-binary" || arg === "--api-binary") {
+      parsed.typeweldBinary = requireValue(args, ++index, arg)
     } else if (arg === "--platform-dir") {
       parsed.platformDir = requireValue(args, ++index, arg)
     } else {

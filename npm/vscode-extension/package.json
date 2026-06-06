@@ -1,14 +1,14 @@
 {
-  "name": "rust-ts-integration",
-  "displayName": "Rust TS Integration",
-  "description": "VS Code client for the rust-ts-integration api-ls language server.",
+  "name": "typeweld-vscode",
+  "displayName": "Typeweld",
+  "description": "VS Code client for the Typeweld language server.",
   "version": "0.0.0",
   "private": true,
-  "publisher": "rust-ts-integration",
+  "publisher": "typeweld",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rust-ts-integration/rust-ts-integration.git",
+    "url": "https://github.com/typeweld/typeweld.git",
     "directory": "npm/vscode-extension"
   },
   "engines": {
@@ -31,8 +31,10 @@
     "onLanguage:typescriptreact",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
-    "workspaceContains:.api-ls.json",
-    "workspaceContains:api-ls.json",
+    "workspaceContains:.typeweld.json",
+    "workspaceContains:typeweld.json",
+    "workspaceContains:.typeweld-ls.json",
+    "workspaceContains:typeweld-ls.json",
     "workspaceContains:target/api-contract/effect-v4/packages"
   ],
   "main": "./dist/extension.js",
@@ -53,7 +55,7 @@
     "watch": "vite build --config vite.config.mts --mode development --watch"
   },
   "dependencies": {
-    "@rust-ts-integration/language-server": "0.0.0",
+    "@typeweld/language-server": "0.0.0",
     "vscode-languageclient": "^10.0.0"
   },
   "devDependencies": {
@@ -65,43 +67,47 @@
   "contributes": {
     "commands": [
       {
-        "command": "rustTsIntegration.apiLs.restart",
-        "title": "Restart api-ls",
-        "category": "Rust TS Integration"
+        "command": "typeweld.languageServer.restart",
+        "title": "Restart typeweld-ls",
+        "category": "Typeweld"
       }
     ],
     "configuration": {
-      "title": "Rust TS Integration",
+      "title": "Typeweld",
       "properties": {
-        "rustTsIntegration.apiLs.enabled": {
+        "typeweld.languageServer.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the api-ls language server client."
+          "description": "Enable the typeweld-ls language server client."
         },
-        "rustTsIntegration.apiLs.command": {
+        "typeweld.languageServer.command": {
           "type": "string",
           "default": "",
-          "description": "Executable path or command name for api-ls. Leave empty to use the bundled npm launcher."
+          "description": "Executable path or command name for typeweld-ls. Leave empty to use the bundled npm launcher."
         },
-        "rustTsIntegration.apiLs.args": {
+        "typeweld.languageServer.args": {
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
           },
-          "description": "Arguments passed to api-ls or to the bundled npm launcher."
+          "description": "Arguments passed to typeweld-ls or to the bundled npm launcher."
         },
-        "rustTsIntegration.apiLs.env": {
+        "typeweld.languageServer.env": {
           "type": "object",
           "default": {},
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Environment variables added when starting api-ls. Use API_LS_BINARY here to point the bundled launcher at a local Rust binary."
+          "description": "Environment variables added when starting typeweld-ls. Use TYPEWELD_LS_BINARY here to point the bundled launcher at a local Rust binary."
         },
-        "rustTsIntegration.apiLs.requiredWorkspaceMarkers": {
+        "typeweld.languageServer.requiredWorkspaceMarkers": {
           "type": "array",
           "default": [
+            ".typeweld.json",
+            "typeweld.json",
+            ".typeweld-ls.json",
+            "typeweld-ls.json",
             ".api-ls.json",
             "api-ls.json",
             "target/api-contract/effect-v4/packages"
@@ -109,13 +115,13 @@
           "items": {
             "type": "string"
           },
-          "description": "Workspace marker paths that allow the api-ls client to start. An empty list starts the client for every workspace folder."
+          "description": "Workspace marker paths that allow the typeweld-ls client to start. An empty list starts the client for every workspace folder."
         }
       }
     },
     "typescriptServerPlugins": [
       {
-        "name": "@rust-ts-integration/typescript-plugin",
+        "name": "@typeweld/typescript-plugin",
         "enableForWorkspaceTypeScriptVersions": true
       }
     ]

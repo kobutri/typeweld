@@ -1,0 +1,26 @@
+[package]
+name = "typeweld-ls"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "typeweld-ls"
+path = "src/main.rs"
+
+[dependencies]
+lsp-types = "0.97.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+typeweld-gen-effect-v4 = { path = "../typeweld-gen-effect-v4" }
+typeweld-test-fixtures = { path = "../typeweld-test-fixtures" }
+
+[lints]
+workspace = true

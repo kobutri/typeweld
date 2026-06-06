@@ -11,10 +11,10 @@ name = "e2e_axum_effect_server"
 path = "src/lib.rs"
 
 [dependencies]
-api-axum = { path = "../../../crates/api-axum" }
-api-collector = { path = "../../../crates/api-collector" }
-api-core = { path = "../../../crates/api-core" }
-api-macros = { path = "../../../crates/api-macros" }
+typeweld-axum = { path = "../../../crates/typeweld-axum" }
+typeweld-cli = { path = "../../../crates/typeweld-cli" }
+typeweld-core = { path = "../../../crates/typeweld-core" }
+typeweld-macros = { path = "../../../crates/typeweld-macros" }
 axum = "0.8.9"
 clap = { version = "4.6.1", features = ["derive"] }
 futures-util = "0.3.32"

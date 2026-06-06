@@ -12,8 +12,9 @@ import {
   type ServerOptions,
 } from "vscode-languageclient/node"
 
-const apiLsOpenGeneratedFileCommand = "api-ls.openGeneratedPackageFile"
-const languageClientId = "rustTsIntegration.apiLs"
+const apiLsOpenGeneratedFileCommand = "typeweld-ls.openGeneratedPackageFile"
+const languageClientId = "typeweld.languageServer"
+const workspaceMarkerGlob = "{.typeweld.json,typeweld.json,.typeweld-ls.json,typeweld-ls.json,Cargo.toml,package.json}"
 const privateTypeScriptCommandPrefix = "_typescript."
 const reservedTypeScriptCommands = new Set(["typescript.tsserverRequest"])
 const directNavigationMethods = new Set([
@@ -55,21 +56,21 @@ let reconcileQueue = Promise.resolve()
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context
-  outputChannel = vscode.window.createOutputChannel("Rust TS Integration", {
+  outputChannel = vscode.window.createOutputChannel("Typeweld", {
     log: true,
   })
 
   context.subscriptions.push(
     outputChannel,
     vscode.commands.registerCommand(
-      "rustTsIntegration.apiLs.restart",
+      "typeweld.languageServer.restart",
       restartClients,
     ),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       queueReconcile()
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("rustTsIntegration.apiLs")) {
+      if (event.affectsConfiguration("typeweld.languageServer")) {
         void restartClients()
       }
     }),
@@ -92,7 +93,7 @@ function queueReconcile(): void {
   reconcileQueue = reconcileQueue
     .then(() => reconcileClients(context))
     .catch((error: unknown) => {
-      log(`api-ls client reconciliation failed: ${formatError(error)}`)
+      log(`typeweld-ls client reconciliation failed: ${formatError(error)}`)
     })
 }
 
@@ -121,7 +122,7 @@ async function reconcileClients(context: vscode.ExtensionContext): Promise<void>
 
   if (wantedFolders.length === 0) {
     log(
-      "No api-ls workspace markers found. Configure rustTsIntegration.apiLs.requiredWorkspaceMarkers to change startup detection.",
+      "No typeweld-ls workspace markers found. Configure typeweld.languageServer.requiredWorkspaceMarkers to change startup detection.",
     )
   }
 }
@@ -133,21 +134,21 @@ async function startClient(
   const watcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(
       folder,
-      "{.api-ls.json,api-ls.json,Cargo.toml,package.json}",
+      workspaceMarkerGlob,
     ),
   )
   const client = new LanguageClient(
     `${languageClientId}.${folder.index}`,
-    `Rust TS Integration (${folder.name})`,
+    `Typeweld (${folder.name})`,
     serverOptions(context, folder),
     clientOptions(folder, watcher),
   )
   sanitizeInitializeFeatures(client)
   const stateListener = client.onDidChangeState((event) => {
     if (event.newState === State.Running) {
-      log(`api-ls started for ${folder.name}`)
+      log(`typeweld-ls started for ${folder.name}`)
     } else if (event.newState === State.Stopped) {
-      log(`api-ls stopped for ${folder.name}`)
+      log(`typeweld-ls stopped for ${folder.name}`)
     }
   })
   const entry: ClientEntry = {
@@ -162,9 +163,9 @@ async function startClient(
   } catch (error) {
     clients.delete(folderKey(folder))
     disposeAll(entry.disposables)
-    log(`api-ls failed to start for ${folder.name}: ${formatError(error)}`)
+    log(`typeweld-ls failed to start for ${folder.name}: ${formatError(error)}`)
     void vscode.window.showWarningMessage(
-      `api-ls failed to start for ${folder.name}. See the Rust TS Integration output for details.`,
+      `typeweld-ls failed to start for ${folder.name}. See the Typeweld output for details.`,
     )
   }
 }
@@ -188,7 +189,7 @@ function registerDirectNavigationProviders(
           }
           return lspHover(result)
         } catch (error) {
-          log(`api-ls direct hover failed: ${formatError(error)}`)
+          log(`typeweld-ls direct hover failed: ${formatError(error)}`)
           return undefined
         }
       },
@@ -205,7 +206,7 @@ function registerDirectNavigationProviders(
           }
           return lspLocations(result, folder)
         } catch (error) {
-          log(`api-ls direct definition failed: ${formatError(error)}`)
+          log(`typeweld-ls direct definition failed: ${formatError(error)}`)
           return undefined
         }
       },
@@ -227,13 +228,13 @@ function registerDirectNavigationProviders(
           }
           return lspLocations(result, folder)
         } catch (error) {
-          log(`api-ls direct references failed: ${formatError(error)}`)
+          log(`typeweld-ls direct references failed: ${formatError(error)}`)
           return undefined
         }
       },
     }),
   ]
-  log(`Registered direct api-ls navigation providers for ${folder.name} with workspace-relative selectors.`)
+  log(`Registered direct typeweld-ls navigation providers for ${folder.name} with workspace-relative selectors.`)
   return disposables
 }
 
@@ -367,7 +368,7 @@ function clientOptions(
   return {
     documentSelector: documentSelector(folder),
     initializationFailedHandler: (error) => {
-      log(`api-ls initialization failed for ${folder.name}: ${formatError(error)}`)
+      log(`typeweld-ls initialization failed for ${folder.name}: ${formatError(error)}`)
       return false
     },
     middleware: {
@@ -426,7 +427,7 @@ function sanitizeInitializeFeatures(client: LanguageClient): void {
   const mutableClient = client as unknown as LanguageClientRuntime
   const originalInitializeFeatures = mutableClient.initializeFeatures
   if (typeof originalInitializeFeatures !== "function") {
-    log("Unable to patch api-ls command capabilities before feature initialization.")
+    log("Unable to patch typeweld-ls command capabilities before feature initialization.")
     return
   }
 
@@ -532,7 +533,7 @@ function serverOptions(
   folder: vscode.WorkspaceFolder,
 ): ServerOptions {
   const config = vscode.workspace.getConfiguration(
-    "rustTsIntegration.apiLs",
+    "typeweld.languageServer",
     folder.uri,
   )
   const command = config.get<string>("command", "").trim()
@@ -551,20 +552,20 @@ function serverOptions(
 
   const launcher = bundledLauncherPath(context)
   if (launcher === undefined) {
-    log("Bundled api-ls launcher was not found; falling back to api-ls on PATH.")
+    log("Bundled typeweld-ls launcher was not found; falling back to typeweld-ls on PATH.")
     return {
-      debug: { command: "api-ls", args, options },
-      run: { command: "api-ls", args, options },
+      debug: { command: "typeweld-ls", args, options },
+      run: { command: "typeweld-ls", args, options },
     }
   }
 
   if (isTypeScriptLauncher(launcher)) {
     const tsx = bundledTsxPath(context)
     if (tsx === undefined) {
-      log("TypeScript api-ls launcher was found but tsx was not found; falling back to api-ls on PATH.")
+      log("TypeScript typeweld-ls launcher was found but tsx was not found; falling back to typeweld-ls on PATH.")
       return {
-        debug: { command: "api-ls", args, options },
-        run: { command: "api-ls", args, options },
+        debug: { command: "typeweld-ls", args, options },
+        run: { command: "typeweld-ls", args, options },
       }
     }
 
@@ -600,7 +601,7 @@ function serverOptions(
 
 function shouldStartForFolder(folder: vscode.WorkspaceFolder): boolean {
   const config = vscode.workspace.getConfiguration(
-    "rustTsIntegration.apiLs",
+    "typeweld.languageServer",
     folder.uri,
   )
   if (!config.get<boolean>("enabled", true)) {
@@ -608,6 +609,10 @@ function shouldStartForFolder(folder: vscode.WorkspaceFolder): boolean {
   }
 
   const markers = config.get<string[]>("requiredWorkspaceMarkers", [
+    ".typeweld.json",
+    "typeweld.json",
+    ".typeweld-ls.json",
+    "typeweld-ls.json",
     ".api-ls.json",
     "api-ls.json",
     "target/api-contract/effect-v4/packages",
@@ -655,12 +660,12 @@ function bundledLauncherPath(context: vscode.ExtensionContext): string | undefin
   }
 
   try {
-    return nodeRequire.resolve("@rust-ts-integration/language-server/src/index.ts")
+    return nodeRequire.resolve("@typeweld/language-server/src/index.ts")
   } catch {
     const packagedPath = context.asAbsolutePath(
       path.join(
         "node_modules",
-        "@rust-ts-integration",
+        "@typeweld",
         "language-server",
         "src",
         "index.ts",
@@ -696,7 +701,7 @@ function mergedEnvironment(
 
 async function restartClients(): Promise<void> {
   const context = extensionContext
-  log("Restarting api-ls clients.")
+  log("Restarting typeweld-ls clients.")
   reconcileQueue = reconcileQueue
     .then(async () => {
       await stopAllClients()
@@ -705,7 +710,7 @@ async function restartClients(): Promise<void> {
       }
     })
     .catch((error: unknown) => {
-      log(`api-ls restart failed: ${formatError(error)}`)
+      log(`typeweld-ls restart failed: ${formatError(error)}`)
     })
   await reconcileQueue
 }

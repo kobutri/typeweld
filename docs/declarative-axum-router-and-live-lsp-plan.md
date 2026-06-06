@@ -8,22 +8,22 @@ Rust API handlers are declared once and exported by mounting the real handler
 on an `ApiRouter` route tree:
 
 ```rust
-#[api_macros::api(method = "GET", path = "/greetings/{name}")]
-pub async fn greet(name: api_axum::Path<String>) -> Result<api_axum::Json<Greeting>, GreetingError> {
+#[typeweld_macros::api(method = "GET", path = "/greetings/{name}")]
+pub async fn greet(name: typeweld_axum::Path<String>) -> Result<typeweld_axum::Json<Greeting>, GreetingError> {
     todo!()
 }
 
-#[api_macros::api_router]
-pub fn routes() -> api_axum::ApiRouter {
-    api_axum::ApiRouter::new("server").endpoint(greet)
+#[typeweld_macros::api_router]
+pub fn routes() -> typeweld_axum::ApiRouter {
+    typeweld_axum::ApiRouter::new("server").endpoint(greet)
 }
 
 pub fn app() -> axum::Router {
     routes().into_router()
 }
 
-pub fn contract() -> api_core::ir::ApiContract {
-    api_collector::collect_contract(api_collector::CollectorInput::from_root(
+pub fn contract() -> typeweld_core::ir::ApiContract {
+    typeweld_cli::collect_contract(typeweld_cli::CollectorInput::from_root(
         "@workspace/server-api",
         routes(),
     ))

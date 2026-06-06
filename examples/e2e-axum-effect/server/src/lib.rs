@@ -1,13 +1,13 @@
-use api_axum::{ApiRouter, Body, Created, Json, Path, Sse};
-use api_collector::{collect_contract, CollectorInput};
-use api_core::ir::ApiContract;
 use axum::Router;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use typeweld_axum::{ApiRouter, Body, Created, Json, Path, Sse};
+use typeweld_cli::{collect_contract, CollectorInput};
+use typeweld_core::ir::ApiContract;
 
 pub const TS_PACKAGE_NAME: &str = "@workspace/e2e-api";
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: i32,
@@ -15,13 +15,13 @@ pub struct User {
     pub role: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserRequest {
     pub display_name: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 pub struct UserEvent {
     pub id: i32,
@@ -29,14 +29,14 @@ pub struct UserEvent {
     pub display_name: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditLog {
     pub summary: String,
     pub generated_at: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiError)]
 #[serde(tag = "_tag", rename_all = "PascalCase")]
 pub enum UserError {
     #[api_error(status = 404)]
@@ -45,7 +45,7 @@ pub enum UserError {
     DisplayNameTaken { display_name: String },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiError)]
 #[serde(tag = "_tag", rename_all = "PascalCase")]
 pub enum EventError {
     #[api_error(status = 401)]
@@ -59,7 +59,7 @@ type UserEventStream = stream::Iter<std::array::IntoIter<Result<UserEvent, Event
 /// # Errors
 ///
 /// Returns [`UserError::UserNotFound`] when the requested id is not available.
-#[api_macros::api(method = "GET", path = "/users/{id}")]
+#[typeweld_macros::api(method = "GET", path = "/users/{id}")]
 pub async fn get_user(id: Path<i32>) -> Result<Json<User>, UserError> {
     let id = id.into_inner();
     if id == 1 {
@@ -75,7 +75,7 @@ pub async fn get_user(id: Path<i32>) -> Result<Json<User>, UserError> {
 ///
 /// Returns [`UserError::DisplayNameTaken`] for the reserved display name used by
 /// the runtime error-channel check.
-#[api_macros::api(method = "POST", path = "/users")]
+#[typeweld_macros::api(method = "POST", path = "/users")]
 pub async fn create_user(request: Body<CreateUserRequest>) -> Result<Created<User>, UserError> {
     let request = request.into_inner();
     if request.display_name == "Root" {
@@ -94,7 +94,7 @@ pub async fn create_user(request: Body<CreateUserRequest>) -> Result<Created<Use
 /// The example stream type includes [`EventError`] so generated SSE error
 /// channels are represented. The current sample data only emits successful
 /// events.
-#[api_macros::api(method = "SSE", path = "/events/users")]
+#[typeweld_macros::api(method = "SSE", path = "/events/users")]
 pub fn watch_users() -> Result<Sse<UserEvent, UserEventStream>, EventError> {
     Ok(Sse::new(stream::iter([
         Ok(UserEvent {
@@ -110,7 +110,7 @@ pub fn watch_users() -> Result<Sse<UserEvent, UserEventStream>, EventError> {
     ])))
 }
 
-#[api_macros::api(method = "GET", path = "/admin/audit-log")]
+#[typeweld_macros::api(method = "GET", path = "/admin/audit-log")]
 pub async fn audit_log() -> Json<AuditLog> {
     Json(AuditLog {
         summary: "4 endpoint(s) checked".to_owned(),
@@ -119,7 +119,7 @@ pub async fn audit_log() -> Json<AuditLog> {
 }
 
 #[must_use]
-#[api_macros::api_router]
+#[typeweld_macros::api_router]
 pub fn routes() -> ApiRouter {
     ApiRouter::new("e2e")
         .endpoint(get_user)

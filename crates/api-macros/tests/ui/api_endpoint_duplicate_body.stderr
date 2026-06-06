@@ -1,5 +1,0 @@
-error: #[api] endpoints can only declare one request body extractor
- --> tests/ui/api_endpoint_duplicate_body.rs:9:5
-  |
-9 |     second: api_core::Body<User>,
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

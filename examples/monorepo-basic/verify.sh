@@ -18,7 +18,7 @@ mkdir -p target/api-contract
 cargo run -q -p monorepo-basic > target/api-contract/server-api.json
 
 echo "3. Running the full API check workflow"
-cargo run -q -p api-collector --bin api -- check \
+cargo run -q -p typeweld-cli --bin typeweld -- check \
   --contract target/api-contract/server-api.json \
   --target-dir target \
   --ts-dir examples/monorepo-basic/app/src

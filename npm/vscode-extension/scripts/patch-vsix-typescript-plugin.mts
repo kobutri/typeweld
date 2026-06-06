@@ -18,7 +18,7 @@ const pluginTarget = join(
   stagingRoot,
   "extension",
   "node_modules",
-  "@rust-ts-integration",
+  "@typeweld",
   "typescript-plugin",
 )
 

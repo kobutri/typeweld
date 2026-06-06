@@ -1,7 +1,7 @@
 "use strict"
 
 const generatedPackageSegment = "/target/api-contract/effect-v4/packages/"
-const logPrefix = "[rust-ts-integration]"
+const logPrefix = "[typeweld]"
 
 type GeneratedSpan = {
   readonly fileName?: string

@@ -61,7 +61,7 @@ cargo run -p monorepo-basic > target/api-contract/server-api.json
 Once you have a contract JSON file, generation uses the unified CLI:
 
 ```sh
-cargo run -p api-collector --bin api -- gen \
+cargo run -p typeweld-cli --bin typeweld -- gen \
   --contract target/api-contract/server-api.json \
   --target-dir target
 ```
@@ -97,27 +97,27 @@ because the returned Effect is yielded inside an Effect program.
 After TypeScript code exists, scan it:
 
 ```sh
-cargo run -p api-collector --bin api -- check-usages \
+cargo run -p typeweld-cli --bin typeweld -- check-usages \
   --contract target/api-contract/server-api.json \
   --out target/api-contract/graph/effect-usage-index.json \
   --ts-dir examples/monorepo-basic/app/src
 ```
 
-The usage index lets `api-ls` and `api-build` warn about exported Rust endpoints
+The usage index lets `typeweld-ls` and `typeweld-build` warn about exported Rust endpoints
 that no Effect code actually uses.
 
 ## 7. Validate Generated State
 
-Use `api check` in CI:
+Use `typeweld check` in CI:
 
 ```sh
-cargo run -p api-collector --bin api -- check \
+cargo run -p typeweld-cli --bin typeweld -- check \
   --contract target/api-contract/server-api.json \
   --target-dir target
 ```
 
 If generated files are missing or stale, the command tells the developer to run
-`api gen` again.
+`typeweld gen` again.
 
 ## 8. Typecheck The TypeScript App
 

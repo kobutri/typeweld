@@ -6,13 +6,13 @@
     "strict": true,
     "skipLibCheck": true,
     "paths": {
-      "@rust-ts-integration/effect-runtime": [
+      "@typeweld/effect-runtime": [
         "../../../npm/effect-runtime/src/index.ts"
       ],
-      "@rust-ts-integration/effect-runtime/compat": [
+      "@typeweld/effect-runtime/compat": [
         "../../../npm/effect-runtime/src/compat.ts"
       ],
-      "@rust-ts-integration/effect-runtime/*": [
+      "@typeweld/effect-runtime/*": [
         "../../../npm/effect-runtime/src/*"
       ],
       "@workspace/server-api": [

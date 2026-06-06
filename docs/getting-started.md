@@ -28,8 +28,8 @@ or `npm --prefix npm run test:lsp-wrapper`.
 ## 1. Define Rust API types
 
 ```rust
-use api_axum::{ApiRouter, Json, Path};
-use api_macros::{api, api_router, ApiError, ApiType};
+use typeweld_axum::{ApiRouter, Json, Path};
+use typeweld_macros::{api, api_router, ApiError, ApiType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, ApiType)]
@@ -60,7 +60,7 @@ pub fn routes() -> ApiRouter {
 The `ApiRouter` is the export boundary. Only endpoints mounted with
 `.endpoint(handler)` are collected and generated for TypeScript. In runnable
 Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`, `NoContent`,
-and `Sse` from `api_axum`; the `api_core` wrappers remain available for
+and `Sse` from `typeweld_axum`; the `typeweld_core` wrappers remain available for
 framework-neutral contract-only code.
 
 ## 2. Collect the contract
@@ -76,7 +76,7 @@ features = []
 ```
 
 ```sh
-cargo run -p api-collector --bin api -- collect \
+cargo run -p typeweld-cli --bin typeweld -- collect \
   --package server \
   --out target/api-contract/server-api.json
 ```
@@ -87,16 +87,16 @@ router and generated contract come from the same route tree.
 ## 3. Generate the hidden TypeScript package
 
 ```sh
-cargo run -p api-collector --bin api -- gen \
+cargo run -p typeweld-cli --bin typeweld -- gen \
   --contract target/api-contract/server-api.json \
   --target-dir target
 ```
 
-During local development, use `api watch` to keep the hidden package and symbol
+During local development, use `typeweld watch` to keep the hidden package and symbol
 graph refreshed as Rust source changes:
 
 ```sh
-cargo run -p api-collector --bin api -- watch \
+cargo run -p typeweld-cli --bin typeweld -- watch \
   --package server \
   --target-dir target
 ```
@@ -134,16 +134,16 @@ Effect error channel, not thrown promises and not a success-channel `Result`.
 ## 6. Check generated state and usages
 
 ```sh
-cargo run -p api-collector --bin api -- check \
+cargo run -p typeweld-cli --bin typeweld -- check \
   --contract target/api-contract/server-api.json \
   --target-dir target
 
-cargo run -p api-collector --bin api -- check-usages \
+cargo run -p typeweld-cli --bin typeweld -- check-usages \
   --contract target/api-contract/server-api.json \
   --out target/api-contract/graph/effect-usage-index.json \
   --ts-dir app/src
 ```
 
-Use `api doctor` when setup is missing or a workspace cannot be discovered. If
-you use `api-ls`, configure `apiWatch` in `.api-ls.json` so the editor starts
+Use `typeweld doctor` when setup is missing or a workspace cannot be discovered. If
+you use `typeweld-ls`, configure `typeweldWatch` in `.typeweld.json` so the editor starts
 and owns the same watcher for you.

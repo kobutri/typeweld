@@ -16,4 +16,4 @@ This repository is still an MVP implementation.
   compatibility-preserving wire renames are future work.
 - Generated files are hidden under `target/api-contract` by design. If your
   editor or TypeScript server cannot resolve imports, check `tsconfig` paths and
-  rerun `api gen`.
+  rerun `typeweld gen`.

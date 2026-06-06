@@ -1,4 +1,4 @@
-import { Effect, Stream } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect, Stream } from "@typeweld/effect-runtime/compat"
 import { ServerApi, events, users } from "@workspace/e2e-api"
 
 export const serverLayer = (baseUrl: string) =>

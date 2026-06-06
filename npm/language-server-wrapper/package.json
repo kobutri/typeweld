@@ -1,10 +1,10 @@
 {
-  "name": "@rust-ts-integration/language-server",
+  "name": "@typeweld/language-server",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "bin": {
-    "api-ls": "./src/index.ts"
+    "typeweld-ls": "./src/index.ts"
   },
   "files": [
     "bin",

@@ -1,0 +1,13 @@
+error: #[api] endpoints must be async functions
+ --> tests/ui/api_endpoint_non_async.rs:9:1
+  |
+9 | fn get_user() -> Json<User> {
+  | ^^
+
+warning: unused import: `typeweld_core::Json`
+ --> tests/ui/api_endpoint_non_async.rs:1:5
+  |
+1 | use typeweld_core::Json;
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

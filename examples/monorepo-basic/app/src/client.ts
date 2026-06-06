@@ -4,7 +4,7 @@
 // directory. `@workspace/server-api` is generated from the Rust contract and
 // resolved through `app/tsconfig.json`.
 
-import { Effect } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect } from "@typeweld/effect-runtime/compat"
 import { ServerApi, users } from "@workspace/server-api"
 
 // Application code writes ordinary functions around generated endpoint

@@ -1,0 +1,5 @@
+error: #[api] endpoint errors must be typed ApiError enums; `anyhow::Error` is opaque and cannot be represented as a generated error channel. Derive ApiError for a domain enum or map the error into one before returning it.
+  --> tests/ui/api_endpoint_anyhow_error.rs:11:58
+   |
+11 | async fn get_user() -> Result<typeweld_core::Json<User>, anyhow::Error> {
+   |                                                          ^^^^^^^^^^^^^

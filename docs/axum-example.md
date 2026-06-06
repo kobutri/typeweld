@@ -6,10 +6,10 @@ tree available for TypeScript generation.
 ## Runnable shape
 
 ```rust
-use api_axum::{ApiRouter, Json, Path};
-use api_collector::{collect_contract, CollectorInput};
-use api_core::ir::ApiContract;
-use api_macros::{api, api_router, ApiError, ApiType};
+use typeweld_axum::{ApiRouter, Json, Path};
+use typeweld_cli::{collect_contract, CollectorInput};
+use typeweld_core::ir::ApiContract;
+use typeweld_macros::{api, api_router, ApiError, ApiType};
 use serde::{Deserialize, Serialize};
 
 const TS_PACKAGE_NAME: &str = "@workspace/server-api";
@@ -64,7 +64,7 @@ listener and pass that router to `axum::serve`.
 
 ## Server-sent events
 
-Use the `api_axum::Sse<T, Stream>` wrapper for streaming Axum handlers. The
+Use the `typeweld_axum::Sse<T, Stream>` wrapper for streaming Axum handlers. The
 `#[api]` macro records the same stream item shape in framework-neutral metadata,
 and the generated TypeScript accessor returns
 `Stream.Stream<Item, Error, ServerApi>`.
@@ -77,5 +77,5 @@ See `examples/axum-sse` for the current SSE shape.
 - Domain errors should derive `ApiError` and declare HTTP status metadata.
 - The generated TypeScript success type is the decoded response body.
 - In runnable Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`,
-  `NoContent`, and `Sse` from `api_axum`; the `api_core` wrappers are
+  `NoContent`, and `Sse` from `typeweld_axum`; the `typeweld_core` wrappers are
   framework-neutral markers for contract-only code.

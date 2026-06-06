@@ -1,4 +1,4 @@
-use api_core::{ir::HttpMethod, Endpoint};
+use typeweld_core::{ir::HttpMethod, Endpoint};
 
 fn main() {
     let endpoint = Endpoint::new(HttpMethod::Get, "/users/{id}");

@@ -1,0 +1,26 @@
+[package]
+name = "typeweld-axum"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+typeweld-core = { path = "../typeweld-core" }
+axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }
+futures-util = "0.3.32"
+http = "1.4.1"
+serde = "1.0.228"
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
+
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
+tower = { version = "0.5.3", features = ["util"] }
+
+[lints]
+workspace = true

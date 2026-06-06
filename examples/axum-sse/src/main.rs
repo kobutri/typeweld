@@ -1,15 +1,15 @@
-use api_axum::{ApiRouter, Sse};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use typeweld_axum::{ApiRouter, Sse};
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 struct UserEvent {
     id: i64,
     kind: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiError)]
 #[serde(tag = "_tag", rename_all = "camelCase")]
 enum EventError {
     #[api_error(status = 401)]
@@ -18,7 +18,7 @@ enum EventError {
 
 type EventStream = stream::Iter<std::array::IntoIter<Result<UserEvent, EventError>, 2>>;
 
-#[api_macros::api(method = "SSE", path = "/events")]
+#[typeweld_macros::api(method = "SSE", path = "/events")]
 fn events() -> Result<Sse<UserEvent, EventStream>, EventError> {
     Ok(Sse::new(stream::iter([
         Ok(UserEvent {
@@ -32,7 +32,7 @@ fn events() -> Result<Sse<UserEvent, EventStream>, EventError> {
     ])))
 }
 
-#[api_macros::api_router]
+#[typeweld_macros::api_router]
 fn routes() -> ApiRouter {
     ApiRouter::new("events").endpoint(events)
 }

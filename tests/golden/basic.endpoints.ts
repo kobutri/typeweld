@@ -1,5 +1,5 @@
 // Generated API package for @workspace/server-api
-import { Effect, Stream, Schema } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect, Stream, Schema } from "@typeweld/effect-runtime/compat"
 import { ServerApi } from "./layer"
 import { CreateUserRequest, User, UserEvent } from "./schemas"
 import type { ApiClientError, GetUserError } from "./errors"

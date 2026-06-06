@@ -1,5 +1,5 @@
 // Generated API package for @workspace/server-api
-import { Schema } from "@rust-ts-integration/effect-runtime/compat"
+import { Schema } from "@typeweld/effect-runtime/compat"
 
 export class NetworkError extends Schema.TaggedErrorClass<NetworkError>()(
   "NetworkError",

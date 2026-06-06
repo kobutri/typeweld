@@ -6,7 +6,7 @@
     "typecheck": "../../../npm/node_modules/.bin/tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@rust-ts-integration/effect-runtime": "0.0.0",
+    "@typeweld/effect-runtime": "0.0.0",
     "effect": "^4.0.0-beta.78"
   },
   "devDependencies": {

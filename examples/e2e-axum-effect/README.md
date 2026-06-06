@@ -20,7 +20,7 @@ The script runs:
 
 ```sh
 cargo check -p e2e-axum-effect-server
-cargo run -q -p api-collector --bin api -- check \
+cargo run -q -p typeweld-cli --bin typeweld -- check \
   --package e2e-axum-effect-server \
   --target-dir target \
   --ts-dir examples/e2e-axum-effect/app/src \
@@ -30,7 +30,7 @@ npm --prefix examples/e2e-axum-effect/app run test:runtime
 ```
 
 It then copies the app to `target/examples/e2e-axum-effect/without-audit`,
-removes `audit-usage.ts`, and verifies that `api check --deny-unused-endpoints`
+removes `audit-usage.ts`, and verifies that `typeweld check --deny-unused-endpoints`
 fails with an unused-endpoint diagnostic.
 
 ## Run The Server
@@ -47,7 +47,7 @@ Print the contract JSON directly:
 cargo run -p e2e-axum-effect-server -- contract
 ```
 
-The public collection path is still `api check`; the `contract` command is only
+The public collection path is still `typeweld check`; the `contract` command is only
 for inspecting the same contract by hand.
 
 ## TypeScript App
@@ -68,7 +68,7 @@ Effect usage.
 
 ## LSP Setup Sample
 
-Use `api-ls` as the only language server for this example workspace. Do not run
+Use `typeweld-ls` as the only language server for this example workspace. Do not run
 a separate Rust Analyzer or TypeScript language server for the same files.
 
 ```json
@@ -81,9 +81,9 @@ a separate Rust Analyzer or TypeScript language server for the same files.
     "command": "typescript-language-server",
     "args": ["--stdio"]
   },
-  "apiWatch": {
+  "typeweldWatch": {
     "enabled": true,
-    "command": "api",
+    "command": "typeweld",
     "args": [
       "watch",
       "--package",
@@ -96,16 +96,16 @@ a separate Rust Analyzer or TypeScript language server for the same files.
   "symbolGraph": "target/api-contract/rust-ts-symbols.json",
   "usageIndex": "target/api-contract/graph/effect-usage-index.json",
   "unusedEndpointLints": "deny",
-  "logFile": "target/api-ls.log"
+  "logFile": "target/typeweld-ls.log"
 }
 ```
 
-With `apiWatch` configured, the language server refreshes the package and
+With `typeweldWatch` configured, the language server refreshes the package and
 symbol graph when the editor starts and after Rust source changes. The same
 generation path can be checked manually with:
 
 ```sh
-cargo run -q -p api-collector --bin api -- check \
+cargo run -q -p typeweld-cli --bin typeweld -- check \
   --package e2e-axum-effect-server \
   --target-dir target \
   --ts-dir examples/e2e-axum-effect/app/src

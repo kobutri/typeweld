@@ -74,118 +74,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "api-axum"
-version = "0.0.0"
-dependencies = [
- "api-core",
- "axum",
- "futures-util",
- "http",
- "serde",
- "tokio",
- "tower",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "api-build"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "api-collector"
-version = "0.0.0"
-dependencies = [
- "api-build",
- "api-core",
- "api-gen-effect-v4",
- "api-ir",
- "api-test-fixtures",
- "cargo_metadata",
- "clap",
- "deno_core",
- "dialoguer",
- "notify-debouncer-full",
- "proc-macro2",
- "serde",
- "serde_json",
- "syn",
-]
-
-[[package]]
-name = "api-core"
-version = "0.0.0"
-dependencies = [
- "api-ir",
- "bytes",
- "chrono",
- "rust_decimal",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "api-gen-effect-v4"
-version = "0.0.0"
-dependencies = [
- "api-ir",
- "api-test-fixtures",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "api-ir"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "api-ls"
-version = "0.0.0"
-dependencies = [
- "api-gen-effect-v4",
- "api-test-fixtures",
- "lsp-types",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "api-macros"
-version = "0.0.0"
-dependencies = [
- "api-axum",
- "api-core",
- "api-gen-effect-v4",
- "axum",
- "bytes",
- "futures-util",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn",
- "tokio",
- "tower",
- "trybuild",
-]
-
-[[package]]
-name = "api-test-fixtures"
-version = "0.0.0"
-dependencies = [
- "api-ir",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -240,7 +128,7 @@ dependencies = [
 name = "axum-basic"
 version = "0.0.0"
 dependencies = [
- "api-core",
+ "typeweld-core",
 ]
 
 [[package]]
@@ -266,11 +154,11 @@ dependencies = [
 name = "axum-sse"
 version = "0.0.0"
 dependencies = [
- "api-axum",
- "api-core",
- "api-macros",
  "futures-util",
  "serde",
+ "typeweld-axum",
+ "typeweld-core",
+ "typeweld-macros",
 ]
 
 [[package]]
@@ -752,15 +640,15 @@ dependencies = [
 name = "e2e-axum-effect-server"
 version = "0.0.0"
 dependencies = [
- "api-axum",
- "api-collector",
- "api-core",
- "api-macros",
  "axum",
  "clap",
  "futures-util",
  "serde",
  "tokio",
+ "typeweld-axum",
+ "typeweld-cli",
+ "typeweld-core",
+ "typeweld-macros",
 ]
 
 [[package]]
@@ -1456,11 +1344,11 @@ dependencies = [
 name = "monorepo-basic"
 version = "0.0.0"
 dependencies = [
- "api-axum",
- "api-collector",
- "api-core",
- "api-macros",
  "serde",
+ "typeweld-axum",
+ "typeweld-cli",
+ "typeweld-core",
+ "typeweld-macros",
 ]
 
 [[package]]
@@ -2351,6 +2239,118 @@ dependencies = [
  "target-triple",
  "termcolor",
  "toml",
+]
+
+[[package]]
+name = "typeweld-axum"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "http",
+ "serde",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "typeweld-core",
+]
+
+[[package]]
+name = "typeweld-build"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "typeweld-cli"
+version = "0.0.0"
+dependencies = [
+ "cargo_metadata",
+ "clap",
+ "deno_core",
+ "dialoguer",
+ "notify-debouncer-full",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "syn",
+ "typeweld-build",
+ "typeweld-core",
+ "typeweld-gen-effect-v4",
+ "typeweld-ir",
+ "typeweld-test-fixtures",
+]
+
+[[package]]
+name = "typeweld-core"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "rust_decimal",
+ "serde_json",
+ "typeweld-ir",
+ "uuid",
+]
+
+[[package]]
+name = "typeweld-gen-effect-v4"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "typeweld-ir",
+ "typeweld-test-fixtures",
+]
+
+[[package]]
+name = "typeweld-ir"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "typeweld-ls"
+version = "0.0.0"
+dependencies = [
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "typeweld-gen-effect-v4",
+ "typeweld-test-fixtures",
+]
+
+[[package]]
+name = "typeweld-macros"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-util",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn",
+ "tokio",
+ "tower",
+ "trybuild",
+ "typeweld-axum",
+ "typeweld-core",
+ "typeweld-gen-effect-v4",
+]
+
+[[package]]
+name = "typeweld-test-fixtures"
+version = "0.0.0"
+dependencies = [
+ "typeweld-ir",
 ]
 
 [[package]]

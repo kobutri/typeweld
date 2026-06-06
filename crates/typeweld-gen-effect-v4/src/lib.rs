@@ -1,0 +1,4579 @@
+//! Effect v4 TypeScript generator backend.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
+
+use serde::Serialize;
+use typeweld_ir::{
+    ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
+    Optionality, Primitive, RequestBodyTransport, RequestShape, ResponseShape, SourceRange,
+    SourceSpan, StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
+};
+
+pub const EFFECT_VERSION: &str = "4.0.0-beta.78";
+const EFFECT_COMPAT_IMPORT: &str = "@typeweld/effect-runtime/compat";
+
+/// Rendering policy for generated Effect v4 packages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectRenderOptions {
+    pub unsafe_integer_encoding: UnsafeIntegerEncoding,
+}
+
+impl EffectRenderOptions {
+    #[must_use]
+    pub const fn with_unsafe_integer_encoding(
+        mut self,
+        unsafe_integer_encoding: UnsafeIntegerEncoding,
+    ) -> Self {
+        self.unsafe_integer_encoding = unsafe_integer_encoding;
+        self
+    }
+}
+
+impl Default for EffectRenderOptions {
+    fn default() -> Self {
+        Self {
+            unsafe_integer_encoding: UnsafeIntegerEncoding::StringEncoded,
+        }
+    }
+}
+
+/// Encoding policy for Rust integer widths that cannot round-trip safely as JavaScript numbers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsafeIntegerEncoding {
+    StringEncoded,
+    Number,
+}
+
+#[must_use]
+pub fn render_package_banner(contract: &ApiContract) -> String {
+    format!("// Generated API package for {}\n", contract.package_name)
+}
+
+/// Renders generated Effect Schema declarations for every exported API type.
+#[must_use]
+pub fn render_schemas(contract: &ApiContract) -> String {
+    render_schemas_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders generated Effect Schema declarations with explicit rendering options.
+#[must_use]
+pub fn render_schemas_with_options(
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) -> String {
+    render_tracked_schemas(contract, options).file.contents
+}
+
+/// Renders schema-backed domain and generated client errors.
+#[must_use]
+pub fn render_errors(contract: &ApiContract) -> String {
+    render_errors_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders schema-backed domain and generated client errors with explicit rendering options.
+#[must_use]
+pub fn render_errors_with_options(contract: &ApiContract, options: &EffectRenderOptions) -> String {
+    render_tracked_errors(contract, options).file.contents
+}
+
+/// Renders generated endpoint accessors and route metadata.
+#[must_use]
+pub fn render_endpoints(contract: &ApiContract) -> String {
+    render_endpoints_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders generated endpoint accessors and route metadata with explicit rendering options.
+#[must_use]
+pub fn render_endpoints_with_options(
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) -> String {
+    render_tracked_endpoints(contract, options).file.contents
+}
+
+/// Renders the generated Effect service tag, service interface, and layer helpers.
+#[must_use]
+pub fn render_layer(contract: &ApiContract) -> String {
+    render_layer_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders the generated Effect service tag, service interface, and layer helpers with explicit options.
+#[must_use]
+pub fn render_layer_with_options(contract: &ApiContract, options: &EffectRenderOptions) -> String {
+    render_tracked_layer(contract, options).file.contents
+}
+
+/// In-memory representation of the hidden generated TypeScript package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedPackage {
+    pub package_dir: PathBuf,
+    pub files: Vec<GeneratedFile>,
+    pub marks: Vec<GeneratedMark>,
+    pub tsconfig_paths: TsconfigPaths,
+}
+
+/// A generated file path relative to [`GeneratedPackage::package_dir`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedFile {
+    pub path: String,
+    pub contents: String,
+}
+
+/// A generated TypeScript range associated with a Rust API symbol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedMark {
+    pub path: String,
+    pub symbol_id: String,
+    pub kind: String,
+    pub range: GeneratedRange,
+}
+
+/// Zero-based UTF-16 range in a generated TypeScript file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedRange {
+    pub start: GeneratedPosition,
+    pub end: GeneratedPosition,
+}
+
+/// Zero-based UTF-16 position in a generated TypeScript file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+/// TypeScript path mapping metadata for a generated API package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TsconfigPaths {
+    pub package_name: String,
+    pub package_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackedFile {
+    file: GeneratedFile,
+    marks: Vec<GeneratedMark>,
+}
+
+#[derive(Debug)]
+struct TrackedWriter {
+    path: String,
+    contents: String,
+    marks: Vec<GeneratedMark>,
+}
+
+impl TrackedWriter {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            contents: String::new(),
+            marks: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        self.contents.push_str(text);
+    }
+
+    fn mark(&mut self, symbol_id: &SymbolId, kind: &str, text: &str) {
+        let start = self.contents.len();
+        self.contents.push_str(text);
+        let end = self.contents.len();
+        self.marks.push(GeneratedMark {
+            path: self.path.clone(),
+            symbol_id: symbol_id.as_str().to_owned(),
+            kind: kind.to_owned(),
+            range: generated_range_for_offsets(&self.contents, start, end),
+        });
+    }
+
+    fn mark_synthetic(&mut self, symbol_id: String, kind: &str, text: &str) {
+        let start = self.contents.len();
+        self.contents.push_str(text);
+        let end = self.contents.len();
+        self.marks.push(GeneratedMark {
+            path: self.path.clone(),
+            symbol_id,
+            kind: kind.to_owned(),
+            range: generated_range_for_offsets(&self.contents, start, end),
+        });
+    }
+
+    fn into_tracked_file(self) -> TrackedFile {
+        TrackedFile {
+            file: GeneratedFile {
+                path: self.path,
+                contents: trim_trailing_blank_lines(self.contents),
+            },
+            marks: self.marks,
+        }
+    }
+}
+
+fn write_effect_compat_import(writer: &mut TrackedWriter, imports: &str) {
+    writer.push("import { ");
+    writer.push(imports);
+    writer.push(" } from \"");
+    writer.push(EFFECT_COMPAT_IMPORT);
+    writer.push("\"\n");
+}
+
+/// Builds the generated package files and resolver metadata without writing them.
+#[must_use]
+pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> GeneratedPackage {
+    render_generated_package_with_options(contract, target_dir, &EffectRenderOptions::default())
+}
+
+/// Builds the generated package files and resolver metadata with explicit rendering options.
+#[must_use]
+pub fn render_generated_package_with_options(
+    contract: &ApiContract,
+    target_dir: &Path,
+    options: &EffectRenderOptions,
+) -> GeneratedPackage {
+    let package_dir = generated_package_dir(target_dir, &contract.package_name);
+    let schemas = render_tracked_schemas(contract, options);
+    let errors = render_tracked_errors(contract, options);
+    let endpoints = render_tracked_endpoints(contract, options);
+    let layer = render_tracked_layer(contract, options);
+    let mut marks = Vec::new();
+    marks.extend(schemas.marks.clone());
+    marks.extend(errors.marks.clone());
+    marks.extend(endpoints.marks.clone());
+    marks.extend(layer.marks.clone());
+    marks.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+            .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+            .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+    });
+
+    let files = vec![
+        GeneratedFile {
+            path: "package.json".to_owned(),
+            contents: render_package_json(contract),
+        },
+        GeneratedFile {
+            path: "index.ts".to_owned(),
+            contents: render_package_index(contract),
+        },
+        schemas.file,
+        errors.file,
+        endpoints.file,
+        layer.file,
+        GeneratedFile {
+            path: "tsconfig.paths.json".to_owned(),
+            contents: render_tsconfig_paths(&TsconfigPaths {
+                package_name: contract.package_name.clone(),
+                package_dir: package_dir.clone(),
+            }),
+        },
+    ];
+
+    GeneratedPackage {
+        tsconfig_paths: TsconfigPaths {
+            package_name: contract.package_name.clone(),
+            package_dir: package_dir.clone(),
+        },
+        package_dir,
+        files,
+        marks,
+    }
+}
+
+/// Renders the cross-language symbol graph consumed by `typeweld-ls` and build lints.
+#[must_use]
+pub fn render_symbol_graph(contract: &ApiContract, package: &GeneratedPackage) -> String {
+    render_symbol_graph_with_options(contract, package, &EffectRenderOptions::default())
+}
+
+/// Renders the cross-language symbol graph with explicit rendering options.
+#[must_use]
+pub fn render_symbol_graph_with_options(
+    contract: &ApiContract,
+    package: &GeneratedPackage,
+    options: &EffectRenderOptions,
+) -> String {
+    let graph = SymbolGraph::from_generated_package(contract, package, options);
+    serde_json::to_string_pretty(&graph).expect("symbol graph serialization should not fail")
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolGraph {
+    schema_version: u32,
+    contract_hash: String,
+    symbols: Vec<LinkedSymbol>,
+}
+
+impl SymbolGraph {
+    fn from_generated_package(
+        contract: &ApiContract,
+        package: &GeneratedPackage,
+        options: &EffectRenderOptions,
+    ) -> Self {
+        let mut symbols = Vec::new();
+
+        for endpoint in &contract.endpoints {
+            symbols.push(endpoint_symbol(contract, package, endpoint, options));
+            for field in endpoint.request.path_params.iter() {
+                symbols.push(field_symbol(
+                    "routeParam",
+                    package,
+                    field,
+                    path_with(&endpoint.rust_path, &[&field.rust_name]),
+                    path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    sibling_field_names(&endpoint.request.path_params, field),
+                ));
+            }
+            for field in &endpoint.request.query_params {
+                symbols.push(field_symbol(
+                    "queryParam",
+                    package,
+                    field,
+                    path_with(&endpoint.rust_path, &[&field.rust_name]),
+                    path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    sibling_field_names(&endpoint.request.query_params, field),
+                ));
+            }
+        }
+
+        for type_def in &contract.types {
+            symbols.push(type_symbol(package, type_def));
+            collect_type_shape_symbols(package, type_def, &mut symbols);
+        }
+
+        for error in &contract.errors {
+            symbols.push(error_type_symbol(package, error));
+            for variant in &error.variants {
+                symbols.push(error_variant_symbol(package, error, variant));
+                symbols.push(error_tag_symbol(package, error, variant));
+                let class_name = error_variant_class_name(error, variant);
+                for field in &variant.fields {
+                    symbols.push(field_symbol(
+                        "errorField",
+                        package,
+                        field,
+                        path_with(&error.rust_path, &[&variant.rust_name, &field.rust_name]),
+                        path_from(&[&class_name, &field.ts_name]),
+                        sibling_field_names(&variant.fields, field),
+                    ));
+                }
+            }
+        }
+
+        symbols.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Self {
+            schema_version: 1,
+            contract_hash: hash_contract(contract),
+            symbols,
+        }
+    }
+}
+
+fn hash_contract(contract: &ApiContract) -> String {
+    serde_json::to_vec(contract)
+        .map(|bytes| stable_hash(&bytes))
+        .expect("API contract serialization should not fail")
+}
+
+fn stable_hash(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedSymbol {
+    id: String,
+    kind: String,
+    rust: GraphLocation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rust_references: Vec<GraphLocation>,
+    #[serde(default)]
+    typescript: Vec<GraphLocation>,
+    #[serde(default)]
+    metadata: SymbolMetadata,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effect_signature: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rust_path: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ts_path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    allow_unused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rename_placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reserved_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rust_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wire_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphLocation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    range: GraphRange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_range: Option<GraphRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_range: Option<GraphRange>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    generated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renamable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rename_strategy: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GraphRange {
+    start: GraphPosition,
+    end: GraphPosition,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GraphPosition {
+    line: u32,
+    character: u32,
+}
+
+fn endpoint_symbol(
+    contract: &ApiContract,
+    package: &GeneratedPackage,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) -> LinkedSymbol {
+    let function_name = endpoint_function_name(endpoint);
+    LinkedSymbol {
+        id: endpoint.id.as_str().to_owned(),
+        kind: "endpoint".to_owned(),
+        rust: rust_declaration_location(&endpoint.source, Some(true), "rustAnalyzer"),
+        rust_references: router_mount_locations(endpoint),
+        typescript: generated_locations(package, endpoint.id.as_str(), "endpoint"),
+        metadata: SymbolMetadata {
+            method: Some(endpoint.method.as_str().to_owned()),
+            route: Some(endpoint.route.0.clone()),
+            effect_signature: Some(render_endpoint_return_type(endpoint, "ServerApi", options)),
+            errors: endpoint
+                .errors
+                .iter()
+                .map(|error| error.name.clone())
+                .collect(),
+            rust_path: endpoint.rust_path.clone(),
+            ts_path: endpoint.ts_path.clone(),
+            usage_count: Some(0),
+            allow_unused: endpoint.allow_unused,
+            rename_placeholder: Some(function_name),
+            reserved_names: sibling_endpoint_names(contract, endpoint),
+            rust_name: Some(endpoint.rust_name.clone()),
+            wire_name: None,
+            ts_name: endpoint.ts_path.last().cloned(),
+        },
+    }
+}
+
+fn type_symbol(package: &GeneratedPackage, type_def: &TypeDef) -> LinkedSymbol {
+    LinkedSymbol {
+        id: type_def.id.as_str().to_owned(),
+        kind: "type".to_owned(),
+        rust: rust_declaration_location(&type_def.source, Some(true), "rustAnalyzer"),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, type_def.id.as_str(), "type"),
+        metadata: SymbolMetadata {
+            rust_path: type_def.rust_path.clone(),
+            ts_path: vec![type_def.ts_name.clone()],
+            rename_placeholder: Some(type_def.ts_name.clone()),
+            rust_name: Some(type_def.rust_name.clone()),
+            wire_name: None,
+            ts_name: Some(type_def.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_type_symbol(package: &GeneratedPackage, error: &ErrorDef) -> LinkedSymbol {
+    LinkedSymbol {
+        id: error.id.as_str().to_owned(),
+        kind: "error".to_owned(),
+        rust: rust_declaration_location(&error.source, Some(true), "rustAnalyzer"),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, error.id.as_str(), "error"),
+        metadata: SymbolMetadata {
+            rust_path: error.rust_path.clone(),
+            ts_path: vec![error.ts_name.clone()],
+            rename_placeholder: Some(error.ts_name.clone()),
+            rust_name: Some(error.rust_name.clone()),
+            wire_name: None,
+            ts_name: Some(error.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_variant_symbol(
+    package: &GeneratedPackage,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+) -> LinkedSymbol {
+    let class_name = error_variant_class_name(error, variant);
+    LinkedSymbol {
+        id: variant.id.as_str().to_owned(),
+        kind: "errorVariant".to_owned(),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, variant.id.as_str(), "errorVariant"),
+        metadata: SymbolMetadata {
+            rust_path: error
+                .rust_path
+                .iter()
+                .cloned()
+                .chain(std::iter::once(variant.rust_name.clone()))
+                .collect(),
+            ts_path: vec![class_name.clone()],
+            rename_placeholder: Some(class_name),
+            reserved_names: sibling_error_variant_names(error, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.tag.clone()),
+            ts_name: Some(error_variant_class_name(error, variant)),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_tag_symbol(
+    package: &GeneratedPackage,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+) -> LinkedSymbol {
+    let class_name = error_variant_class_name(error, variant);
+    let id = error_tag_symbol_id(variant);
+    LinkedSymbol {
+        id: id.clone(),
+        kind: "errorTag".to_owned(),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, &id, "errorTag"),
+        metadata: SymbolMetadata {
+            rust_path: path_with(&error.rust_path, &[&variant.rust_name]),
+            ts_path: path_from(&[&class_name, &variant.tag]),
+            rename_placeholder: Some(variant.tag.clone()),
+            reserved_names: sibling_error_variant_names(error, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.tag.clone()),
+            ts_name: Some(variant.tag.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn field_symbol(
+    kind: &str,
+    package: &GeneratedPackage,
+    field: &Field,
+    rust_path: Vec<String>,
+    ts_path: Vec<String>,
+    reserved_names: Vec<String>,
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: field.id.as_str().to_owned(),
+        kind: kind.to_owned(),
+        rust: rust_declaration_location(&field.source, Some(true), rust_rename_strategy(kind)),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, field.id.as_str(), kind),
+        metadata: SymbolMetadata {
+            rust_path,
+            ts_path,
+            rename_placeholder: Some(field.ts_name.clone()),
+            reserved_names,
+            rust_name: Some(field.rust_name.clone()),
+            wire_name: Some(field.wire_name.clone()),
+            ts_name: Some(field.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn collect_type_shape_symbols(
+    package: &GeneratedPackage,
+    type_def: &TypeDef,
+    symbols: &mut Vec<LinkedSymbol>,
+) {
+    match &type_def.shape {
+        TypeShape::Struct(StructShape { fields }) => {
+            for field in fields {
+                symbols.push(field_symbol(
+                    "field",
+                    package,
+                    field,
+                    path_with(&type_def.rust_path, &[&field.rust_name]),
+                    path_from(&[&type_def.ts_name, &field.ts_name]),
+                    sibling_field_names(fields, field),
+                ));
+            }
+        }
+        TypeShape::Enum(EnumShape { variants }) => {
+            for variant in variants {
+                symbols.push(enum_variant_symbol(package, type_def, variant, variants));
+                for field in &variant.fields {
+                    symbols.push(field_symbol(
+                        "field",
+                        package,
+                        field,
+                        path_with(&type_def.rust_path, &[&variant.rust_name, &field.rust_name]),
+                        path_from(&[&type_def.ts_name, &variant.wire_name, &field.ts_name]),
+                        sibling_field_names(&variant.fields, field),
+                    ));
+                }
+            }
+        }
+        TypeShape::Primitive(_)
+        | TypeShape::Newtype(_)
+        | TypeShape::Tuple(_)
+        | TypeShape::List(_)
+        | TypeShape::Map { .. }
+        | TypeShape::Option(_)
+        | TypeShape::External(_) => {}
+    }
+}
+
+fn enum_variant_symbol(
+    package: &GeneratedPackage,
+    type_def: &TypeDef,
+    variant: &EnumVariant,
+    variants: &[EnumVariant],
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: variant.id.as_str().to_owned(),
+        kind: "enumVariant".to_owned(),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
+        typescript: generated_locations(package, variant.id.as_str(), "enumVariant"),
+        metadata: SymbolMetadata {
+            rust_path: path_with(&type_def.rust_path, &[&variant.rust_name]),
+            ts_path: path_from(&[&type_def.ts_name, &variant.wire_name]),
+            rename_placeholder: Some(variant.wire_name.clone()),
+            reserved_names: sibling_enum_variant_names(variants, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.wire_name.clone()),
+            ts_name: Some(variant.wire_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn sibling_endpoint_names(contract: &ApiContract, endpoint: &Endpoint) -> Vec<String> {
+    let namespace = endpoint_namespace(endpoint);
+    let mut names = contract
+        .endpoints
+        .iter()
+        .filter(|candidate| {
+            candidate.id != endpoint.id && endpoint_namespace(candidate) == namespace
+        })
+        .flat_map(|candidate| {
+            [
+                endpoint_function_name(candidate),
+                candidate.rust_name.clone(),
+                candidate.ts_path.last().cloned().unwrap_or_default(),
+            ]
+        })
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_field_names(fields: &[Field], field: &Field) -> Vec<String> {
+    let mut names = fields
+        .iter()
+        .filter(|candidate| candidate.id != field.id)
+        .flat_map(|candidate| {
+            [
+                candidate.rust_name.clone(),
+                candidate.wire_name.clone(),
+                candidate.ts_name.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_error_variant_names(error: &ErrorDef, variant: &ErrorVariant) -> Vec<String> {
+    let mut names = error
+        .variants
+        .iter()
+        .filter(|candidate| candidate.id != variant.id)
+        .flat_map(|candidate| {
+            [
+                candidate.rust_name.clone(),
+                candidate.tag.clone(),
+                error_variant_class_name(error, candidate),
+            ]
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_enum_variant_names(variants: &[EnumVariant], variant: &EnumVariant) -> Vec<String> {
+    let mut names = variants
+        .iter()
+        .filter(|candidate| candidate.id != variant.id)
+        .flat_map(|candidate| [candidate.rust_name.clone(), candidate.wire_name.clone()])
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn path_from(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|part| (*part).to_owned()).collect()
+}
+
+fn path_with(base: &[String], additions: &[&str]) -> Vec<String> {
+    base.iter()
+        .cloned()
+        .chain(additions.iter().map(|addition| (*addition).to_owned()))
+        .collect()
+}
+
+fn generated_locations(
+    package: &GeneratedPackage,
+    symbol_id: &str,
+    kind: &str,
+) -> Vec<GraphLocation> {
+    package
+        .marks
+        .iter()
+        .filter(|mark| mark.symbol_id == symbol_id && mark.kind == kind)
+        .map(|mark| {
+            let range = graph_range_from_generated(mark.range);
+            GraphLocation {
+                file: Some(package.package_dir.join(&mark.path).display().to_string()),
+                range,
+                name_range: Some(range),
+                full_range: Some(range),
+                generated: true,
+                renamable: Some(false),
+                role: Some("generatedDefinition"),
+                language: Some("typescript"),
+                rename_strategy: Some("generatedReadOnly"),
+            }
+        })
+        .collect()
+}
+
+fn error_tag_symbol_id(variant: &ErrorVariant) -> String {
+    SymbolId::from_parts("error_tag", &[variant.id.as_str()])
+        .as_str()
+        .to_owned()
+}
+
+fn router_mount_locations(endpoint: &Endpoint) -> Vec<GraphLocation> {
+    endpoint
+        .router_mounts
+        .iter()
+        .map(|source| {
+            rust_location_with_metadata(
+                source,
+                Some(true),
+                Some("rustRouterMount"),
+                Some("rust"),
+                Some("rustAnalyzerReference"),
+            )
+        })
+        .collect()
+}
+
+fn rust_rename_strategy(kind: &str) -> &'static str {
+    match kind {
+        "routeParam" => "rustAndRoutePlaceholder",
+        "field" | "errorField" | "enumVariant" | "errorVariant" | "errorTag" => "serdeRenameAware",
+        _ => "rustAnalyzer",
+    }
+}
+
+fn rust_declaration_location(
+    source: &SourceRange,
+    renamable: Option<bool>,
+    rename_strategy: &'static str,
+) -> GraphLocation {
+    rust_location_with_metadata(
+        source,
+        renamable,
+        Some("rustDeclaration"),
+        Some("rust"),
+        Some(rename_strategy),
+    )
+}
+
+fn rust_location_with_metadata(
+    source: &SourceRange,
+    renamable: Option<bool>,
+    role: Option<&'static str>,
+    language: Option<&'static str>,
+    rename_strategy: Option<&'static str>,
+) -> GraphLocation {
+    let range = range_from_source(source);
+    let full_range = source
+        .full_range
+        .as_ref()
+        .map(range_from_source_span)
+        .unwrap_or(range);
+    GraphLocation {
+        file: (!source.file.is_empty()).then(|| source.file.clone()),
+        range,
+        name_range: Some(range),
+        full_range: Some(full_range),
+        generated: false,
+        renamable,
+        role,
+        language,
+        rename_strategy,
+    }
+}
+
+fn range_from_source(source: &SourceRange) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: source.start_line.saturating_sub(1),
+            character: source.start_column.saturating_sub(1),
+        },
+        end: GraphPosition {
+            line: source.end_line.saturating_sub(1),
+            character: source.end_column.saturating_sub(1),
+        },
+    }
+}
+
+fn range_from_source_span(source: &SourceSpan) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: source.start_line.saturating_sub(1),
+            character: source.start_column.saturating_sub(1),
+        },
+        end: GraphPosition {
+            line: source.end_line.saturating_sub(1),
+            character: source.end_column.saturating_sub(1),
+        },
+    }
+}
+
+fn graph_range_from_generated(range: GeneratedRange) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: range.start.line,
+            character: range.start.character,
+        },
+        end: GraphPosition {
+            line: range.end.line,
+            character: range.end.character,
+        },
+    }
+}
+
+fn generated_range_for_offsets(contents: &str, start: usize, end: usize) -> GeneratedRange {
+    GeneratedRange {
+        start: generated_position_for_offset(contents, start),
+        end: generated_position_for_offset(contents, end),
+    }
+}
+
+fn generated_position_for_offset(contents: &str, offset: usize) -> GeneratedPosition {
+    let position = position_for_offset(contents, offset);
+    GeneratedPosition {
+        line: position.line,
+        character: position.character,
+    }
+}
+
+fn position_for_offset(contents: &str, offset: usize) -> GraphPosition {
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, ch) in contents.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += u32::try_from(ch.len_utf16()).unwrap_or(1);
+        }
+    }
+    GraphPosition { line, character }
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Cache path convention for hidden generated packages.
+#[must_use]
+pub fn generated_package_dir(target_dir: &Path, package_name: &str) -> PathBuf {
+    target_dir
+        .join("api-contract")
+        .join("effect-v4")
+        .join("packages")
+        .join(sanitize_package_dir_name(package_name))
+}
+
+/// Renders the generated package manifest.
+#[must_use]
+pub fn render_package_json(contract: &ApiContract) -> String {
+    format!(
+        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@typeweld/effect-runtime\": \"0.0.0\",\n    \"effect\": {effect_version}\n  }}\n}}\n",
+        name = ts_string(&contract.package_name),
+        effect_version = ts_string(EFFECT_VERSION),
+    )
+}
+
+/// Renders the generated public package barrel.
+#[must_use]
+pub fn render_package_index(contract: &ApiContract) -> String {
+    let mut output = render_package_banner(contract);
+    output.push_str("export * from \"./schemas\"\n");
+    output.push_str("export * from \"./errors\"\n");
+    output.push_str("export * from \"./endpoints\"\n");
+    output.push_str("export * from \"./layer\"\n");
+    output
+}
+
+/// Renders the `compilerOptions.paths` snippet for importing the hidden package.
+#[must_use]
+pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
+    let package_dir = normalize_path(&paths.package_dir);
+    format!(
+        "{{\n  \"compilerOptions\": {{\n    \"paths\": {{\n      {package_name}: [\n        {index_path}\n      ],\n      {package_glob}: [\n        {package_dir_glob}\n      ]\n    }}\n  }}\n}}\n",
+        package_name = ts_string(&paths.package_name),
+        index_path = ts_string(&format!("{package_dir}/index.ts")),
+        package_glob = ts_string(&format!("{}/*", paths.package_name)),
+        package_dir_glob = ts_string(&format!("{package_dir}/*")),
+    )
+}
+
+fn render_tracked_schemas(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
+    let mut writer = TrackedWriter::new("schemas.ts");
+    writer.push(&render_package_banner(contract));
+    write_effect_compat_import(&mut writer, "Schema");
+    writer.push("\n");
+
+    for type_def in sort_type_defs_for_render(contract) {
+        write_tracked_type_def(&mut writer, type_def, options);
+        writer.push("\n");
+    }
+
+    writer.into_tracked_file()
+}
+
+fn sort_type_defs_for_render(contract: &ApiContract) -> Vec<&TypeDef> {
+    let mut types = contract.types.iter().collect::<Vec<_>>();
+    types.sort_by(|left, right| {
+        left.ts_name
+            .cmp(&right.ts_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let defined_names = types
+        .iter()
+        .map(|type_def| type_def.ts_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut visiting = BTreeSet::new();
+    let mut emitted = BTreeSet::new();
+    let mut output = Vec::new();
+
+    for type_def in &types {
+        visit_type_def_for_render(
+            type_def,
+            &types,
+            &defined_names,
+            &mut visiting,
+            &mut emitted,
+            &mut output,
+        );
+    }
+
+    output
+}
+
+fn visit_type_def_for_render<'a>(
+    type_def: &'a TypeDef,
+    types: &[&'a TypeDef],
+    defined_names: &BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    emitted: &mut BTreeSet<String>,
+    output: &mut Vec<&'a TypeDef>,
+) {
+    if emitted.contains(&type_def.ts_name) {
+        return;
+    }
+    if !visiting.insert(type_def.ts_name.clone()) {
+        return;
+    }
+
+    let mut dependencies = Vec::new();
+    collect_type_shape_dependencies(&type_def.shape, defined_names, &mut dependencies);
+    dependencies.sort();
+    dependencies.dedup();
+
+    for dependency in dependencies {
+        if dependency == type_def.ts_name {
+            continue;
+        }
+        if let Some(dependency_type) = types
+            .iter()
+            .copied()
+            .find(|candidate| candidate.ts_name == dependency)
+        {
+            visit_type_def_for_render(
+                dependency_type,
+                types,
+                defined_names,
+                visiting,
+                emitted,
+                output,
+            );
+        }
+    }
+
+    visiting.remove(&type_def.ts_name);
+    emitted.insert(type_def.ts_name.clone());
+    output.push(type_def);
+}
+
+fn collect_type_shape_dependencies(
+    shape: &TypeShape,
+    defined_names: &BTreeSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+    match shape {
+        TypeShape::Primitive(_) | TypeShape::External(_) => {}
+        TypeShape::Struct(shape) => {
+            for field in &shape.fields {
+                collect_type_ref_dependency(&field.type_ref, defined_names, dependencies);
+            }
+        }
+        TypeShape::Enum(shape) => {
+            for variant in &shape.variants {
+                for field in &variant.fields {
+                    collect_type_ref_dependency(&field.type_ref, defined_names, dependencies);
+                }
+            }
+        }
+        TypeShape::Newtype(inner) | TypeShape::List(inner) | TypeShape::Option(inner) => {
+            collect_type_ref_dependency(inner, defined_names, dependencies);
+        }
+        TypeShape::Tuple(items) => {
+            for item in items {
+                collect_type_ref_dependency(item, defined_names, dependencies);
+            }
+        }
+        TypeShape::Map { key, value } => {
+            collect_type_ref_dependency(key, defined_names, dependencies);
+            collect_type_ref_dependency(value, defined_names, dependencies);
+        }
+    }
+}
+
+fn collect_type_ref_dependency(
+    type_ref: &TypeRef,
+    defined_names: &BTreeSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+    if defined_names.contains(&type_ref.name) {
+        dependencies.push(type_ref.name.clone());
+    }
+}
+
+fn write_tracked_type_def(
+    writer: &mut TrackedWriter,
+    type_def: &TypeDef,
+    options: &EffectRenderOptions,
+) {
+    writer.push("export const ");
+    writer.mark(&type_def.id, "type", &type_def.ts_name);
+    writer.push(" = ");
+    write_tracked_type_shape(writer, &type_def.shape, type_def, 0, options);
+    writer.push("\nexport type ");
+    writer.mark(&type_def.id, "type", &type_def.ts_name);
+    writer.push(" = Schema.Schema.Type<typeof ");
+    writer.push(&type_def.ts_name);
+    writer.push(">\nexport type ");
+    writer.mark(
+        &type_def.id,
+        "type",
+        &format!("{}Encoded", type_def.ts_name),
+    );
+    writer.push(" = Schema.Codec.Encoded<typeof ");
+    writer.push(&type_def.ts_name);
+    writer.push(">\n");
+}
+
+fn write_tracked_type_shape(
+    writer: &mut TrackedWriter,
+    shape: &TypeShape,
+    owner: &TypeDef,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
+    match shape {
+        TypeShape::Struct(shape) => write_tracked_struct(writer, shape, indent, options),
+        TypeShape::Enum(shape) => write_tracked_enum(writer, shape, indent, options),
+        TypeShape::Primitive(_)
+        | TypeShape::Newtype(_)
+        | TypeShape::Tuple(_)
+        | TypeShape::List(_)
+        | TypeShape::Map { .. }
+        | TypeShape::Option(_)
+        | TypeShape::External(_) => {
+            writer.push(&render_type_shape_with_options(shape, owner, options))
+        }
+    }
+}
+
+fn write_tracked_struct(
+    writer: &mut TrackedWriter,
+    shape: &StructShape,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
+    if shape.fields.is_empty() {
+        writer.push("Schema.Struct({})");
+        return;
+    }
+
+    writer.push("Schema.Struct({\n");
+    for field in &shape.fields {
+        writer.push(&render_indent(indent + 2));
+        writer.mark(&field.id, "field", &field.ts_name);
+        writer.push(": ");
+        writer.push(&render_field_schema(field, options));
+        writer.push(",\n");
+    }
+    writer.push(&render_indent(indent));
+    writer.push("})");
+}
+
+fn write_tracked_enum(
+    writer: &mut TrackedWriter,
+    shape: &EnumShape,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
+    if shape.variants.is_empty() {
+        writer.push("Schema.Never");
+        return;
+    }
+
+    writer.push("Schema.Union([");
+    for (index, variant) in shape.variants.iter().enumerate() {
+        if index > 0 {
+            writer.push(", ");
+        }
+        write_tracked_enum_variant(writer, variant, indent, options);
+    }
+    writer.push("])");
+}
+
+fn write_tracked_enum_variant(
+    writer: &mut TrackedWriter,
+    variant: &EnumVariant,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
+    if variant.fields.is_empty() {
+        writer.push("Schema.Struct({ _tag: Schema.Literal(\"");
+        writer.mark(&variant.id, "enumVariant", &variant.wire_name);
+        writer.push("\") })");
+        return;
+    }
+
+    writer.push("Schema.Struct({\n");
+    writer.push(&render_indent(indent + 2));
+    writer.push("_tag: Schema.Literal(\"");
+    writer.mark(&variant.id, "enumVariant", &variant.wire_name);
+    writer.push("\"),\n");
+    for field in &variant.fields {
+        writer.push(&render_indent(indent + 2));
+        writer.mark(&field.id, "field", &field.ts_name);
+        writer.push(": ");
+        writer.push(&render_field_schema(field, options));
+        writer.push(",\n");
+    }
+    writer.push(&render_indent(indent));
+    writer.push("})");
+}
+
+fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
+    let mut writer = TrackedWriter::new("endpoints.ts");
+    writer.push(&render_package_banner(contract));
+    if contract_has_stream_endpoints(contract) {
+        write_effect_compat_import(&mut writer, "Effect, Stream, Schema");
+    } else {
+        write_effect_compat_import(&mut writer, "Effect, Schema");
+    }
+    writer.push("import { ServerApi } from \"./layer\"\n");
+    if contract_has_binary_upload_endpoints(contract) {
+        writer.push("import type { BinaryRequestBody } from \"@typeweld/effect-runtime\"\n");
+    }
+
+    let schema_imports = collect_endpoint_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+
+    let error_imports = collect_endpoint_error_imports(contract);
+    writer.push("import type { ");
+    writer.push(
+        &error_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    writer.push(" } from \"./errors\"\n\n");
+
+    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        endpoint_namespace(left)
+            .cmp(&endpoint_namespace(right))
+            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let mut namespace = None::<String>;
+    for endpoint in endpoints {
+        let current_namespace = endpoint_namespace(endpoint);
+        if namespace.as_deref() != Some(current_namespace.as_str()) {
+            if namespace.is_some() {
+                writer.push("}\n\n");
+            }
+            writer.push("export namespace ");
+            writer.push(&current_namespace);
+            writer.push(" {\n");
+            namespace = Some(current_namespace);
+        }
+
+        write_tracked_endpoint(&mut writer, endpoint, options);
+    }
+
+    if namespace.is_some() {
+        writer.push("}\n");
+    }
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_endpoint(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
+    let function_name = endpoint_function_name(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let namespace = endpoint_namespace(endpoint);
+
+    write_tracked_endpoint_args(writer, endpoint, options);
+    writer.push("\n");
+    write_tracked_endpoint_args_schema(writer, endpoint, options);
+    writer.push("\n  export const ");
+    writer.mark(&endpoint.id, "endpoint", &format!("{function_name}Route"));
+    writer.push(" = {\n    method: ");
+    writer.push(&ts_string(endpoint.method.as_str()));
+    writer.push(",\n    path: ");
+    writer.push(&ts_string(&endpoint.route.0));
+    writer.push(",\n    transport: ");
+    writer.push(&ts_string(render_transport(endpoint.transport)));
+    writer.push(",\n  } as const\n\n  export const ");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push(" = (\n    args: ");
+    writer.push(&args_name);
+    writer.push("\n  ): ");
+    writer.push(&render_endpoint_return_type(endpoint, "ServerApi", options));
+    if matches!(endpoint.response, ResponseShape::Stream(_)) {
+        writer.push(" =>\n    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.");
+    } else {
+        writer.push(" =>\n    ServerApi.use((api) => api.");
+    }
+    writer.push(&namespace);
+    writer.push(".");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push("(args)");
+    if matches!(endpoint.response, ResponseShape::Stream(_)) {
+        writer.push(")))\n\n");
+    } else {
+        writer.push(")\n\n");
+    }
+}
+
+fn write_tracked_endpoint_args(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
+    let args_name = endpoint_args_name(endpoint);
+    let mut has_fields = false;
+    writer.push("  export interface ");
+    writer.push(&args_name);
+    if endpoint.request.path_params.is_empty()
+        && endpoint.request.query_params.is_empty()
+        && endpoint.request.body.is_none()
+    {
+        writer.push(" {}\n");
+        return;
+    }
+
+    writer.push(" {\n");
+    for field in &endpoint.request.path_params {
+        has_fields = true;
+        writer.push("    readonly ");
+        mark_property_key(writer, &field.id, "routeParam", &field.ts_name);
+        if matches!(
+            field.optionality,
+            Optionality::Optional | Optionality::OptionalNullable
+        ) {
+            writer.push("?");
+        }
+        writer.push(": ");
+        writer.push(&render_endpoint_arg_field_type(field, options));
+        writer.push(";\n");
+    }
+    for field in &endpoint.request.query_params {
+        has_fields = true;
+        writer.push("    readonly ");
+        mark_property_key(writer, &field.id, "queryParam", &field.ts_name);
+        if matches!(
+            field.optionality,
+            Optionality::Optional | Optionality::OptionalNullable
+        ) {
+            writer.push("?");
+        }
+        writer.push(": ");
+        writer.push(&render_endpoint_arg_field_type(field, options));
+        writer.push(";\n");
+    }
+    if let Some(body) = &endpoint.request.body {
+        has_fields = true;
+        writer.push("    readonly body: ");
+        if endpoint.request.body_transport == RequestBodyTransport::Binary {
+            writer.push("BinaryRequestBody");
+        } else {
+            writer.push(&render_ts_type_ref(body, options));
+        }
+        writer.push(";\n");
+    }
+    if !has_fields {
+        writer.push("  }\n");
+        return;
+    }
+    writer.push("  }\n");
+}
+
+fn write_tracked_endpoint_args_schema(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
+    let args_schema_name = endpoint_args_schema_name(endpoint);
+
+    writer.push("  export const ");
+    writer.push(&args_schema_name);
+    writer.push(" = Schema.Struct(");
+
+    if endpoint.request.path_params.is_empty()
+        && endpoint.request.query_params.is_empty()
+        && endpoint.request.body.is_none()
+    {
+        writer.push("{})\n");
+    } else {
+        writer.push("{\n");
+        for field in &endpoint.request.path_params {
+            writer.push("    ");
+            writer.push(&render_property_key(&field.ts_name));
+            writer.push(": ");
+            writer.push(&render_field_schema(field, options));
+            writer.push(",\n");
+        }
+        for field in &endpoint.request.query_params {
+            writer.push("    ");
+            writer.push(&render_property_key(&field.ts_name));
+            writer.push(": ");
+            writer.push(&render_field_schema(field, options));
+            writer.push(",\n");
+        }
+        if let Some(body) = &endpoint.request.body {
+            writer.push("    body: ");
+            if endpoint.request.body_transport == RequestBodyTransport::Binary {
+                writer.push("Schema.Unknown");
+            } else {
+                writer.push(&render_type_ref(body, options));
+            }
+            writer.push(",\n");
+        }
+        writer.push("  })\n");
+    }
+
+    writer.push("  export type ");
+    writer.push(&endpoint_args_encoded_name(endpoint));
+    writer.push(" = Schema.Codec.Encoded<typeof ");
+    writer.push(&args_schema_name);
+    writer.push(">\n");
+}
+
+fn render_tracked_errors(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
+    let mut writer = TrackedWriter::new("errors.ts");
+    writer.push(&render_package_banner(contract));
+    write_effect_compat_import(&mut writer, "Schema");
+
+    let schema_imports = collect_error_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+    writer.push("\n");
+    writer.push(&render_client_errors());
+
+    let mut errors = contract.errors.iter().collect::<Vec<_>>();
+    errors.sort_by(|left, right| {
+        left.ts_name
+            .cmp(&right.ts_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    for error in errors {
+        writer.push("\n");
+        write_tracked_error_def(&mut writer, error, options);
+    }
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_error_def(
+    writer: &mut TrackedWriter,
+    error: &ErrorDef,
+    options: &EffectRenderOptions,
+) {
+    for variant in &error.variants {
+        write_tracked_error_variant(writer, error, variant, options);
+        writer.push("\n");
+    }
+
+    writer.push("export type ");
+    writer.mark(&error.id, "error", &error.ts_name);
+    writer.push(" =\n");
+    if error.variants.is_empty() {
+        writer.push("  never\n");
+    } else {
+        for variant in &error.variants {
+            writer.push("  | ");
+            writer.mark(
+                &variant.id,
+                "errorVariant",
+                &error_variant_class_name(error, variant),
+            );
+            writer.push("\n");
+        }
+    }
+
+    writer.push("\n");
+    write_tracked_error_status_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_status_by_code_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_schema_by_status_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_symbol_metadata(writer, error);
+}
+
+fn write_tracked_error_variant(
+    writer: &mut TrackedWriter,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+    options: &EffectRenderOptions,
+) {
+    let fields = variant
+        .fields
+        .iter()
+        .map(|field| (field, render_field_schema(field, options)))
+        .collect::<Vec<_>>();
+    let class_name = error_variant_class_name(error, variant);
+    writer.push("export class ");
+    writer.mark(&variant.id, "errorVariant", &class_name);
+    writer.push(" extends Schema.TaggedErrorClass<");
+    writer.push(&class_name);
+    writer.push(">()(\n  ");
+    mark_ts_string(
+        writer,
+        error_tag_symbol_id(variant),
+        "errorTag",
+        &variant.tag,
+    );
+    writer.push(",\n");
+    if fields.is_empty() {
+        writer.push("  {}\n");
+    } else {
+        writer.push("  {\n");
+        for (field, schema) in fields {
+            writer.push("    ");
+            mark_property_key(writer, &field.id, "errorField", &field.ts_name);
+            writer.push(": ");
+            writer.push(&schema);
+            writer.push(",\n");
+        }
+        writer.push("  }\n");
+    }
+    writer.push(") {}\n");
+}
+
+fn write_tracked_error_status_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(&error.id, "error", &format!("{}Status", error.ts_name));
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        mark_property_key(
+            writer,
+            &SymbolId::new(error_tag_symbol_id(variant)),
+            "errorTag",
+            &variant.tag,
+        );
+        writer.push(": ");
+        writer.push(&variant.status.0.to_string());
+        writer.push(",\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn write_tracked_error_status_by_code_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(
+        &error.id,
+        "error",
+        &format!("{}StatusByCode", error.ts_name),
+    );
+    writer.push(" = {\n");
+    for (status, variants) in error_variants_by_status(error) {
+        writer.push("  ");
+        writer.push(&status.to_string());
+        writer.push(": [");
+        for (index, variant) in variants.iter().enumerate() {
+            if index > 0 {
+                writer.push(", ");
+            }
+            mark_ts_string(
+                writer,
+                error_tag_symbol_id(variant),
+                "errorTag",
+                &variant.tag,
+            );
+        }
+        writer.push("],\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn write_tracked_error_schema_by_status_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(
+        &error.id,
+        "error",
+        &format!("{}SchemaByStatus", error.ts_name),
+    );
+    writer.push(" = {\n");
+    for (status, variants) in error_variants_by_status(error) {
+        writer.push("  ");
+        writer.push(&status.to_string());
+        writer.push(": ");
+        if variants.len() == 1 {
+            let variant = variants[0];
+            writer.mark(
+                &variant.id,
+                "errorVariant",
+                &error_variant_class_name(error, variant),
+            );
+        } else {
+            writer.push("Schema.Union([");
+            for (index, variant) in variants.iter().enumerate() {
+                if index > 0 {
+                    writer.push(", ");
+                }
+                writer.mark(
+                    &variant.id,
+                    "errorVariant",
+                    &error_variant_class_name(error, variant),
+                );
+            }
+            writer.push("])");
+        }
+        writer.push(",\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn error_variants_by_status(error: &ErrorDef) -> BTreeMap<u16, Vec<&ErrorVariant>> {
+    let mut by_status = BTreeMap::<u16, Vec<&ErrorVariant>>::new();
+    for variant in &error.variants {
+        by_status.entry(variant.status.0).or_default().push(variant);
+    }
+    for variants in by_status.values_mut() {
+        variants.sort_by(|left, right| {
+            left.tag
+                .cmp(&right.tag)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+    }
+    by_status
+}
+
+fn write_tracked_error_symbol_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(&error.id, "error", &format!("{}Symbols", error.ts_name));
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        mark_property_key(
+            writer,
+            &SymbolId::new(error_tag_symbol_id(variant)),
+            "errorTag",
+            &variant.tag,
+        );
+        writer.push(": {\n");
+        writer.push("    symbolId: ");
+        writer.push(&ts_string(variant.id.as_str()));
+        writer.push(",\n    rustName: ");
+        writer.push(&ts_string(&variant.rust_name));
+        writer.push(",\n    source: ");
+        writer.push(&render_source_range(&variant.source, 4));
+        writer.push(",\n  },\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
+    let mut writer = TrackedWriter::new("layer.ts");
+    writer.push(&render_package_banner(contract));
+    let mut effect_imports = vec!["Context", "Layer", "Effect"];
+    if contract_has_stream_endpoints(contract) {
+        effect_imports.push("Stream");
+    }
+    if contract_has_primitive_success(contract) {
+        effect_imports.push("Schema");
+    }
+    write_effect_compat_import(&mut writer, &effect_imports.join(", "));
+    let runtime_client_imports = collect_runtime_client_imports(contract);
+    if !runtime_client_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &runtime_client_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"@typeweld/effect-runtime\"\n");
+    }
+
+    let endpoint_namespaces = collect_endpoint_namespaces(contract);
+    if !endpoint_namespaces.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &endpoint_namespaces
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./endpoints\"\n");
+    }
+
+    let schema_imports = collect_service_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+
+    let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
+    if !error_metadata_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &error_metadata_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./errors\"\n");
+    }
+
+    let error_type_imports = collect_endpoint_error_imports(contract);
+    writer.push("import type { ");
+    writer.push(
+        &error_type_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    writer.push(" } from \"./errors\"\n\n");
+
+    writer.push("export interface ServerApiConfig {\n");
+    writer.push("  readonly baseUrl: string\n");
+    writer.push("  readonly timeoutMs?: number\n");
+    writer.push("  readonly fetch?: typeof fetch\n");
+    writer.push("}\n\n");
+
+    writer.push(&format!(
+        "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()({}) {{}}\n\n",
+        ts_string(&format!("{}::ServerApi", contract.package_name))
+    ));
+
+    writer.push("export namespace ServerApi {\n");
+    write_tracked_service_interface(&mut writer, contract, options);
+    writer.push("\n");
+    writer.push("  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> => {\n");
+    writer.push("    const service: Service = {\n");
+    write_tracked_fetch_service(&mut writer, contract, options);
+    writer.push("    }\n");
+    writer.push("    return Layer.succeed(ServerApi, ServerApi.of(service))\n");
+    writer.push("  }\n\n");
+    writer.push("  export const mock = (service: Service): Layer.Layer<ServerApi> =>\n");
+    writer.push("    Layer.succeed(ServerApi, ServerApi.of(service))\n");
+    writer.push("}\n");
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_service_interface(
+    writer: &mut TrackedWriter,
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) {
+    writer.push("  export interface Service {\n");
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        writer.push("    readonly ");
+        writer.push(&namespace);
+        writer.push(": {\n");
+        for endpoint in endpoints {
+            writer.push("      readonly ");
+            writer.mark(&endpoint.id, "endpoint", &endpoint_function_name(endpoint));
+            writer.push(": (args: ");
+            writer.push(&endpoint_namespace(endpoint));
+            writer.push(".");
+            writer.push(&endpoint_args_name(endpoint));
+            writer.push(") => ");
+            writer.push(&render_endpoint_return_type(endpoint, "never", options));
+            writer.push("\n");
+        }
+        writer.push("    }\n");
+    }
+
+    writer.push("  }\n");
+}
+
+fn write_tracked_fetch_service(
+    writer: &mut TrackedWriter,
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) {
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        writer.push("      ");
+        writer.push(&namespace);
+        writer.push(": {\n");
+        for endpoint in endpoints {
+            write_tracked_fetch_service_method(writer, endpoint, options);
+        }
+        writer.push("      },\n");
+    }
+}
+
+fn write_tracked_fetch_service_method(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
+    let function_name = endpoint_function_name(endpoint);
+    let namespace = endpoint_namespace(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let helper = render_runtime_client_helper(endpoint);
+    let error_decoder = render_domain_error_decoder(endpoint, helper);
+    let success = render_response_type(&endpoint.response, options);
+    let domain_error = render_endpoint_domain_error_type(endpoint);
+
+    writer.push("        ");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push(": ");
+    writer.push(helper);
+    writer.push("<");
+    writer.push(&namespace);
+    writer.push(".");
+    writer.push(&args_name);
+    if endpoint.transport != Transport::BinaryDownload {
+        writer.push(", ");
+        writer.push(&success);
+    }
+    writer.push(", ");
+    writer.push(&domain_error);
+    writer.push(">(config, {\n          method: ");
+    writer.push(&ts_string(endpoint.method.as_str()));
+    writer.push(",\n          path: ");
+    writer.push(&namespace);
+    writer.push(".");
+    writer.push(&function_name);
+    writer.push("Route.path,\n          encode: ");
+    writer.push(&render_request_encoder(
+        endpoint,
+        helper,
+        &format!("{namespace}.{args_name}"),
+    ));
+    if endpoint.transport != Transport::BinaryDownload {
+        let success_decoder = render_success_decoder(&endpoint.response, helper, options);
+        writer.push(",\n          decodeSuccess: ");
+        writer.push(&success_decoder);
+    }
+    writer.push(",\n          decodeError: ");
+    writer.push(&error_decoder);
+    writer.push(",\n        }),\n");
+}
+
+fn render_endpoint_arg_field_type(field: &Field, options: &EffectRenderOptions) -> String {
+    let mut field_type = render_ts_type_ref(&field.type_ref, options);
+    if matches!(
+        field.optionality,
+        Optionality::Nullable | Optionality::OptionalNullable
+    ) {
+        field_type.push_str(" | null");
+    }
+    field_type
+}
+
+fn mark_property_key(writer: &mut TrackedWriter, symbol_id: &SymbolId, kind: &str, property: &str) {
+    writer.mark(symbol_id, kind, &render_property_key(property));
+}
+
+fn mark_ts_string(writer: &mut TrackedWriter, symbol_id: String, kind: &str, value: &str) {
+    writer.mark_synthetic(symbol_id, kind, &ts_string(value));
+}
+
+fn collect_endpoint_namespaces(contract: &ApiContract) -> BTreeSet<String> {
+    contract.endpoints.iter().map(endpoint_namespace).collect()
+}
+
+fn collect_runtime_client_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        match endpoint.transport {
+            Transport::UnaryHttp => {
+                imports.insert("makeUnaryHttpClient".to_owned());
+            }
+            Transport::ServerSentEvents => {
+                imports.insert("makeSseClient".to_owned());
+            }
+            Transport::BinaryDownload => {
+                imports.insert("makeBinaryDownloadClient".to_owned());
+            }
+            Transport::BinaryUpload => {
+                imports.insert("makeBinaryUploadClient".to_owned());
+            }
+            Transport::WebSocketDuplex => {}
+        }
+    }
+    imports
+}
+
+fn contract_has_stream_endpoints(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| matches!(endpoint.response, ResponseShape::Stream(_)))
+}
+
+fn contract_has_binary_upload_endpoints(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| endpoint.request.body_transport == RequestBodyTransport::Binary)
+}
+
+fn contract_has_primitive_success(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| match &endpoint.response {
+            ResponseShape::Empty | ResponseShape::Binary { .. } => false,
+            ResponseShape::Json(type_ref)
+            | ResponseShape::Created(type_ref)
+            | ResponseShape::Stream(type_ref) => primitive_from_type_ref(type_ref).is_some(),
+        })
+}
+
+fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        collect_request_type_imports(&endpoint.request, &mut imports);
+        collect_response_type_imports(&endpoint.response, &mut imports);
+    }
+    imports
+}
+
+fn group_endpoints_by_namespace(contract: &ApiContract) -> Vec<(String, Vec<&Endpoint>)> {
+    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        endpoint_namespace(left)
+            .cmp(&endpoint_namespace(right))
+            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let mut grouped = Vec::<(String, Vec<&Endpoint>)>::new();
+    for endpoint in endpoints {
+        let namespace = endpoint_namespace(endpoint);
+        if grouped.last().map(|(name, _)| name.as_str()) != Some(namespace.as_str()) {
+            grouped.push((namespace, Vec::new()));
+        }
+        grouped
+            .last_mut()
+            .expect("namespace group exists")
+            .1
+            .push(endpoint);
+    }
+
+    grouped
+}
+
+fn collect_endpoint_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        collect_request_type_imports(&endpoint.request, &mut imports);
+        collect_response_type_imports(&endpoint.response, &mut imports);
+    }
+    imports
+}
+
+fn collect_request_type_imports(request: &RequestShape, imports: &mut BTreeSet<String>) {
+    for field in request
+        .path_params
+        .iter()
+        .chain(request.query_params.iter())
+    {
+        collect_type_ref_import(&field.type_ref, imports);
+    }
+    if request.body_transport != RequestBodyTransport::Binary {
+        if let Some(body) = &request.body {
+            collect_type_ref_import(body, imports);
+        }
+    }
+}
+
+fn collect_response_type_imports(response: &ResponseShape, imports: &mut BTreeSet<String>) {
+    match response {
+        ResponseShape::Empty | ResponseShape::Binary { .. } => {}
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => {
+            collect_type_ref_import(type_ref, imports);
+        }
+    }
+}
+
+fn collect_type_ref_import(type_ref: &TypeRef, imports: &mut BTreeSet<String>) {
+    if primitive_from_type_ref(type_ref).is_none() {
+        imports.insert(type_ref.name.clone());
+    }
+}
+
+fn collect_endpoint_error_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::from(["ApiClientError".to_owned()]);
+    for endpoint in &contract.endpoints {
+        imports.extend(endpoint.errors.iter().map(|error| error.name.clone()));
+    }
+    imports
+}
+
+fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for endpoint in &contract.endpoints {
+        for error in &endpoint.errors {
+            imports.insert(format!("{}SchemaByStatus", error.name));
+        }
+    }
+    imports
+}
+
+fn render_response_type(response: &ResponseShape, options: &EffectRenderOptions) -> String {
+    match response {
+        ResponseShape::Empty => "void".to_owned(),
+        ResponseShape::Binary { .. } => "Uint8Array".to_owned(),
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => render_ts_type_ref(type_ref, options),
+    }
+}
+
+fn render_endpoint_return_type(
+    endpoint: &Endpoint,
+    requirements: &str,
+    options: &EffectRenderOptions,
+) -> String {
+    let success = render_response_type(&endpoint.response, options);
+    let error = render_endpoint_error_type(endpoint);
+
+    match &endpoint.response {
+        ResponseShape::Stream(_) => {
+            format!("Stream.Stream<{success}, {error}, {requirements}>")
+        }
+        ResponseShape::Empty
+        | ResponseShape::Json(_)
+        | ResponseShape::Created(_)
+        | ResponseShape::Binary { .. } => {
+            format!("Effect.Effect<{success}, {error}, {requirements}>")
+        }
+    }
+}
+
+fn render_endpoint_error_type(endpoint: &Endpoint) -> String {
+    let domain_error = render_endpoint_domain_error_type(endpoint);
+    if domain_error == "never" {
+        return "ApiClientError".to_owned();
+    }
+    format!("ApiClientError | {domain_error}")
+}
+
+fn render_endpoint_domain_error_type(endpoint: &Endpoint) -> String {
+    let mut errors = endpoint
+        .errors
+        .iter()
+        .map(|error| error.name.clone())
+        .collect::<Vec<_>>();
+    errors.sort();
+    errors.dedup();
+    if errors.is_empty() {
+        "never".to_owned()
+    } else {
+        errors.join(" | ")
+    }
+}
+
+fn render_ts_type_ref(type_ref: &TypeRef, options: &EffectRenderOptions) -> String {
+    match primitive_from_type_ref(type_ref) {
+        Some(Primitive::Bool) => "boolean".to_owned(),
+        Some(Primitive::String) => "string".to_owned(),
+        Some(primitive) if primitive_is_unsafe_integer(primitive) => {
+            match options.unsafe_integer_encoding {
+                UnsafeIntegerEncoding::StringEncoded => "bigint".to_owned(),
+                UnsafeIntegerEncoding::Number => "number".to_owned(),
+            }
+        }
+        Some(_) => "number".to_owned(),
+        None => type_ref.name.clone(),
+    }
+}
+
+fn render_request_encoder(endpoint: &Endpoint, helper: &str, args_type: &str) -> String {
+    let request = &endpoint.request;
+    let namespace = endpoint_namespace(endpoint);
+    let args_schema_name = endpoint_args_schema_name(endpoint);
+
+    if request.path_params.is_empty() && request.query_params.is_empty() && request.body.is_none() {
+        return format!(
+            "(args: {args_type}) => {{
+            {helper}.encode(args, {namespace}.{args_schema_name})
+            return {{}}
+          }}"
+        );
+    }
+
+    let mut lines = Vec::new();
+
+    if !request.path_params.is_empty() {
+        lines.push("path: {".to_owned());
+        for field in &request.path_params {
+            lines.push(format!(
+                "              {}: {},",
+                render_property_key(&field.wire_name),
+                render_property_access("encoded", &field.ts_name)
+            ));
+        }
+        lines.push("            },".to_owned());
+    }
+
+    if !request.query_params.is_empty() {
+        lines.push("query: {".to_owned());
+        for field in &request.query_params {
+            lines.push(format!(
+                "              {}: {},",
+                render_property_key(&field.wire_name),
+                render_property_access("encoded", &field.ts_name)
+            ));
+        }
+        lines.push("            },".to_owned());
+    }
+
+    if request.body.is_some() {
+        lines.push("body: encoded.body,".to_owned());
+        if request.body_transport == RequestBodyTransport::Binary {
+            lines.push("bodyKind: \"binary\",".to_owned());
+        }
+    }
+
+    format!(
+        "(args: {args_type}) => {{
+            const encoded = {helper}.encode(args, {namespace}.{args_schema_name})
+            return {{
+            {}
+            }}
+          }}",
+        lines.join("\n            "),
+        args_type = args_type,
+    )
+}
+
+fn render_success_decoder(
+    response: &ResponseShape,
+    helper: &str,
+    options: &EffectRenderOptions,
+) -> String {
+    match response {
+        ResponseShape::Empty => "() => Effect.void",
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => {
+            return format!(
+                "(input) => {helper}.decode(input, {})",
+                render_type_ref(type_ref, options)
+            );
+        }
+        ResponseShape::Binary { .. } => {
+            unreachable!("binary downloads do not use JSON success decoders")
+        }
+    }
+    .to_owned()
+}
+
+fn render_domain_error_decoder(endpoint: &Endpoint, helper: &str) -> String {
+    if endpoint.errors.is_empty() {
+        return "() => undefined".to_owned();
+    }
+
+    let domain_error = render_endpoint_domain_error_type(endpoint);
+    let mut output = "(status, input) => {\n".to_owned();
+    for error in &endpoint.errors {
+        output.push_str("            const ");
+        output.push_str(&error.name);
+        output.push_str("Schema = ");
+        output.push_str(&error.name);
+        output.push_str("SchemaByStatus[status as keyof typeof ");
+        output.push_str(&error.name);
+        output.push_str("SchemaByStatus]\n");
+        output.push_str("            if (");
+        output.push_str(&error.name);
+        output.push_str("Schema !== undefined) {\n");
+        output.push_str("              return ");
+        output.push_str(helper);
+        output.push_str(".decode(input, ");
+        output.push_str(&error.name);
+        output.push_str("Schema) as Effect.Effect<");
+        output.push_str(&domain_error);
+        output.push_str(", ApiClientError>\n");
+        output.push_str("            }\n");
+    }
+    output.push_str("            return undefined\n");
+    output.push_str("          }");
+    output
+}
+
+fn render_runtime_client_helper(endpoint: &Endpoint) -> &'static str {
+    match endpoint.transport {
+        Transport::UnaryHttp => "makeUnaryHttpClient",
+        Transport::ServerSentEvents => "makeSseClient",
+        Transport::BinaryDownload => "makeBinaryDownloadClient",
+        Transport::BinaryUpload => "makeBinaryUploadClient",
+        Transport::WebSocketDuplex => {
+            panic!("WebSocket duplex endpoints are IR placeholders and are not generated yet")
+        }
+    }
+}
+
+fn endpoint_namespace(endpoint: &Endpoint) -> String {
+    endpoint
+        .ts_path
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "api".to_owned())
+}
+
+fn endpoint_function_name(endpoint: &Endpoint) -> String {
+    endpoint
+        .ts_path
+        .last()
+        .cloned()
+        .filter(|name| name != &endpoint_namespace(endpoint))
+        .unwrap_or_else(|| endpoint.rust_name.clone())
+}
+
+fn endpoint_args_name(endpoint: &Endpoint) -> String {
+    format!("{}Args", to_pascal_case(&endpoint_function_name(endpoint)))
+}
+
+fn endpoint_args_schema_name(endpoint: &Endpoint) -> String {
+    format!("{}Schema", endpoint_args_name(endpoint))
+}
+
+fn endpoint_args_encoded_name(endpoint: &Endpoint) -> String {
+    format!("{}Encoded", endpoint_args_name(endpoint))
+}
+
+const fn render_transport(transport: Transport) -> &'static str {
+    match transport {
+        Transport::UnaryHttp => "UnaryHttp",
+        Transport::ServerSentEvents => "ServerSentEvents",
+        Transport::WebSocketDuplex => "WebSocketDuplex",
+        Transport::BinaryDownload => "BinaryDownload",
+        Transport::BinaryUpload => "BinaryUpload",
+    }
+}
+
+fn collect_error_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
+    contract
+        .errors
+        .iter()
+        .flat_map(|error| error.variants.iter())
+        .flat_map(|variant| variant.fields.iter())
+        .filter_map(|field| {
+            primitive_from_type_ref(&field.type_ref)
+                .is_none()
+                .then(|| field.type_ref.name.clone())
+        })
+        .collect()
+}
+
+fn render_client_errors() -> String {
+    let client_errors = [
+        (
+            "NetworkError",
+            "NetworkError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "TimeoutError",
+            "TimeoutError",
+            vec![
+                ("message", "Schema.String"),
+                ("timeoutMs", "Schema.optionalKey(Schema.Number)"),
+            ],
+        ),
+        (
+            "EncodeError",
+            "EncodeError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "DecodeError",
+            "DecodeError",
+            vec![
+                ("message", "Schema.String"),
+                ("cause", "Schema.optionalKey(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "UnexpectedStatusError",
+            "UnexpectedStatusError",
+            vec![
+                ("message", "Schema.String"),
+                ("status", "Schema.Number"),
+                ("body", "Schema.optionalKey(Schema.Unknown)"),
+            ],
+        ),
+        (
+            "RemoteProtocolError",
+            "RemoteProtocolError",
+            vec![
+                ("message", "Schema.String"),
+                ("body", "Schema.optionalKey(Schema.Unknown)"),
+            ],
+        ),
+    ];
+
+    let mut output = String::new();
+    for (class_name, tag, fields) in &client_errors {
+        output.push_str(&render_tagged_error_class(class_name, tag, &fields));
+        output.push('\n');
+    }
+    output.push_str("export type ApiClientError =\n");
+    output.push_str(
+        &client_errors
+            .iter()
+            .map(|(class_name, _, _)| format!("  | {class_name}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    output.push('\n');
+    output
+}
+
+fn render_tagged_error_class(class_name: &str, tag: &str, fields: &[(&str, &str)]) -> String {
+    let mut output = format!(
+        "export class {class_name} extends Schema.TaggedErrorClass<{class_name}>()(\n  {},\n",
+        ts_string(tag)
+    );
+
+    if fields.is_empty() {
+        output.push_str("  {}\n");
+    } else {
+        output.push_str("  {\n");
+        for (field_name, schema) in fields {
+            output.push_str("    ");
+            output.push_str(&render_property_key(field_name));
+            output.push_str(": ");
+            output.push_str(schema);
+            output.push_str(",\n");
+        }
+        output.push_str("  }\n");
+    }
+
+    output.push_str(") {}\n");
+    output
+}
+
+fn render_source_range(source: &SourceRange, indent: usize) -> String {
+    format!(
+        "{{\n{indent}  file: {file},\n{indent}  startLine: {start_line},\n{indent}  startColumn: {start_column},\n{indent}  endLine: {end_line},\n{indent}  endColumn: {end_column},\n{indent}}}",
+        indent = render_indent(indent),
+        file = ts_string(&source.file),
+        start_line = source.start_line,
+        start_column = source.start_column,
+        end_line = source.end_line,
+        end_column = source.end_column,
+    )
+}
+
+fn error_variant_class_name(error: &ErrorDef, variant: &ErrorVariant) -> String {
+    let prefix = error
+        .ts_name
+        .strip_suffix("Error")
+        .unwrap_or(&error.ts_name);
+    format!("{prefix}{}", variant.rust_name)
+}
+
+#[cfg(test)]
+fn render_type_shape(shape: &TypeShape, owner: &TypeDef) -> String {
+    render_type_shape_with_options(shape, owner, &EffectRenderOptions::default())
+}
+
+fn render_type_shape_with_options(
+    shape: &TypeShape,
+    owner: &TypeDef,
+    options: &EffectRenderOptions,
+) -> String {
+    match shape {
+        TypeShape::Primitive(primitive) => render_primitive(*primitive, options).to_owned(),
+        TypeShape::Struct(shape) => render_struct(shape, 0, options),
+        TypeShape::Enum(shape) => render_enum(shape, 0, options),
+        TypeShape::Newtype(inner) => format!(
+            "{inner}.pipe(Schema.brand(\"{brand}\"))",
+            inner = render_type_ref(inner, options),
+            brand = owner.rust_path.join("::")
+        ),
+        TypeShape::Tuple(items) => {
+            let items = items
+                .iter()
+                .map(|item| render_type_ref(item, options))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Schema.Tuple([{items}])")
+        }
+        TypeShape::List(item) => format!("Schema.Array({})", render_type_ref(item, options)),
+        TypeShape::Map { key, value } => format!(
+            "Schema.Record({}, {})",
+            render_type_ref(key, options),
+            render_type_ref(value, options)
+        ),
+        TypeShape::Option(item) => format!("Schema.NullOr({})", render_type_ref(item, options)),
+        TypeShape::External(external) => render_external(external),
+    }
+}
+
+fn render_struct(shape: &StructShape, indent: usize, options: &EffectRenderOptions) -> String {
+    if shape.fields.is_empty() {
+        return "Schema.Struct({})".to_owned();
+    }
+
+    let mut output = "Schema.Struct({\n".to_owned();
+    for field in &shape.fields {
+        output.push_str(&render_indent(indent + 2));
+        output.push_str(&field.ts_name);
+        output.push_str(": ");
+        output.push_str(&render_field_schema(field, options));
+        output.push_str(",\n");
+    }
+    output.push_str(&render_indent(indent));
+    output.push_str("})");
+    output
+}
+
+fn render_enum(shape: &EnumShape, indent: usize, options: &EffectRenderOptions) -> String {
+    if shape.variants.is_empty() {
+        return "Schema.Never".to_owned();
+    }
+
+    let variants = shape
+        .variants
+        .iter()
+        .map(|variant| render_enum_variant(variant, indent, options))
+        .collect::<Vec<_>>();
+
+    format!("Schema.Union([{}])", variants.join(", "))
+}
+
+fn render_enum_variant(
+    variant: &EnumVariant,
+    indent: usize,
+    options: &EffectRenderOptions,
+) -> String {
+    let mut fields = vec![format!("_tag: Schema.Literal(\"{}\")", variant.wire_name)];
+    fields.extend(
+        variant
+            .fields
+            .iter()
+            .map(|field| format!("{}: {}", field.ts_name, render_field_schema(field, options))),
+    );
+
+    if fields.len() == 1 {
+        return format!("Schema.Struct({{ {} }})", fields[0]);
+    }
+
+    let mut output = "Schema.Struct({\n".to_owned();
+    for field in fields {
+        output.push_str(&render_indent(indent + 2));
+        output.push_str(&field);
+        output.push_str(",\n");
+    }
+    output.push_str(&render_indent(indent));
+    output.push_str("})");
+    output
+}
+
+fn render_field_schema(field: &Field, options: &EffectRenderOptions) -> String {
+    let schema = render_type_ref(&field.type_ref, options);
+    match field.optionality {
+        Optionality::Required => schema,
+        Optionality::Optional => format!("Schema.optionalKey({schema})"),
+        Optionality::Nullable => format!("Schema.NullOr({schema})"),
+        Optionality::OptionalNullable => format!("Schema.optionalKey(Schema.NullOr({schema}))"),
+    }
+}
+
+fn render_type_ref(type_ref: &TypeRef, options: &EffectRenderOptions) -> String {
+    match primitive_from_type_ref(type_ref) {
+        Some(primitive) => render_primitive(primitive, options).to_owned(),
+        None => type_ref.name.clone(),
+    }
+}
+
+fn render_primitive(primitive: Primitive, options: &EffectRenderOptions) -> &'static str {
+    match primitive {
+        Primitive::Bool => "Schema.Boolean",
+        Primitive::String => "Schema.String",
+        primitive if primitive_is_unsafe_integer(primitive) => {
+            match options.unsafe_integer_encoding {
+                UnsafeIntegerEncoding::StringEncoded => "Schema.BigIntFromString",
+                UnsafeIntegerEncoding::Number => "Schema.Number",
+            }
+        }
+        _ => "Schema.Number",
+    }
+}
+
+fn primitive_from_type_ref(type_ref: &TypeRef) -> Option<Primitive> {
+    match type_ref.name.as_str() {
+        "bool" | "Bool" | "boolean" => Some(Primitive::Bool),
+        "i8" | "I8" => Some(Primitive::I8),
+        "u8" | "U8" => Some(Primitive::U8),
+        "i16" | "I16" => Some(Primitive::I16),
+        "u16" | "U16" => Some(Primitive::U16),
+        "i32" | "I32" => Some(Primitive::I32),
+        "u32" | "U32" => Some(Primitive::U32),
+        "i64" | "I64" => Some(Primitive::I64),
+        "u64" | "U64" => Some(Primitive::U64),
+        "i128" | "I128" => Some(Primitive::I128),
+        "u128" | "U128" => Some(Primitive::U128),
+        "usize" | "Usize" => Some(Primitive::Usize),
+        "isize" | "Isize" => Some(Primitive::Isize),
+        "f32" | "F32" => Some(Primitive::F32),
+        "f64" | "F64" | "number" => Some(Primitive::F64),
+        "String" | "string" => Some(Primitive::String),
+        _ => None,
+    }
+}
+
+const fn primitive_is_unsafe_integer(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::I64
+            | Primitive::U64
+            | Primitive::I128
+            | Primitive::U128
+            | Primitive::Usize
+            | Primitive::Isize
+    )
+}
+
+fn render_external(external: &ExternalType) -> String {
+    if external_rust_path_is(external, &["uuid", "Uuid"]) {
+        return render_branded_string_schema("Uuid", "Schema.check(Schema.isUUID())");
+    }
+    if external_rust_path_is(external, &["chrono", "DateTime", "Utc"]) {
+        return render_branded_string_schema(
+            "DateTimeUtc",
+            "Schema.refine((value): value is string => Schema.decodeUnknownOption(Schema.DateTimeUtcFromString)(value)._tag === \"Some\", { expected: \"a valid UTC date-time string\" })",
+        );
+    }
+    if external_rust_path_is(external, &["rust_decimal", "Decimal"]) {
+        return render_branded_string_schema(
+            "Decimal",
+            "Schema.check(Schema.isPattern(/^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$/))",
+        );
+    }
+    if external_rust_path_is(external, &["serde_json", "Value"]) {
+        return "Schema.Json".to_owned();
+    }
+    if external_rust_path_is(external, &["bytes", "Bytes"]) {
+        return render_branded_string_schema("Bytes", "Schema.check(Schema.isBase64())");
+    }
+
+    if external.encoded_ts_name == external.decoded_ts_name {
+        format!(
+            "Schema.declare<{}>((value): value is {} => true)",
+            external.ts_name, external.ts_name
+        )
+    } else {
+        format!(
+            "Schema.declare<{}>((value): value is {} => true)",
+            external.decoded_ts_name, external.decoded_ts_name
+        )
+    }
+}
+
+fn render_branded_string_schema(brand: &str, validation: &str) -> String {
+    format!(
+        "Schema.String.pipe({validation}, Schema.brand({brand}))",
+        brand = ts_string(brand)
+    )
+}
+
+fn external_rust_path_is(external: &ExternalType, expected: &[&str]) -> bool {
+    external.rust_path.len() == expected.len()
+        && external
+            .rust_path
+            .iter()
+            .map(String::as_str)
+            .zip(expected.iter().copied())
+            .all(|(actual, expected)| actual == expected)
+}
+
+fn render_indent(width: usize) -> String {
+    " ".repeat(width)
+}
+
+fn render_property_key(key: &str) -> String {
+    if is_identifier(key) {
+        key.to_owned()
+    } else {
+        ts_string(key)
+    }
+}
+
+fn render_property_access(receiver: &str, key: &str) -> String {
+    if is_identifier(key) {
+        format!("{receiver}.{key}")
+    } else {
+        format!("{receiver}[{}]", ts_string(key))
+    }
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|char| char == '_' || char == '$' || char.is_ascii_alphanumeric())
+}
+
+fn ts_string(value: &str) -> String {
+    let mut output = "\"".to_owned();
+    for char in value.chars() {
+        match char {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            char => output.push(char),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn sanitize_package_dir_name(package_name: &str) -> String {
+    package_name
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || char == '-' || char == '_' || char == '.' {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn to_pascal_case(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = true;
+    for char in value.chars() {
+        if char == '_' || char == '-' || char == ' ' {
+            uppercase_next = true;
+            continue;
+        }
+
+        if uppercase_next {
+            output.extend(char.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(char);
+        }
+    }
+    output
+}
+
+fn trim_trailing_blank_lines(mut output: String) -> String {
+    while output.ends_with("\n\n") {
+        output.pop();
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use typeweld_ir::{
+        ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant,
+        ExternalType, Field, HttpMethod, HttpStatus, Optionality, Primitive, RequestBodyTransport,
+        RequestShape, ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId, Transport,
+        TypeDef, TypeRef, TypeShape,
+    };
+
+    use super::*;
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn renders_struct_schemas_with_aliases() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            types: vec![TypeDef {
+                id: symbol("type", &["User"]),
+                rust_path: vec!["server".to_owned(), "users".to_owned(), "User".to_owned()],
+                rust_name: "User".to_owned(),
+                ts_name: "User".to_owned(),
+                shape: TypeShape::Struct(StructShape {
+                    fields: vec![
+                        field("id", "id", type_ref("UserId"), Optionality::Required),
+                        field(
+                            "display_name",
+                            "displayName",
+                            type_ref("String"),
+                            Optionality::Required,
+                        ),
+                        field(
+                            "avatar_url",
+                            "avatarURL",
+                            type_ref("String"),
+                            Optionality::Nullable,
+                        ),
+                        field(
+                            "nickname",
+                            "nickname",
+                            type_ref("String"),
+                            Optionality::OptionalNullable,
+                        ),
+                        field(
+                            "timezone",
+                            "timezone",
+                            type_ref("String"),
+                            Optionality::Optional,
+                        ),
+                    ],
+                }),
+                source: source(),
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_schemas(&contract);
+
+        assert_eq!(
+            rendered,
+            r#"// Generated API package for @workspace/server-api
+import { Schema } from "@typeweld/effect-runtime/compat"
+
+export const User = Schema.Struct({
+  id: UserId,
+  displayName: Schema.String,
+  avatarURL: Schema.NullOr(Schema.String),
+  nickname: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  timezone: Schema.optionalKey(Schema.String),
+})
+export type User = Schema.Schema.Type<typeof User>
+export type UserEncoded = Schema.Codec.Encoded<typeof User>
+"#
+        );
+    }
+
+    #[test]
+    fn renders_newtypes_and_enums() {
+        let contract = ApiContract {
+            package_name: "example-api".to_owned(),
+            types: vec![
+                TypeDef {
+                    id: symbol("type", &["UserId"]),
+                    rust_path: vec!["server".to_owned(), "users".to_owned(), "UserId".to_owned()],
+                    rust_name: "UserId".to_owned(),
+                    ts_name: "UserId".to_owned(),
+                    shape: TypeShape::Newtype(Box::new(type_ref("String"))),
+                    source: source(),
+                },
+                TypeDef {
+                    id: symbol("type", &["UserEvent"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "users".to_owned(),
+                        "UserEvent".to_owned(),
+                    ],
+                    rust_name: "UserEvent".to_owned(),
+                    ts_name: "UserEvent".to_owned(),
+                    shape: TypeShape::Enum(EnumShape {
+                        variants: vec![
+                            EnumVariant {
+                                id: symbol("variant", &["UserEvent", "Created"]),
+                                rust_name: "Created".to_owned(),
+                                wire_name: "created".to_owned(),
+                                fields: Vec::new(),
+                                source: source(),
+                            },
+                            EnumVariant {
+                                id: symbol("variant", &["UserEvent", "Renamed"]),
+                                rust_name: "Renamed".to_owned(),
+                                wire_name: "renamed".to_owned(),
+                                fields: vec![field(
+                                    "display_name",
+                                    "displayName",
+                                    type_ref("String"),
+                                    Optionality::Required,
+                                )],
+                                source: source(),
+                            },
+                        ],
+                    }),
+                    source: source(),
+                },
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_schemas(&contract);
+
+        assert!(rendered.contains(
+            "export const UserId = Schema.String.pipe(Schema.brand(\"server::users::UserId\"))"
+        ));
+        assert!(rendered.contains(
+            "export const UserEvent = Schema.Union([Schema.Struct({ _tag: Schema.Literal(\"created\") }), Schema.Struct({\n  _tag: Schema.Literal(\"renamed\"),\n  displayName: Schema.String,\n})])"
+        ));
+    }
+
+    #[test]
+    fn renders_collection_shapes() {
+        let owner = TypeDef {
+            id: symbol("type", &["Lookup"]),
+            rust_path: vec!["Lookup".to_owned()],
+            rust_name: "Lookup".to_owned(),
+            ts_name: "Lookup".to_owned(),
+            shape: TypeShape::Map {
+                key: Box::new(type_ref("String")),
+                value: Box::new(type_ref("User")),
+            },
+            source: source(),
+        };
+
+        assert_eq!(
+            render_type_shape(&owner.shape, &owner),
+            "Schema.Record(Schema.String, User)"
+        );
+
+        let owner = TypeDef {
+            shape: TypeShape::List(Box::new(type_ref("User"))),
+            ..owner
+        };
+        assert_eq!(
+            render_type_shape(&owner.shape, &owner),
+            "Schema.Array(User)"
+        );
+
+        let owner = TypeDef {
+            shape: TypeShape::Option(Box::new(type_ref("User"))),
+            ..owner
+        };
+        assert_eq!(
+            render_type_shape(&owner.shape, &owner),
+            "Schema.NullOr(User)"
+        );
+    }
+
+    #[test]
+    fn renders_integer_wire_mappings_and_unsafe_number_opt_in() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            types: vec![TypeDef {
+                id: symbol("type", &["Counters"]),
+                rust_path: vec!["server".to_owned(), "Counters".to_owned()],
+                rust_name: "Counters".to_owned(),
+                ts_name: "Counters".to_owned(),
+                shape: TypeShape::Struct(StructShape {
+                    fields: vec![
+                        field(
+                            "safe_i32",
+                            "safeI32",
+                            type_ref("i32"),
+                            Optionality::Required,
+                        ),
+                        field(
+                            "safe_u32",
+                            "safeU32",
+                            type_ref("u32"),
+                            Optionality::Required,
+                        ),
+                        field("float", "float", type_ref("f64"), Optionality::Required),
+                        field("id_i64", "idI64", type_ref("i64"), Optionality::Required),
+                        field("id_u64", "idU64", type_ref("u64"), Optionality::Required),
+                        field("id_i128", "idI128", type_ref("i128"), Optionality::Required),
+                        field("id_u128", "idU128", type_ref("u128"), Optionality::Required),
+                        field("index", "index", type_ref("usize"), Optionality::Required),
+                        field("offset", "offset", type_ref("isize"), Optionality::Required),
+                    ],
+                }),
+                source: source(),
+            }],
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_count"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_count".to_owned(),
+                ],
+                rust_name: "get_count".to_owned(),
+                ts_path: vec!["users".to_owned(), "getCount".to_owned()],
+                route: RoutePattern("/counts/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("i64"), Optionality::Required)],
+                    query_params: Vec::new(),
+                    body: None,
+                    body_transport: RequestBodyTransport::Json,
+                },
+                response: ResponseShape::Json(type_ref("i64")),
+                errors: Vec::new(),
+                source: source(),
+                router_mounts: Vec::new(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let schemas = render_schemas(&contract);
+        assert!(schemas.contains("safeI32: Schema.Number"));
+        assert!(schemas.contains("safeU32: Schema.Number"));
+        assert!(schemas.contains("float: Schema.Number"));
+        assert!(schemas.contains("idI64: Schema.BigIntFromString"));
+        assert!(schemas.contains("idU64: Schema.BigIntFromString"));
+        assert!(schemas.contains("idI128: Schema.BigIntFromString"));
+        assert!(schemas.contains("idU128: Schema.BigIntFromString"));
+        assert!(schemas.contains("index: Schema.BigIntFromString"));
+        assert!(schemas.contains("offset: Schema.BigIntFromString"));
+
+        let endpoints = render_endpoints(&contract);
+        assert!(endpoints.contains("readonly id: bigint;"));
+        assert!(endpoints.contains("id: Schema.BigIntFromString"));
+        assert!(endpoints.contains("): Effect.Effect<bigint, ApiClientError, ServerApi> =>"));
+
+        let layer = render_layer(&contract);
+        assert!(layer.contains(
+            "import { Context, Layer, Effect, Schema } from \"@typeweld/effect-runtime/compat\""
+        ));
+        assert!(layer.contains(
+            "decodeSuccess: (input) => makeUnaryHttpClient.decode(input, Schema.BigIntFromString)"
+        ));
+
+        let unsafe_number_options = EffectRenderOptions::default()
+            .with_unsafe_integer_encoding(UnsafeIntegerEncoding::Number);
+        let unsafe_schemas = render_schemas_with_options(&contract, &unsafe_number_options);
+        assert!(unsafe_schemas.contains("idI64: Schema.Number"));
+        assert!(!unsafe_schemas.contains("Schema.BigIntFromString"));
+        let unsafe_endpoints = render_endpoints_with_options(&contract, &unsafe_number_options);
+        assert!(unsafe_endpoints.contains("readonly id: number;"));
+        assert!(unsafe_endpoints.contains("): Effect.Effect<number, ApiClientError, ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_standard_external_schemas_with_validation() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            types: vec![
+                external_type("Uuid", &["uuid", "Uuid"], "string", "Uuid"),
+                external_type(
+                    "DateTimeUtc",
+                    &["chrono", "DateTime", "Utc"],
+                    "string",
+                    "DateTimeUtc",
+                ),
+                external_type("Decimal", &["rust_decimal", "Decimal"], "string", "Decimal"),
+                external_type(
+                    "JsonValue",
+                    &["serde_json", "Value"],
+                    "unknown",
+                    "JsonValue",
+                ),
+                external_type("Bytes", &["bytes", "Bytes"], "string", "Bytes"),
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_schemas(&contract);
+
+        assert!(rendered.contains(
+            "export const Uuid = Schema.String.pipe(Schema.check(Schema.isUUID()), Schema.brand(\"Uuid\"))"
+        ));
+        assert!(rendered.contains("export const DateTimeUtc = Schema.String.pipe("));
+        assert!(rendered.contains("Schema.DateTimeUtcFromString"));
+        assert!(rendered.contains("Schema.brand(\"DateTimeUtc\")"));
+        assert!(rendered.contains(
+            "export const Decimal = Schema.String.pipe(Schema.check(Schema.isPattern(/^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$/)), Schema.brand(\"Decimal\"))"
+        ));
+        assert!(rendered.contains("export const JsonValue = Schema.Json"));
+        assert!(rendered.contains(
+            "export const Bytes = Schema.String.pipe(Schema.check(Schema.isBase64()), Schema.brand(\"Bytes\"))"
+        ));
+        assert!(!rendered.contains("Schema.declare<Uuid>"));
+        assert!(!rendered.contains("Schema.declare<DateTimeUtc>"));
+        assert!(!rendered.contains("Schema.declare<Decimal>"));
+        assert!(!rendered.contains("Schema.declare<JsonValue>"));
+        assert!(!rendered.contains("Schema.declare<Bytes>"));
+    }
+
+    #[test]
+    fn renders_types_in_deterministic_name_order() {
+        let contract = ApiContract {
+            package_name: "example-api".to_owned(),
+            types: vec![simple_type("Zed"), simple_type("Alpha")],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_schemas(&contract);
+
+        let alpha = rendered
+            .find("export const Alpha")
+            .expect("Alpha is rendered");
+        let zed = rendered.find("export const Zed").expect("Zed is rendered");
+        assert!(alpha < zed);
+    }
+
+    #[test]
+    fn renders_domain_errors_with_status_and_symbol_metadata() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            errors: vec![ErrorDef {
+                id: symbol("error", &["GetUserError"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "GetUserError".to_owned(),
+                ],
+                rust_name: "GetUserError".to_owned(),
+                ts_name: "GetUserError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["GetUserError", "NotFound"]),
+                        rust_name: "NotFound".to_owned(),
+                        tag: "notFound".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                        source: source_file("src/users.rs", 42),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["GetUserError", "PermissionDenied"]),
+                        rust_name: "PermissionDenied".to_owned(),
+                        tag: "permission-denied".to_owned(),
+                        status: HttpStatus(403),
+                        fields: Vec::new(),
+                        source: source_file("src/users.rs", 47),
+                    },
+                ],
+                source: source_file("src/users.rs", 39),
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_errors(&contract);
+
+        assert!(rendered.contains("import { UserId } from \"./schemas\""));
+        assert!(rendered.contains(
+            "export class GetUserNotFound extends Schema.TaggedErrorClass<GetUserNotFound>()(\n  \"notFound\","
+        ));
+        assert!(rendered.contains("    id: UserId,"));
+        assert!(rendered.contains(
+            "export type GetUserError =\n  | GetUserNotFound\n  | GetUserPermissionDenied"
+        ));
+        assert!(rendered.contains("export const GetUserErrorStatus = {\n  notFound: 404,\n  \"permission-denied\": 403,\n} as const"));
+        assert!(rendered.contains("export const GetUserErrorSymbols = {"));
+        assert!(rendered.contains("file: \"src/users.rs\""));
+        assert!(rendered.contains("startLine: 42"));
+    }
+
+    #[test]
+    fn renders_domain_error_unions_for_variants_sharing_status() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            errors: vec![ErrorDef {
+                id: symbol("error", &["LookupError"]),
+                rust_path: vec!["server".to_owned(), "LookupError".to_owned()],
+                rust_name: "LookupError".to_owned(),
+                ts_name: "LookupError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "Missing"]),
+                        rust_name: "Missing".to_owned(),
+                        tag: "Missing".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "message",
+                            "message",
+                            type_ref("String"),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "Hidden"]),
+                        rust_name: "Hidden".to_owned(),
+                        tag: "Hidden".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "message",
+                            "message",
+                            type_ref("String"),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "RateLimited"]),
+                        rust_name: "RateLimited".to_owned(),
+                        tag: "RateLimited".to_owned(),
+                        status: HttpStatus(429),
+                        fields: Vec::new(),
+                        source: source(),
+                    },
+                ],
+                source: source(),
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_errors(&contract);
+
+        assert!(rendered.contains(
+            "export const LookupErrorStatusByCode = {\n  404: [\"Hidden\", \"Missing\"],\n  429: [\"RateLimited\"],\n} as const"
+        ));
+        assert!(rendered.contains(
+            "export const LookupErrorSchemaByStatus = {\n  404: Schema.Union([LookupHidden, LookupMissing]),\n  429: LookupRateLimited,\n} as const"
+        ));
+    }
+
+    #[test]
+    fn renders_generated_client_error_union() {
+        let rendered = render_errors(&ApiContract {
+            package_name: "example-api".to_owned(),
+            ..ApiContract::default()
+        });
+
+        assert!(rendered.contains(
+            "export class NetworkError extends Schema.TaggedErrorClass<NetworkError>()("
+        ));
+        assert!(rendered.contains(
+            "export class UnexpectedStatusError extends Schema.TaggedErrorClass<UnexpectedStatusError>()("
+        ));
+        assert!(rendered.contains(
+            "export type ApiClientError =\n  | NetworkError\n  | TimeoutError\n  | EncodeError\n  | DecodeError\n  | UnexpectedStatusError\n  | RemoteProtocolError"
+        ));
+    }
+
+    #[test]
+    fn renders_endpoint_accessors_with_effect_signatures() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_user"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_user".to_owned(),
+                ],
+                rust_name: "get_user".to_owned(),
+                ts_path: vec!["users".to_owned(), "getUser".to_owned()],
+                route: RoutePattern("/users/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                    query_params: vec![field(
+                        "include_posts",
+                        "includePosts",
+                        type_ref("bool"),
+                        Optionality::Optional,
+                    )],
+                    body: None,
+                    body_transport: RequestBodyTransport::Json,
+                },
+                response: ResponseShape::Json(type_ref("User")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["GetUserError"]),
+                    name: "GetUserError".to_owned(),
+                }],
+                source: source(),
+                router_mounts: Vec::new(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(
+            rendered.contains("import { Effect, Schema } from \"@typeweld/effect-runtime/compat\"")
+        );
+        assert!(rendered.contains("import { ServerApi } from \"./layer\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains("export namespace users {"));
+        assert!(rendered.contains(
+            "  export interface GetUserArgs {\n    readonly id: UserId;\n    readonly includePosts?: boolean;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const GetUserArgsSchema = Schema.Struct({\n    id: UserId,\n    includePosts: Schema.optionalKey(Schema.Boolean),\n  })\n  export type GetUserArgsEncoded = Schema.Codec.Encoded<typeof GetUserArgsSchema>"
+        ));
+        assert!(rendered.contains(
+            "  export const getUserRoute = {\n    method: \"GET\",\n    path: \"/users/{id}\",\n    transport: \"UnaryHttp\",\n  } as const"
+        ));
+        assert!(rendered.contains(
+            "  export const getUser = (\n    args: GetUserArgs\n  ): Effect.Effect<User, ApiClientError | GetUserError, ServerApi> =>\n    ServerApi.use((api) => api.users.getUser(args))"
+        ));
+    }
+
+    #[test]
+    fn renders_endpoint_body_and_empty_response() {
+        let endpoint = Endpoint {
+            id: symbol("endpoint", &["users", "create_user"]),
+            rust_path: vec![
+                "server".to_owned(),
+                "users".to_owned(),
+                "create_user".to_owned(),
+            ],
+            rust_name: "create_user".to_owned(),
+            ts_path: vec!["users".to_owned(), "createUser".to_owned()],
+            route: RoutePattern("/users".to_owned()),
+            method: HttpMethod::Post,
+            transport: Transport::UnaryHttp,
+            request: RequestShape {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                body: Some(type_ref("CreateUser")),
+                body_transport: RequestBodyTransport::Json,
+            },
+            response: ResponseShape::Empty,
+            errors: Vec::new(),
+            source: source(),
+            router_mounts: Vec::new(),
+            allow_unused: false,
+        };
+
+        let rendered = render_endpoints(&ApiContract {
+            package_name: "example-api".to_owned(),
+            endpoints: vec![endpoint],
+            ..ApiContract::default()
+        });
+
+        assert!(rendered
+            .contains("  export interface CreateUserArgs {\n    readonly body: CreateUser;\n  }"));
+        assert!(rendered.contains(
+            "  export const CreateUserArgsSchema = Schema.Struct({\n    body: CreateUser,\n  })"
+        ));
+        assert!(rendered.contains("): Effect.Effect<void, ApiClientError, ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_sse_endpoint_accessors_with_stream_signatures() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["events", "events"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "events".to_owned(),
+                    "events".to_owned(),
+                ],
+                rust_name: "events".to_owned(),
+                ts_path: vec!["events".to_owned(), "events".to_owned()],
+                route: RoutePattern("/events".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::ServerSentEvents,
+                request: RequestShape::default(),
+                response: ResponseShape::Stream(type_ref("UserEvent")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["EventError"]),
+                    name: "EventError".to_owned(),
+                }],
+                source: source(),
+                router_mounts: Vec::new(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(rendered.contains(
+            "import { Effect, Stream, Schema } from \"@typeweld/effect-runtime/compat\""
+        ));
+        assert!(rendered.contains(
+            "  export const EventsArgsSchema = Schema.Struct({})\n  export type EventsArgsEncoded = Schema.Codec.Encoded<typeof EventsArgsSchema>"
+        ));
+        assert!(rendered.contains(
+            "  export const eventsRoute = {\n    method: \"GET\",\n    path: \"/events\",\n    transport: \"ServerSentEvents\",\n  } as const"
+        ));
+        assert!(rendered.contains(
+            "  export const events = (\n    args: EventsArgs\n  ): Stream.Stream<UserEvent, ApiClientError | EventError, ServerApi> =>\n    Stream.unwrap(ServerApi.use((api) => Effect.succeed(api.events.events(args))))"
+        ));
+    }
+
+    #[test]
+    fn renders_binary_endpoint_accessors() {
+        let bytes = type_ref("Bytes");
+        let item = type_ref("CatalogItem");
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: Vec::new(),
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(bytes),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(item),
+                    errors: Vec::new(),
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(rendered
+            .contains("import type { BinaryRequestBody } from \"@typeweld/effect-runtime\""));
+        assert!(rendered.contains(
+            "  export interface DownloadAttachmentArgs {\n    readonly id: UserId;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const downloadAttachmentRoute = {\n    method: \"GET\",\n    path: \"/catalog/{id}/attachment\",\n    transport: \"BinaryDownload\",\n  } as const"
+        ));
+        assert!(rendered.contains("): Effect.Effect<Uint8Array, ApiClientError, ServerApi> =>"));
+        assert!(rendered.contains(
+            "  export interface UploadAttachmentArgs {\n    readonly id: UserId;\n    readonly body: BinaryRequestBody;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const UploadAttachmentArgsSchema = Schema.Struct({\n    id: UserId,\n    body: Schema.Unknown,\n  })"
+        ));
+    }
+
+    #[test]
+    fn renders_server_api_service_and_layers() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_user"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_user".to_owned(),
+                ],
+                rust_name: "get_user".to_owned(),
+                ts_path: vec!["users".to_owned(), "getUser".to_owned()],
+                route: RoutePattern("/users/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
+                    query_params: Vec::new(),
+                    body: None,
+                    body_transport: RequestBodyTransport::Json,
+                },
+                response: ResponseShape::Json(type_ref("User")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["GetUserError"]),
+                    name: "GetUserError".to_owned(),
+                }],
+                source: source(),
+                router_mounts: Vec::new(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains(
+            "import { Context, Layer, Effect } from \"@typeweld/effect-runtime/compat\""
+        ));
+        assert!(
+            rendered.contains("import { makeUnaryHttpClient } from \"@typeweld/effect-runtime\"")
+        );
+        assert!(rendered.contains("import { users } from \"./endpoints\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
+        assert!(rendered.contains(
+            "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()(\"@workspace/server-api::ServerApi\") {}"
+        ));
+        assert!(rendered.contains(
+            "      readonly getUser: (args: users.GetUserArgs) => Effect.Effect<User, ApiClientError | GetUserError, never>"
+        ));
+        assert!(rendered.contains(
+            "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> =>"
+        ));
+        assert!(rendered.contains(
+            "getUser: makeUnaryHttpClient<users.GetUserArgs, User, GetUserError>(config,"
+        ));
+        assert!(rendered
+            .contains("const encoded = makeUnaryHttpClient.encode(args, users.GetUserArgsSchema)"));
+        assert!(rendered.contains("path: {"));
+        assert!(rendered.contains("id: encoded.id"));
+        assert!(
+            rendered.contains("decodeSuccess: (input) => makeUnaryHttpClient.decode(input, User)")
+        );
+        assert!(rendered
+            .contains("return makeUnaryHttpClient.decode(input, GetUserErrorSchema) as Effect.Effect<GetUserError, ApiClientError>"));
+        assert!(rendered
+            .contains("  export const mock = (service: Service): Layer.Layer<ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_sse_server_api_service_and_layer_client() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["events", "events"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "events".to_owned(),
+                    "events".to_owned(),
+                ],
+                rust_name: "events".to_owned(),
+                ts_path: vec!["events".to_owned(), "events".to_owned()],
+                route: RoutePattern("/events".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::ServerSentEvents,
+                request: RequestShape::default(),
+                response: ResponseShape::Stream(type_ref("UserEvent")),
+                errors: vec![ErrorRef {
+                    id: symbol("error", &["EventError"]),
+                    name: "EventError".to_owned(),
+                }],
+                source: source(),
+                router_mounts: Vec::new(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains(
+            "import { Context, Layer, Effect, Stream } from \"@typeweld/effect-runtime/compat\""
+        ));
+        assert!(rendered.contains("import { makeSseClient } from \"@typeweld/effect-runtime\""));
+        assert!(rendered.contains(
+            "      readonly events: (args: events.EventsArgs) => Stream.Stream<UserEvent, ApiClientError | EventError, never>"
+        ));
+        assert!(rendered
+            .contains("events: makeSseClient<events.EventsArgs, UserEvent, EventError>(config,"));
+        assert!(rendered.contains("makeSseClient.encode(args, events.EventsArgsSchema)"));
+        assert!(
+            rendered.contains("decodeSuccess: (input) => makeSseClient.decode(input, UserEvent)")
+        );
+    }
+
+    #[test]
+    fn renders_binary_server_api_service_and_layer_client() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: Vec::new(),
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(type_ref("Bytes")),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(type_ref("CatalogItem")),
+                    errors: Vec::new(),
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains(
+            "import { makeBinaryDownloadClient, makeBinaryUploadClient } from \"@typeweld/effect-runtime\""
+        ));
+        assert!(rendered.contains(
+            "      readonly downloadAttachment: (args: catalog.DownloadAttachmentArgs) => Effect.Effect<Uint8Array, ApiClientError, never>"
+        ));
+        assert!(rendered.contains(
+            "downloadAttachment: makeBinaryDownloadClient<catalog.DownloadAttachmentArgs, never>(config,"
+        ));
+        assert!(!rendered.contains("downloadAttachment: makeBinaryDownloadClient<catalog.DownloadAttachmentArgs, Uint8Array"));
+        assert!(rendered.contains(
+            "uploadAttachment: makeBinaryUploadClient<catalog.UploadAttachmentArgs, CatalogItem, never>(config,"
+        ));
+        assert!(rendered.contains("bodyKind: \"binary\""));
+    }
+
+    #[test]
+    fn renders_generated_package_manifest_and_index() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            ..ApiContract::default()
+        };
+
+        assert_eq!(
+            render_package_json(&contract),
+            r#"{
+  "name": "@workspace/server-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./schemas": "./schemas.ts",
+    "./errors": "./errors.ts",
+    "./endpoints": "./endpoints.ts",
+    "./layer": "./layer.ts"
+  },
+  "dependencies": {
+    "@typeweld/effect-runtime": "0.0.0",
+    "effect": "4.0.0-beta.78"
+  }
+}
+"#
+        );
+        assert_eq!(
+            render_package_index(&contract),
+            r#"// Generated API package for @workspace/server-api
+export * from "./schemas"
+export * from "./errors"
+export * from "./endpoints"
+export * from "./layer"
+"#
+        );
+    }
+
+    #[test]
+    fn generated_effect_version_matches_runtime_package() {
+        let manifest = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../npm/effect-runtime/package.json"),
+        )
+        .expect("read runtime package manifest");
+        let value: serde_json::Value =
+            serde_json::from_str(&manifest).expect("parse runtime package manifest");
+
+        assert_eq!(
+            value["dependencies"]["effect"].as_str(),
+            Some(EFFECT_VERSION)
+        );
+    }
+
+    #[test]
+    fn generated_package_typecheck_fixture_compiles_against_pinned_effect_beta() {
+        let root = test_root("generated-typecheck");
+        let target_dir = root.join("target");
+        let contract = generated_typecheck_contract();
+        let package = render_generated_package(&contract, &target_dir);
+        write_generated_package_fixture(&package);
+        write_typecheck_consumer(&root, &package);
+
+        run_tsc_no_emit(&root);
+    }
+
+    #[test]
+    fn renders_generated_package_with_cache_path_and_tsconfig_mapping() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            ..ApiContract::default()
+        };
+
+        let package = render_generated_package(&contract, Path::new("target"));
+
+        assert_eq!(
+            package.package_dir,
+            Path::new("target")
+                .join("api-contract")
+                .join("effect-v4")
+                .join("packages")
+                .join("_workspace_server-api")
+        );
+        assert_eq!(
+            package
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "package.json",
+                "index.ts",
+                "schemas.ts",
+                "errors.ts",
+                "endpoints.ts",
+                "layer.ts",
+                "tsconfig.paths.json"
+            ]
+        );
+
+        let paths = render_tsconfig_paths(&package.tsconfig_paths);
+        assert!(paths.contains("\"@workspace/server-api\": ["));
+        assert!(paths
+            .contains("\"target/api-contract/effect-v4/packages/_workspace_server-api/index.ts\""));
+        assert!(paths.contains("\"@workspace/server-api/*\": ["));
+        assert!(
+            paths.contains("\"target/api-contract/effect-v4/packages/_workspace_server-api/*\"")
+        );
+    }
+
+    #[test]
+    fn renders_symbol_graph_for_generated_package() {
+        let mut contract = typeweld_test_fixtures::basic_contract();
+        contract.endpoints[0]
+            .router_mounts
+            .push(source_file("crates/server/src/routes.rs", 42));
+        contract.types.push(TypeDef {
+            id: SymbolId::new("fixture:type:AccountState"),
+            rust_path: vec![
+                "fixture".to_owned(),
+                "users".to_owned(),
+                "AccountState".to_owned(),
+            ],
+            rust_name: "AccountState".to_owned(),
+            ts_name: "AccountState".to_owned(),
+            shape: TypeShape::Enum(EnumShape {
+                variants: vec![EnumVariant {
+                    id: SymbolId::new("fixture:enum:AccountState:Active"),
+                    rust_name: "Active".to_owned(),
+                    wire_name: "active".to_owned(),
+                    fields: Vec::new(),
+                    source: source_file("crates/server/src/types.rs", 30),
+                }],
+            }),
+            source: source_file("crates/server/src/types.rs", 29),
+        });
+        let package = render_generated_package(&contract, Path::new("target"));
+
+        let graph = render_symbol_graph(&contract, &package);
+        assert_eq!(graph, render_symbol_graph(&contract, &package));
+
+        let value: serde_json::Value = serde_json::from_str(&graph).expect("parse symbol graph");
+        assert_eq!(value["schemaVersion"], 1);
+        assert!(value["contractHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("fnv1a64:")));
+        let symbols = value["symbols"].as_array().expect("symbols array");
+        let endpoint = find_symbol(symbols, "fixture:endpoint:getUser");
+        assert_eq!(endpoint["kind"], "endpoint");
+        assert_eq!(endpoint["metadata"]["method"], "GET");
+        assert_eq!(endpoint["metadata"]["route"], "/users/{id}");
+        assert_eq!(
+            endpoint["metadata"]["tsPath"],
+            serde_json::json!(["users", "getUser"])
+        );
+        assert_eq!(endpoint["rust"]["role"], "rustDeclaration");
+        assert_eq!(endpoint["rust"]["language"], "rust");
+        assert_eq!(endpoint["rust"]["renameStrategy"], "rustAnalyzer");
+        assert!(endpoint["rust"]["nameRange"].is_object());
+        assert!(endpoint["rust"]["fullRange"].is_object());
+        let router_mounts = endpoint["rustReferences"]
+            .as_array()
+            .expect("endpoint rust references");
+        assert_eq!(router_mounts.len(), 1);
+        assert_eq!(router_mounts[0]["role"], "rustRouterMount");
+        assert_eq!(router_mounts[0]["language"], "rust");
+        assert_eq!(router_mounts[0]["renameStrategy"], "rustAnalyzerReference");
+        assert!(endpoint["typescript"]
+            .as_array()
+            .expect("endpoint ts locations")
+            .iter()
+            .any(|location| location["generated"] == true
+                && location["renamable"] == false
+                && location["role"] == "generatedDefinition"
+                && location["language"] == "typescript"
+                && location["file"]
+                    .as_str()
+                    .is_some_and(|file| file.ends_with("endpoints.ts"))));
+        assert!(endpoint["metadata"]["reservedNames"]
+            .as_array()
+            .expect("endpoint reserved names")
+            .iter()
+            .any(|name| name.as_str() == Some("createUser")));
+        let route_param = find_symbol(symbols, "fixture:field:getUser:id");
+        assert_eq!(
+            route_param["rust"]["renameStrategy"],
+            "rustAndRoutePlaceholder"
+        );
+        assert!(endpoint["typescript"]
+            .as_array()
+            .expect("endpoint ts locations")
+            .iter()
+            .any(|location| location["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("layer.ts"))));
+
+        assert_eq!(
+            find_symbol(symbols, "fixture:field:getUser:id")["kind"],
+            "routeParam"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:type:AccountState")["kind"],
+            "type"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:enum:AccountState:Active")["kind"],
+            "enumVariant"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:field:User:displayName")["kind"],
+            "field"
+        );
+        assert!(
+            find_symbol(symbols, "fixture:field:User:displayName")["metadata"]["reservedNames"]
+                .as_array()
+                .expect("field reserved names")
+                .iter()
+                .any(|name| name.as_str() == Some("id"))
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:error:GetUserError:UserNotFound")["kind"],
+            "errorVariant"
+        );
+        let error_tag = symbols
+            .iter()
+            .find(|symbol| symbol["kind"] == "errorTag")
+            .expect("error tag symbol");
+        assert!(error_tag["metadata"]["reservedNames"]
+            .as_array()
+            .expect("error tag reserved names")
+            .iter()
+            .any(|name| name.as_str() == Some("PermissionDenied")));
+        for symbol in symbols {
+            assert!(
+                !symbol["typescript"]
+                    .as_array()
+                    .expect("typescript locations")
+                    .is_empty(),
+                "missing generated TypeScript range for {}",
+                symbol["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn basic_golden_outputs_match() {
+        let contract = typeweld_test_fixtures::basic_contract();
+        let package = render_generated_package(&contract, Path::new("target"));
+        let contract_json =
+            serde_json::to_string_pretty(&contract).expect("serialize basic contract");
+
+        for (file_name, contents) in [
+            ("basic.contract.json", contract_json),
+            ("basic.schemas.ts", render_schemas(&contract)),
+            ("basic.errors.ts", render_errors(&contract)),
+            ("basic.endpoints.ts", render_endpoints(&contract)),
+            (
+                "basic.symbols.json",
+                render_symbol_graph(&contract, &package),
+            ),
+        ] {
+            assert_golden(file_name, &ensure_trailing_newline(contents));
+        }
+    }
+
+    fn generated_typecheck_contract() -> ApiContract {
+        let user_id = type_ref("UserId");
+        let string = type_ref("String");
+        let bool_ref = type_ref("bool");
+        let uuid = type_ref("Uuid");
+        let date_time = type_ref("DateTimeUtc");
+        let decimal = type_ref("Decimal");
+        let json_value = type_ref("JsonValue");
+        let bytes = type_ref("Bytes");
+        let item = type_ref("CatalogItem");
+        let create_item = type_ref("CreateCatalogItem");
+        let event = type_ref("CatalogEvent");
+        let error_ref = ErrorRef {
+            id: symbol("error", &["CatalogError"]),
+            name: "CatalogError".to_owned(),
+        };
+
+        ApiContract {
+            package_name: "@workspace/generated-fixture-api".to_owned(),
+            types: vec![
+                external_type("Uuid", &["uuid", "Uuid"], "string", "Uuid"),
+                external_type(
+                    "DateTimeUtc",
+                    &["chrono", "DateTime", "Utc"],
+                    "string",
+                    "DateTimeUtc",
+                ),
+                external_type("Decimal", &["rust_decimal", "Decimal"], "string", "Decimal"),
+                external_type(
+                    "JsonValue",
+                    &["serde_json", "Value"],
+                    "unknown",
+                    "JsonValue",
+                ),
+                external_type("Bytes", &["bytes", "Bytes"], "string", "Bytes"),
+                TypeDef {
+                    id: user_id.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "UserId".to_owned()],
+                    rust_name: "UserId".to_owned(),
+                    ts_name: "UserId".to_owned(),
+                    shape: TypeShape::Newtype(Box::new(type_ref("i64"))),
+                    source: source(),
+                },
+                TypeDef {
+                    id: item.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CatalogItem".to_owned()],
+                    rust_name: "CatalogItem".to_owned(),
+                    ts_name: "CatalogItem".to_owned(),
+                    shape: TypeShape::Struct(StructShape {
+                        fields: vec![
+                            field("id", "id", user_id.clone(), Optionality::Required),
+                            field(
+                                "display_name",
+                                "displayName",
+                                string.clone(),
+                                Optionality::Required,
+                            ),
+                            field(
+                                "nickname",
+                                "nickname",
+                                string.clone(),
+                                Optionality::Optional,
+                            ),
+                            field(
+                                "created_at",
+                                "createdAt",
+                                date_time.clone(),
+                                Optionality::Required,
+                            ),
+                            field("price", "price", decimal.clone(), Optionality::Required),
+                            field(
+                                "metadata",
+                                "metadata",
+                                json_value.clone(),
+                                Optionality::OptionalNullable,
+                            ),
+                            field(
+                                "attachment",
+                                "attachment",
+                                bytes.clone(),
+                                Optionality::Optional,
+                            ),
+                        ],
+                    }),
+                    source: source(),
+                },
+                TypeDef {
+                    id: create_item.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CreateCatalogItem".to_owned()],
+                    rust_name: "CreateCatalogItem".to_owned(),
+                    ts_name: "CreateCatalogItem".to_owned(),
+                    shape: TypeShape::Struct(StructShape {
+                        fields: vec![
+                            field(
+                                "display_name",
+                                "displayName",
+                                string.clone(),
+                                Optionality::Required,
+                            ),
+                            field(
+                                "owner_id",
+                                "ownerId",
+                                user_id.clone(),
+                                Optionality::Required,
+                            ),
+                            field("price", "price", decimal.clone(), Optionality::Required),
+                            field(
+                                "metadata",
+                                "metadata",
+                                json_value.clone(),
+                                Optionality::OptionalNullable,
+                            ),
+                            field(
+                                "attachment",
+                                "attachment",
+                                bytes.clone(),
+                                Optionality::Optional,
+                            ),
+                        ],
+                    }),
+                    source: source(),
+                },
+                TypeDef {
+                    id: event.id.clone(),
+                    rust_path: vec!["fixture".to_owned(), "CatalogEvent".to_owned()],
+                    rust_name: "CatalogEvent".to_owned(),
+                    ts_name: "CatalogEvent".to_owned(),
+                    shape: TypeShape::Enum(EnumShape {
+                        variants: vec![
+                            EnumVariant {
+                                id: symbol("variant", &["CatalogEvent", "Created"]),
+                                rust_name: "Created".to_owned(),
+                                wire_name: "created".to_owned(),
+                                fields: vec![field(
+                                    "item",
+                                    "item",
+                                    item.clone(),
+                                    Optionality::Required,
+                                )],
+                                source: source(),
+                            },
+                            EnumVariant {
+                                id: symbol("variant", &["CatalogEvent", "Deleted"]),
+                                rust_name: "Deleted".to_owned(),
+                                wire_name: "deleted".to_owned(),
+                                fields: vec![field(
+                                    "id",
+                                    "id",
+                                    user_id.clone(),
+                                    Optionality::Required,
+                                )],
+                                source: source(),
+                            },
+                        ],
+                    }),
+                    source: source(),
+                },
+            ],
+            errors: vec![ErrorDef {
+                id: error_ref.id.clone(),
+                rust_path: vec!["fixture".to_owned(), "CatalogError".to_owned()],
+                rust_name: "CatalogError".to_owned(),
+                ts_name: "CatalogError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "NotFound"]),
+                        rust_name: "NotFound".to_owned(),
+                        tag: "NotFound".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "reason",
+                            "reason",
+                            string.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "Conflict"]),
+                        rust_name: "Conflict".to_owned(),
+                        tag: "Conflict".to_owned(),
+                        status: HttpStatus(409),
+                        fields: vec![field(
+                            "item_id",
+                            "itemId",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "Hidden"]),
+                        rust_name: "Hidden".to_owned(),
+                        tag: "Hidden".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "reason",
+                            "reason",
+                            string.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "RateLimited"]),
+                        rust_name: "RateLimited".to_owned(),
+                        tag: "RateLimited".to_owned(),
+                        status: HttpStatus(429),
+                        fields: vec![field(
+                            "retry_after",
+                            "retryAfter",
+                            date_time.clone(),
+                            Optionality::Optional,
+                        )],
+                        source: source(),
+                    },
+                ],
+                source: source(),
+            }],
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "get_item"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "get_item".to_owned(),
+                    ],
+                    rust_name: "get_item".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "getItem".to_owned()],
+                    route: RoutePattern("/catalog/{id}".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: vec![
+                            field(
+                                "include_audit",
+                                "includeAudit",
+                                bool_ref,
+                                Optionality::Optional,
+                            ),
+                            field(
+                                "request_id",
+                                "requestId",
+                                uuid.clone(),
+                                Optionality::Optional,
+                            ),
+                            field("at", "at", date_time.clone(), Optionality::Optional),
+                        ],
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Json(item.clone()),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "create_item"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "create_item".to_owned(),
+                    ],
+                    rust_name: "create_item".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "createItem".to_owned()],
+                    route: RoutePattern("/catalog".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape {
+                        path_params: Vec::new(),
+                        query_params: Vec::new(),
+                        body: Some(create_item),
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Created(item.clone()),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(bytes),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(item),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["events", "watch_catalog"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "events".to_owned(),
+                        "watch_catalog".to_owned(),
+                    ],
+                    rust_name: "watch_catalog".to_owned(),
+                    ts_path: vec!["events".to_owned(), "watchCatalog".to_owned()],
+                    route: RoutePattern("/catalog/events".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::ServerSentEvents,
+                    request: RequestShape {
+                        path_params: Vec::new(),
+                        query_params: vec![field(
+                            "after",
+                            "after",
+                            date_time,
+                            Optionality::Optional,
+                        )],
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Stream(event),
+                    errors: vec![error_ref],
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["admin", "reindex"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "admin".to_owned(),
+                        "reindex".to_owned(),
+                    ],
+                    rust_name: "reindex".to_owned(),
+                    ts_path: vec!["admin".to_owned(), "reindex".to_owned()],
+                    route: RoutePattern("/admin/reindex".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::UnaryHttp,
+                    request: RequestShape::default(),
+                    response: ResponseShape::Empty,
+                    errors: Vec::new(),
+                    source: source(),
+                    router_mounts: Vec::new(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        }
+    }
+
+    fn write_generated_package_fixture(package: &GeneratedPackage) {
+        for file in &package.files {
+            let path = package.package_dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create generated package directory");
+            }
+            fs::write(path, &file.contents).expect("write generated package file");
+        }
+    }
+
+    fn write_typecheck_consumer(root: &Path, package: &GeneratedPackage) {
+        fs::create_dir_all(root).expect("create generated typecheck fixture root");
+        fs::write(
+            root.join("package.json"),
+            format!(
+                "{{\n  \"private\": true,\n  \"type\": \"module\",\n  \"dependencies\": {{\n    \"@typeweld/effect-runtime\": \"file:{}\",\n    \"effect\": {}\n  }}\n}}\n",
+                normalize_path(&repo_root().join("npm/effect-runtime")),
+                ts_string(EFFECT_VERSION),
+            ),
+        )
+        .expect("write fixture package manifest");
+
+        fs::write(
+            root.join("tsconfig.json"),
+            format!(
+                "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n      {package_name}: [{package_index}],\n      {package_glob}: [{package_dir_glob}],\n      \"@typeweld/effect-runtime\": [{runtime_index}],\n      \"@typeweld/effect-runtime/compat\": [{runtime_compat}],\n      \"@typeweld/effect-runtime/*\": [{runtime_glob}]\n    }}\n  }},\n  \"include\": [\"consumer.ts\"]\n}}\n",
+                package_name = ts_string(&package.tsconfig_paths.package_name),
+                package_index = ts_string(&normalize_path(&package.package_dir.join("index.ts"))),
+                package_glob = ts_string(&format!("{}/*", package.tsconfig_paths.package_name)),
+                package_dir_glob = ts_string(&format!("{}/*", normalize_path(&package.package_dir))),
+                runtime_index = ts_string(&normalize_path(
+                    &repo_root().join("npm/effect-runtime/src/index.ts")
+                )),
+                runtime_compat = ts_string(&normalize_path(
+                    &repo_root().join("npm/effect-runtime/src/compat.ts")
+                )),
+                runtime_glob = ts_string(&format!(
+                    "{}/*",
+                    normalize_path(&repo_root().join("npm/effect-runtime/src"))
+                )),
+            ),
+        )
+        .expect("write fixture tsconfig");
+
+        fs::write(root.join("consumer.ts"), generated_typecheck_consumer())
+            .expect("write fixture consumer");
+    }
+
+    fn generated_typecheck_consumer() -> &'static str {
+        r#"import { Effect, Schema, Stream } from "@typeweld/effect-runtime/compat"
+import {
+  CatalogConflict,
+  DateTimeUtc,
+  Decimal,
+  Bytes,
+  JsonValue,
+  ServerApi,
+  Uuid,
+  UserId,
+  admin,
+  catalog,
+  events,
+} from "@workspace/generated-fixture-api"
+
+const id = Schema.decodeUnknownSync(UserId)("42")
+const requestId = Schema.decodeUnknownSync(Uuid)("550e8400-e29b-41d4-a716-446655440000")
+const at = Schema.decodeUnknownSync(DateTimeUtc)("2026-06-06T00:00:00Z")
+const price = Schema.decodeUnknownSync(Decimal)("12.50")
+const attachment = Schema.decodeUnknownSync(Bytes)("aGVsbG8=")
+const metadata = Schema.decodeUnknownSync(JsonValue)({ source: "fixture", stable: true })
+const layer = ServerApi.layer({ baseUrl: "https://api.example.test" })
+
+const handledGet = catalog.getItem({
+  id,
+  includeAudit: true,
+  requestId,
+  at,
+}).pipe(
+  Effect.catchTag("NotFound", (error) => Effect.succeed(error.reason)),
+  Effect.catchTag("Hidden", (error) => Effect.succeed(error.reason)),
+  Effect.catchTag("Conflict", (error) => Effect.succeed(String(error.itemId))),
+)
+
+const writeProgram = Effect.gen(function* () {
+  const created = yield* catalog.createItem({
+    body: {
+      displayName: "Ada",
+      ownerId: id,
+      price,
+      metadata,
+      attachment,
+    },
+  })
+
+  const downloaded = yield* catalog.downloadAttachment({ id })
+  const uploaded = yield* catalog.uploadAttachment({
+    id,
+    body: new Uint8Array(downloaded),
+  })
+
+  yield* admin.reindex({})
+  return `${created.displayName}:${uploaded.displayName}`
+})
+
+const streamProgram = events.watchCatalog({ after: at }).pipe(
+  Stream.take(1),
+  Stream.runCollect,
+)
+
+const providedRead = handledGet.pipe(Effect.provide(layer))
+const providedWrite = writeProgram.pipe(Effect.provide(layer))
+const providedStream = streamProgram.pipe(Effect.provide(layer))
+
+const conflict = new CatalogConflict({ itemId: id })
+const conflictTag: "Conflict" = conflict._tag
+
+export const fixture = {
+  providedRead,
+  providedWrite,
+  providedStream,
+  conflictTag,
+}
+"#
+    }
+
+    fn run_tsc_no_emit(root: &Path) {
+        let tsc = repo_root().join("npm/node_modules/typescript/bin/tsc");
+        assert!(
+            tsc.is_file(),
+            "missing local TypeScript compiler at {}; run `npm install` in npm/",
+            tsc.display()
+        );
+
+        let output = Command::new("node")
+            .arg(&tsc)
+            .arg("--noEmit")
+            .arg("-p")
+            .arg(root.join("tsconfig.json"))
+            .current_dir(root)
+            .output()
+            .expect("run generated package typecheck fixture");
+        assert!(
+            output.status.success(),
+            "generated package typecheck failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = repo_root()
+            .join("target/tests/typeweld-gen-effect-v4")
+            .join(format!("{name}-{id}"));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn assert_golden(file_name: &str, expected: &str) {
+        let path = repo_root().join("tests/golden").join(file_name);
+        if std::env::var_os("API_UPDATE_GOLDENS").is_some() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create golden output directory");
+            }
+            fs::write(&path, expected).expect("write golden output");
+            return;
+        }
+
+        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "read golden output {}: {error}; rerun with API_UPDATE_GOLDENS=1 to create it",
+                path.display()
+            )
+        });
+        assert_eq!(
+            actual,
+            expected,
+            "golden output changed for {}; rerun this test with API_UPDATE_GOLDENS=1 to accept the new output",
+            path.display()
+        );
+    }
+
+    fn ensure_trailing_newline(mut contents: String) -> String {
+        if !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents
+    }
+
+    fn simple_type(name: &str) -> TypeDef {
+        TypeDef {
+            id: symbol("type", &[name]),
+            rust_path: vec![name.to_owned()],
+            rust_name: name.to_owned(),
+            ts_name: name.to_owned(),
+            shape: TypeShape::Primitive(Primitive::String),
+            source: source(),
+        }
+    }
+
+    fn external_type(
+        ts_name: &str,
+        rust_path: &[&str],
+        encoded_ts_name: &str,
+        decoded_ts_name: &str,
+    ) -> TypeDef {
+        TypeDef {
+            id: symbol("external", rust_path),
+            rust_path: rust_path.iter().map(|part| (*part).to_owned()).collect(),
+            rust_name: rust_path.last().expect("external rust path").to_string(),
+            ts_name: ts_name.to_owned(),
+            shape: TypeShape::External(ExternalType {
+                rust_path: rust_path.iter().map(|part| (*part).to_owned()).collect(),
+                ts_import: "@api/external".to_owned(),
+                ts_name: ts_name.to_owned(),
+                encoded_ts_name: encoded_ts_name.to_owned(),
+                decoded_ts_name: decoded_ts_name.to_owned(),
+            }),
+            source: source(),
+        }
+    }
+
+    fn field(rust_name: &str, ts_name: &str, type_ref: TypeRef, optionality: Optionality) -> Field {
+        Field {
+            id: symbol("field", &[rust_name]),
+            rust_name: rust_name.to_owned(),
+            wire_name: ts_name.to_owned(),
+            ts_name: ts_name.to_owned(),
+            type_ref,
+            optionality,
+            source: source(),
+        }
+    }
+
+    fn type_ref(name: &str) -> TypeRef {
+        TypeRef {
+            id: symbol("type", &[name]),
+            name: name.to_owned(),
+        }
+    }
+
+    fn symbol(namespace: &str, parts: &[&str]) -> SymbolId {
+        SymbolId::from_parts(namespace, parts)
+    }
+
+    fn source() -> SourceRange {
+        source_file("", 0)
+    }
+
+    fn source_file(file: &str, line: u32) -> SourceRange {
+        SourceRange {
+            file: file.to_owned(),
+            start_line: line,
+            start_column: 0,
+            end_line: line,
+            end_column: 0,
+            full_range: None,
+        }
+    }
+
+    fn find_symbol<'a>(symbols: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+        symbols
+            .iter()
+            .find(|symbol| symbol["id"] == id)
+            .unwrap_or_else(|| panic!("missing symbol `{id}`"))
+    }
+}

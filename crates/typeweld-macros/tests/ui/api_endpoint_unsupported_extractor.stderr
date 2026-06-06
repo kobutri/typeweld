@@ -1,0 +1,5 @@
+error: #[api] endpoint parameters must use Path<T>, Query<T>, Body<T>, or Binary<bytes::Bytes> extractors
+ --> tests/ui/api_endpoint_unsupported_extractor.rs:7:27
+  |
+7 | async fn get_user(raw_id: i64) -> typeweld_core::Json<User> {
+  |                           ^^^

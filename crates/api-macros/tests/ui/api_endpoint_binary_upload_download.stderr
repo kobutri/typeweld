@@ -1,5 +1,0 @@
-error: #[api] binary upload endpoints cannot also return Binary<bytes::Bytes>; model the response as Json<T>, Created<T>, or NoContent
- --> tests/ui/api_endpoint_binary_upload_download.rs:4:3
-  |
-4 | ) -> api_core::Binary<bytes::Bytes> {
-  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

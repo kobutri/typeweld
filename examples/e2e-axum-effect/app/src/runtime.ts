@@ -1,4 +1,4 @@
-import { Effect, Schema } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect, Schema } from "@typeweld/effect-runtime/compat"
 import { User } from "@workspace/e2e-api"
 
 import { program } from "./client"

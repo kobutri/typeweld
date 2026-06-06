@@ -10,16 +10,16 @@
 //! `target/api-contract/server-api.json`. The neighboring `app/` directory
 //! shows the TypeScript half that imports the generated package.
 
-use api_axum::{ApiRouter, Body, Json, Path};
-use api_collector::{collect_contract, contract_to_json, CollectorInput};
 use serde::{Deserialize, Serialize};
+use typeweld_axum::{ApiRouter, Body, Json, Path};
+use typeweld_cli::{collect_contract, contract_to_json, CollectorInput};
 
 /// This is a DTO: a data type that crosses the Rust/TypeScript boundary.
 ///
 /// `ApiType` produces the framework-neutral schema metadata used by the
 /// generator. `Serialize` and `Deserialize` are still the real wire contract:
 /// Serde decides what JSON looks like on the network.
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 struct User {
     /// Rust code uses snake_case.
@@ -33,7 +33,7 @@ struct User {
 ///
 /// Keeping request and response bodies as named DTOs makes generated TypeScript
 /// easier to read and gives the LSP stable symbols to link back to Rust.
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiType)]
 #[serde(rename_all = "camelCase")]
 struct CreateUserRequest {
     display_name: String,
@@ -43,7 +43,7 @@ struct CreateUserRequest {
 ///
 /// The generated Effect client puts these variants in the Effect error channel,
 /// alongside generated client/transport errors.
-#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
+#[derive(Clone, Debug, Deserialize, Serialize, typeweld_macros::ApiError)]
 #[serde(tag = "_tag", rename_all = "PascalCase")]
 enum UserError {
     /// The status code is part of the API contract.
@@ -64,7 +64,7 @@ enum UserError {
 /// - `Path<i64>` becomes a generated `id` argument.
 /// - `Json<User>` becomes the Effect success type.
 /// - `UserError` becomes part of the Effect error type.
-#[api_macros::api(method = "GET", path = "/users/{id}")]
+#[typeweld_macros::api(method = "GET", path = "/users/{id}")]
 #[allow(dead_code)]
 async fn get_user(id: Path<i64>) -> Result<Json<User>, UserError> {
     let Path(id) = id;
@@ -84,7 +84,7 @@ async fn get_user(id: Path<i64>) -> Result<Json<User>, UserError> {
 /// In a real Axum application an adapter would decode the HTTP body before this
 /// handler is called. This example keeps the function plain so the contract is
 /// easy to see.
-#[api_macros::api(method = "POST", path = "/users")]
+#[typeweld_macros::api(method = "POST", path = "/users")]
 #[allow(dead_code)]
 async fn create_user(request: Body<CreateUserRequest>) -> Result<Json<User>, UserError> {
     let Body(request) = request;
@@ -106,7 +106,7 @@ async fn create_user(request: Body<CreateUserRequest>) -> Result<Json<User>, Use
 /// Only endpoints listed here are exported to TypeScript and tracked by unused
 /// endpoint analysis. This avoids surprising "everything public is an API"
 /// behavior in larger workspaces.
-#[api_macros::api_router]
+#[typeweld_macros::api_router]
 fn routes() -> ApiRouter {
     ApiRouter::new("server")
         .endpoint(get_user)

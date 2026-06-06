@@ -12,8 +12,8 @@ cd "$REPO_ROOT"
 echo "1. Checking the Axum server crate"
 cargo check -p e2e-axum-effect-server
 
-echo "2. Running cargo api check with generated TS typecheck and usage lints"
-cargo run -q -p api-collector --bin api -- check \
+echo "2. Running cargo typeweld check with generated TS typecheck and usage lints"
+cargo run -q -p typeweld-cli --bin typeweld -- check \
   --package e2e-axum-effect-server \
   --target-dir target \
   --ts-dir examples/e2e-axum-effect/app/src \
@@ -31,18 +31,18 @@ mkdir -p "$WITHOUT_AUDIT_DIR/src"
 cp "$APP_DIR"/src/*.ts "$WITHOUT_AUDIT_DIR/src/"
 rm "$WITHOUT_AUDIT_DIR/src/audit-usage.ts"
 
-if cargo run -q -p api-collector --bin api -- check \
+if cargo run -q -p typeweld-cli --bin typeweld -- check \
   --package e2e-axum-effect-server \
   --target-dir target \
   --ts-dir "$WITHOUT_AUDIT_DIR/src" \
   --deny-unused-endpoints >"$WITHOUT_AUDIT_LOG" 2>&1; then
-  echo "expected api check to fail after removing audit endpoint usage" >&2
+  echo "expected typeweld check to fail after removing audit endpoint usage" >&2
   exit 1
 fi
 
 if ! grep -q "unused endpoint diagnostic" "$WITHOUT_AUDIT_LOG"; then
   cat "$WITHOUT_AUDIT_LOG" >&2
-  echo "expected unused endpoint diagnostic in api check output" >&2
+  echo "expected unused endpoint diagnostic in typeweld check output" >&2
   exit 1
 fi
 

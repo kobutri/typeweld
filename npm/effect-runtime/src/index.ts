@@ -578,7 +578,7 @@ const buildUrl = (
   })
   const combined = `${base}${path.startsWith("/") ? path : `/${path}`}`
   const isAbsolute = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(combined)
-  const url = new URL(combined, isAbsolute ? undefined : "http://rust-ts-integration.local")
+  const url = new URL(combined, isAbsolute ? undefined : "http://typeweld.local")
 
   for (const [key, value] of Object.entries(request.query ?? {})) {
     const values = Array.isArray(value) ? value : [value]

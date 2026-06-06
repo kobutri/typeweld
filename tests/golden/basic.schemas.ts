@@ -1,5 +1,5 @@
 // Generated API package for @workspace/server-api
-import { Schema } from "@rust-ts-integration/effect-runtime/compat"
+import { Schema } from "@typeweld/effect-runtime/compat"
 
 export const CreateUserRequest = Schema.Struct({
   displayName: Schema.String,

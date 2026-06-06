@@ -1,4 +1,4 @@
-import { Effect } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect } from "@typeweld/effect-runtime/compat"
 import { ServerApi, admin } from "@workspace/e2e-api"
 
 export const loadAuditSummary = (baseUrl: string) =>

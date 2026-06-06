@@ -18,14 +18,14 @@ const packageRoot = resolve(testDir, "..")
 const wrapperPath = join(packageRoot, "src", "index.ts")
 const tsxCli = join(packageRoot, "..", "node_modules", "tsx", "dist", "cli.mjs")
 const wrapperModule = await import(pathToFileURL(wrapperPath).href)
-const binaryName = process.platform === "win32" ? "api-ls.exe" : "api-ls"
+const binaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
 
-it("package exposes api-ls as an executable bin", () => {
+it("package exposes typeweld-ls as an executable bin", () => {
   const packageJson = JSON.parse(
     readFileSync(join(packageRoot, "package.json"), "utf8"),
   )
 
-  expect(packageJson.bin["api-ls"]).toBe("./src/index.ts")
+  expect(packageJson.bin["typeweld-ls"]).toBe("./src/index.ts")
 })
 
 it("resolves a packaged gateway binary before workspace and PATH candidates", () => {
@@ -137,7 +137,7 @@ it("forwards arguments and stdio to the gateway", () => {
 
     const result = runWrapper(["--stdio", "--trace", "verbose"], {
       ...cleanEnv(),
-      API_LS_BINARY: fakeGateway,
+      TYPEWELD_LS_BINARY: fakeGateway,
     }, "hello from editor")
 
     expect(result.status).toBe(0)
@@ -157,15 +157,15 @@ it("prints clear diagnostics when the configured gateway is missing", () => {
     const missingGateway = join(temp, binaryName)
     const result = runWrapper([], {
       ...cleanEnv(),
-      API_LS_BINARY: missingGateway,
+      TYPEWELD_LS_BINARY: missingGateway,
     })
 
     expect(result.status).toBe(1)
     expect(result.stdout).toBe("")
-    expect(result.stderr).toMatch(/API_LS_BINARY points to/)
+    expect(result.stderr).toMatch(/TYPEWELD_LS_BINARY points to/)
     expect(result.stderr).toMatch(/it does not exist/)
-    expect(result.stderr).toMatch(/cargo build -p api-ls --bin api-ls/)
-    expect(result.stderr).toMatch(/set API_LS_BINARY/)
+    expect(result.stderr).toMatch(/cargo build -p typeweld-ls --bin typeweld-ls/)
+    expect(result.stderr).toMatch(/set TYPEWELD_LS_BINARY/)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
@@ -194,8 +194,8 @@ function runWrapper(
  */
 function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
-  delete env.API_LS_BINARY
-  delete env.RUST_TS_API_LS
+  delete env.TYPEWELD_LS_BINARY
+  delete env.TYPEWELD_LS
   delete env.CARGO_TARGET_DIR
 
   env.PATH = [dirname(process.execPath), process.env.PATH ?? ""]
@@ -206,7 +206,7 @@ function cleanEnv(): NodeJS.ProcessEnv {
 }
 
 function createTempDir(): string {
-  return mkdtempSync(join(tmpdir(), "api-ls-wrapper-"))
+  return mkdtempSync(join(tmpdir(), "typeweld-ls-wrapper-"))
 }
 
 /**

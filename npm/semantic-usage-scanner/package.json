@@ -1,5 +1,5 @@
 {
-  "name": "@rust-ts-integration/semantic-usage-scanner",
+  "name": "@typeweld/semantic-usage-scanner",
   "version": "0.0.0",
   "private": true,
   "type": "module",

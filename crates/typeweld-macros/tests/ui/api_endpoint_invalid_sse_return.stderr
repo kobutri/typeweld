@@ -1,0 +1,5 @@
+error: #[api(method = "SSE")] endpoints must return Sse<T> or Result<Sse<T>, E>
+ --> tests/ui/api_endpoint_invalid_sse_return.rs:7:18
+  |
+7 | fn user_events() -> typeweld_core::Json<User> {
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

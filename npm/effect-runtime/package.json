@@ -1,5 +1,5 @@
 {
-  "name": "@rust-ts-integration/effect-runtime",
+  "name": "@typeweld/effect-runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",

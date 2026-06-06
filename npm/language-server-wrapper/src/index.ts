@@ -11,8 +11,13 @@ import {
 import { delimiter, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
-export const binaryName = "api-ls"
-export const binaryOverrideEnvVars = ["API_LS_BINARY", "RUST_TS_API_LS"]
+export const binaryName = "typeweld-ls"
+export const binaryOverrideEnvVars = [
+  "TYPEWELD_LS_BINARY",
+  "TYPEWELD_LS",
+  "API_LS_BINARY",
+  "RUST_TS_API_LS",
+]
 
 type Candidate = {
   source: string
@@ -80,9 +85,9 @@ export function resolveApiLsBinary(options: ResolveOptions = {}): string {
         `${override.source} points to \`${override.path}\`, but ${status.reason}.`,
         "",
         "Build the gateway with:",
-        "  cargo build -p api-ls --bin api-ls",
+        "  cargo build -p typeweld-ls --bin typeweld-ls",
         "",
-        "Or set API_LS_BINARY to the absolute path of a working api-ls binary.",
+        "Or set TYPEWELD_LS_BINARY to the absolute path of a working typeweld-ls binary.",
       ].join("\n"),
       checked,
     )
@@ -135,12 +140,12 @@ export function launchApiLs(
   child.once("error", (error) => {
     console.error(
       [
-        `failed to start api-ls gateway at \`${binary}\`: ${error.message}`,
+        `failed to start typeweld-ls gateway at \`${binary}\`: ${error.message}`,
         "",
         "Build the gateway with:",
-        "  cargo build -p api-ls --bin api-ls",
+        "  cargo build -p typeweld-ls --bin typeweld-ls",
         "",
-        "Or set API_LS_BINARY to the absolute path of a working api-ls binary.",
+        "Or set TYPEWELD_LS_BINARY to the absolute path of a working typeweld-ls binary.",
       ].join("\n"),
     )
     process.exit(1)
@@ -404,15 +409,15 @@ function formatMissingDiagnostic(checked: readonly string[]): string {
   }
 
   return [
-    "api-ls npm wrapper could not find the Rust api-ls gateway binary.",
+    "typeweld-ls npm wrapper could not find the Rust typeweld-ls gateway binary.",
     "",
     "Checked:",
     ...checkedLines,
     "",
     "Build the gateway with:",
-    "  cargo build -p api-ls --bin api-ls",
+    "  cargo build -p typeweld-ls --bin typeweld-ls",
     "",
-    "Or set API_LS_BINARY to the absolute path of a working api-ls binary.",
+    "Or set TYPEWELD_LS_BINARY to the absolute path of a working typeweld-ls binary.",
   ].join("\n")
 }
 
