@@ -1397,8 +1397,9 @@ impl SymbolGraph {
 
     fn add_usage_locations(&mut self, index: &EffectUsageIndex) {
         for symbol in &mut self.symbols {
-            if symbol.kind == "endpoint" {
-                symbol.metadata.usage_count = Some(index.strong_usage_count(&symbol.id));
+            if is_usage_enriched_symbol_kind(&symbol.kind) {
+                symbol.metadata.usage =
+                    Some(index.usage_summary_for_symbol(&symbol.id, &symbol.kind));
             }
             for usage in index.locations_for_symbol(&symbol.id) {
                 let location = usage.to_graph_location();
@@ -1740,11 +1741,29 @@ impl LinkedSymbol {
         if !self.metadata.ts_path.is_empty() {
             lines.push(format!("TypeScript: `{}`", self.metadata.ts_path.join(".")));
         }
-        let usage_count = self
-            .metadata
-            .usage_count
-            .map_or_else(|| "pending".to_owned(), |count| count.to_string());
-        lines.push(format!("Usage count: `{usage_count}`"));
+        if is_usage_enriched_symbol_kind(&self.kind) {
+            let usage = self
+                .metadata
+                .usage
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(UsageSummary::pending);
+            match usage.status {
+                UsageStatus::Fresh | UsageStatus::Live => {
+                    let count = usage.count.unwrap_or(0);
+                    lines.push(format!("Usage count: `{count}`"));
+                    if let (Some(reads), Some(writes)) = (usage.reads, usage.writes) {
+                        lines.push(format!("Reads/Writes: `{reads}/{writes}`"));
+                    }
+                }
+                UsageStatus::Stale | UsageStatus::Missing | UsageStatus::Running => {
+                    lines.push("Usage count: `pending`".to_owned());
+                }
+                UsageStatus::Untracked => {
+                    lines.push("Usage: `untracked`".to_owned());
+                }
+            }
+        }
 
         lines.join("\n\n")
     }
@@ -1863,6 +1882,8 @@ struct SymbolMetadata {
     rust_path: Vec<String>,
     ts_path: Vec<String>,
     usage_count: Option<u64>,
+    #[serde(skip)]
+    usage: Option<UsageSummary>,
     allow_unused: bool,
     rename_placeholder: Option<String>,
     reserved_names: Vec<String>,
@@ -1887,6 +1908,54 @@ impl RenameTexts {
     fn conflicts_with(&self, reserved: &str) -> bool {
         reserved == self.rust || reserved == self.typescript
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UsageSummary {
+    status: UsageStatus,
+    count: Option<u64>,
+    reads: Option<u64>,
+    writes: Option<u64>,
+}
+
+impl UsageSummary {
+    const fn fresh_count(count: u64) -> Self {
+        Self {
+            status: UsageStatus::Fresh,
+            count: Some(count),
+            reads: None,
+            writes: None,
+        }
+    }
+
+    const fn pending() -> Self {
+        Self {
+            status: UsageStatus::Missing,
+            count: None,
+            reads: None,
+            writes: None,
+        }
+    }
+
+    fn fresh_read_write(reads: u64, writes: u64) -> Self {
+        Self {
+            status: UsageStatus::Fresh,
+            count: Some(reads + writes),
+            reads: Some(reads),
+            writes: Some(writes),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+enum UsageStatus {
+    Fresh,
+    Live,
+    Stale,
+    Missing,
+    Running,
+    Untracked,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1928,6 +1997,30 @@ impl EffectUsageIndex {
             .map_or(0, |endpoint| endpoint.strong)
     }
 
+    fn usage_summary_for_symbol(&self, symbol_id: &str, kind: &str) -> UsageSummary {
+        if kind == "endpoint" {
+            return UsageSummary::fresh_count(self.strong_usage_count(symbol_id));
+        }
+
+        let mut reads = 0;
+        let mut writes = 0;
+        let mut count = 0;
+        for usage in self.locations_for_symbol(symbol_id) {
+            count += 1;
+            match usage.access {
+                Some(UsageAccess::Read) => reads += 1,
+                Some(UsageAccess::Write) => writes += 1,
+                None => {}
+            }
+        }
+
+        if reads > 0 || writes > 0 {
+            UsageSummary::fresh_read_write(reads, writes)
+        } else {
+            UsageSummary::fresh_count(count)
+        }
+    }
+
     fn locations_for_symbol<'a>(
         &'a self,
         symbol_id: &'a str,
@@ -1954,6 +2047,7 @@ struct UsageLocation {
     field_id: Option<String>,
     file: PathBuf,
     source: UsageSourceRange,
+    access: Option<UsageAccess>,
 }
 
 impl UsageLocation {
@@ -1974,9 +2068,15 @@ impl UsageLocation {
             name_range: Some(range),
             full_range: Some(range),
             generated: false,
-            renamable: Some(false),
+            renamable: Some(true),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+enum UsageAccess {
+    Read,
+    Write,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -1985,6 +2085,19 @@ struct UsageSourceRange {
     start_column: u32,
     end_line: u32,
     end_column: u32,
+}
+
+fn is_usage_enriched_symbol_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "endpoint"
+            | "errorVariant"
+            | "errorTag"
+            | "field"
+            | "routeParam"
+            | "queryParam"
+            | "errorField"
+    )
 }
 
 impl UsageSourceRange {
@@ -5470,6 +5583,178 @@ mod tests {
     }
 
     #[test]
+    fn fresh_usage_index_reports_zero_for_unused_field_hover() {
+        let (workspace, rust_uri, _) = write_usage_hover_fixture(
+            "hover-fresh-zero",
+            json!({
+                "schema_version": 2,
+                "contract_hash": "hash:fresh-zero",
+                "endpoints": [],
+                "usages": [],
+                "field_usages": []
+            }),
+        );
+
+        let hover = hover_markdown_for_query(
+            &workspace,
+            TextPositionQuery {
+                uri: rust_uri,
+                position: GraphPosition {
+                    line: 4,
+                    character: 12,
+                },
+                include_declaration: false,
+            },
+        );
+
+        assert!(hover.contains("Usage count: `0`"));
+        assert!(!hover.contains("pending"));
+    }
+
+    #[test]
+    fn missing_usage_index_keeps_field_hover_pending() {
+        let (workspace, rust_uri, _) = write_usage_hover_graph("hover-missing-index");
+
+        let hover = hover_markdown_for_query(
+            &workspace,
+            TextPositionQuery {
+                uri: rust_uri,
+                position: GraphPosition {
+                    line: 4,
+                    character: 12,
+                },
+                include_declaration: false,
+            },
+        );
+
+        assert!(hover.contains("Usage count: `pending`"));
+    }
+
+    #[test]
+    fn stale_usage_index_keeps_field_hover_pending() {
+        let (workspace, rust_uri, _) = write_usage_hover_fixture(
+            "hover-stale-index",
+            json!({
+                "schema_version": 2,
+                "contract_hash": "hash:old",
+                "endpoints": [],
+                "usages": [],
+                "field_usages": [{
+                    "field_id": "field:User:requested_name",
+                    "file": "client/use-api.ts",
+                    "source": {
+                        "start_line": 1,
+                        "start_column": 8,
+                        "end_line": 1,
+                        "end_column": 21
+                    },
+                    "access": "Read"
+                }]
+            }),
+        );
+
+        let hover = hover_markdown_for_query(
+            &workspace,
+            TextPositionQuery {
+                uri: rust_uri,
+                position: GraphPosition {
+                    line: 4,
+                    character: 12,
+                },
+                include_declaration: false,
+            },
+        );
+
+        assert!(hover.contains("Usage count: `pending`"));
+    }
+
+    #[test]
+    fn endpoint_hover_counts_strong_usage_only() {
+        let (workspace, _, endpoint_uri) = write_usage_hover_fixture(
+            "hover-endpoint-strong",
+            json!({
+                "schema_version": 2,
+                "contract_hash": "hash:fresh-zero",
+                "endpoints": [{
+                    "endpoint_id": "endpoint:get_user",
+                    "strong": 2,
+                    "weak": 7,
+                    "invalid": 3,
+                    "unknown": 5
+                }],
+                "usages": [],
+                "field_usages": []
+            }),
+        );
+
+        let hover = hover_markdown_for_query(
+            &workspace,
+            TextPositionQuery {
+                uri: endpoint_uri,
+                position: GraphPosition {
+                    line: 12,
+                    character: 12,
+                },
+                include_declaration: false,
+            },
+        );
+
+        assert!(hover.contains("Usage count: `2`"));
+    }
+
+    #[test]
+    fn field_hover_reports_read_write_counts_when_available() {
+        let (workspace, rust_uri, _) = write_usage_hover_fixture(
+            "hover-field-read-write",
+            json!({
+                "schema_version": 2,
+                "contract_hash": "hash:fresh-zero",
+                "endpoints": [],
+                "usages": [],
+                "field_usages": [
+                    {
+                        "field_id": "field:User:requested_name",
+                        "file": "client/read.ts",
+                        "source": {
+                            "start_line": 1,
+                            "start_column": 8,
+                            "end_line": 1,
+                            "end_column": 21
+                        },
+                        "access": "Read"
+                    },
+                    {
+                        "field_id": "field:User:requested_name",
+                        "file": "client/write.ts",
+                        "source": {
+                            "start_line": 2,
+                            "start_column": 4,
+                            "end_line": 2,
+                            "end_column": 17
+                        },
+                        "access": "Write"
+                    }
+                ]
+            }),
+        );
+
+        let hover = hover_markdown_for_query(
+            &workspace,
+            TextPositionQuery {
+                uri: rust_uri,
+                position: GraphPosition {
+                    line: 4,
+                    character: 12,
+                },
+                include_declaration: false,
+            },
+        );
+
+        assert!(hover.contains("Usage count: `2`"));
+        assert!(hover.contains("Reads/Writes: `1/1`"));
+    }
+
+    #[test]
     fn prepares_and_builds_cross_language_rename_edit() {
         let root = test_root("rename");
         let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
@@ -6246,6 +6531,83 @@ mod tests {
             messages.push(message.raw);
         }
         messages
+    }
+
+    fn write_usage_hover_fixture(
+        name: &str,
+        usage_index: Value,
+    ) -> (WorkspaceConfig, String, String) {
+        let (workspace, rust_uri, endpoint_uri) = write_usage_hover_graph(name);
+        fs::write(&workspace.usage_index, usage_index.to_string()).expect("write usage index");
+        (workspace, rust_uri, endpoint_uri)
+    }
+
+    fn write_usage_hover_graph(name: &str) -> (WorkspaceConfig, String, String) {
+        let root = test_root(name);
+        fs::create_dir_all(root.join("target/api-contract/graph")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let endpoint_uri = rust_uri.clone();
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "contractHash": "hash:fresh-zero",
+                "symbols": [
+                    {
+                        "id": "field:User:requested_name",
+                        "kind": "field",
+                        "rust": {
+                            "uri": rust_uri,
+                            "range": {
+                                "start": { "line": 4, "character": 8 },
+                                "end": { "line": 4, "character": 22 }
+                            }
+                        },
+                        "metadata": {
+                            "rustPath": ["crate", "User", "requested_name"],
+                            "tsPath": ["User", "requestedName"],
+                            "rustName": "requested_name",
+                            "wireName": "requested_name",
+                            "tsName": "requestedName"
+                        }
+                    },
+                    {
+                        "id": "endpoint:get_user",
+                        "kind": "endpoint",
+                        "rust": {
+                            "uri": endpoint_uri,
+                            "range": {
+                                "start": { "line": 12, "character": 8 },
+                                "end": { "line": 12, "character": 16 }
+                            }
+                        },
+                        "metadata": {
+                            "method": "GET",
+                            "route": "/users/{id}",
+                            "rustPath": ["crate", "get_user"],
+                            "tsPath": ["users", "getUser"]
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let workspace =
+            discover_workspace_config(Some(&root), &root).expect("discover workspace config");
+        (workspace, rust_uri, endpoint_uri)
+    }
+
+    fn hover_markdown_for_query(workspace: &WorkspaceConfig, query: TextPositionQuery) -> String {
+        let graph = SymbolGraph::load_enriched(workspace)
+            .expect("load graph")
+            .expect("symbol graph");
+        graph
+            .hover(&query, workspace)
+            .and_then(|hover| hover["contents"]["value"].as_str().map(str::to_owned))
+            .expect("hover markdown")
     }
 
     fn path_string(path: &Path) -> String {

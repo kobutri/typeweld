@@ -897,6 +897,8 @@ Clear diagnostics when:
 
 ### Phase 1: Graph And Usage Cleanup
 
+Status: Done.
+
 Files:
 
 - `crates/api-ls/src/lib.rs`
@@ -906,12 +908,12 @@ Files:
 
 Steps:
 
-1. Normalize graph loading into an internal model.
-2. Add `UsageSummary` and `UsageStatus`.
-3. Set fresh-zero usage counts for all tracked symbols.
-4. Mark user TypeScript usages renamable.
-5. Update hover tests for `requested_name`.
-6. Keep compatibility with existing graph JSON.
+- [x] Normalize graph loading into an internal model.
+- [x] Add `UsageSummary` and `UsageStatus`.
+- [x] Set fresh-zero usage counts for all tracked symbols.
+- [x] Mark user TypeScript usages renamable.
+- [x] Update hover tests for `requested_name`.
+- [x] Keep compatibility with existing graph JSON.
 
 Acceptance:
 

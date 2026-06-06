@@ -3084,7 +3084,7 @@ fn usage_location_json(file: &str, source: &api_ir::SourceRange) -> serde_json::
         "nameRange": range.clone(),
         "fullRange": range,
         "generated": false,
-        "renamable": false
+        "renamable": true
     })
 }
 
@@ -3457,7 +3457,7 @@ export const program = Effect.gen(function* () {
         assert!(symbol_graph.contains("\"usageCount\": 1"));
         assert!(symbol_graph.contains("src/client.ts"));
         assert!(symbol_graph.contains("\"generated\": false"));
-        assert!(symbol_graph.contains("\"renamable\": false"));
+        assert!(symbol_graph.contains("\"renamable\": true"));
         let graph: serde_json::Value =
             serde_json::from_str(&symbol_graph).expect("parse symbol graph");
         assert!(symbol_has_user_location(
