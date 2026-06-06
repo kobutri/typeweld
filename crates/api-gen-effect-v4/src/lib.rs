@@ -20,226 +20,25 @@ pub fn render_package_banner(contract: &ApiContract) -> String {
 /// Renders generated Effect Schema declarations for every exported API type.
 #[must_use]
 pub fn render_schemas(contract: &ApiContract) -> String {
-    let mut output = render_package_banner(contract);
-    output.push_str("import { Schema } from \"effect\"\n\n");
-
-    let mut types = contract.types.iter().collect::<Vec<_>>();
-    types.sort_by(|left, right| {
-        left.ts_name
-            .cmp(&right.ts_name)
-            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-    });
-
-    for type_def in types {
-        output.push_str(&render_type_def(type_def));
-        output.push('\n');
-    }
-
-    trim_trailing_blank_lines(output)
+    render_tracked_schemas(contract).file.contents
 }
 
 /// Renders schema-backed domain and generated client errors.
 #[must_use]
 pub fn render_errors(contract: &ApiContract) -> String {
-    let mut output = render_package_banner(contract);
-    output.push_str("import { Schema } from \"effect\"\n");
-
-    let schema_imports = collect_error_schema_imports(contract);
-    if !schema_imports.is_empty() {
-        output.push_str("import { ");
-        output.push_str(
-            &schema_imports
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"./schemas\"\n");
-    }
-    output.push('\n');
-
-    output.push_str(&render_client_errors());
-
-    let mut errors = contract.errors.iter().collect::<Vec<_>>();
-    errors.sort_by(|left, right| {
-        left.ts_name
-            .cmp(&right.ts_name)
-            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-    });
-
-    for error in errors {
-        output.push('\n');
-        output.push_str(&render_error_def(error));
-    }
-
-    trim_trailing_blank_lines(output)
+    render_tracked_errors(contract).file.contents
 }
 
 /// Renders generated endpoint accessors and route metadata.
 #[must_use]
 pub fn render_endpoints(contract: &ApiContract) -> String {
-    let mut output = render_package_banner(contract);
-    if contract_has_stream_endpoints(contract) {
-        output.push_str("import { Effect, Stream } from \"effect\"\n");
-    } else {
-        output.push_str("import { Effect } from \"effect\"\n");
-    }
-    output.push_str("import { ServerApi } from \"./layer\"\n");
-
-    let schema_imports = collect_endpoint_schema_imports(contract);
-    if !schema_imports.is_empty() {
-        output.push_str("import type { ");
-        output.push_str(
-            &schema_imports
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"./schemas\"\n");
-    }
-
-    let error_imports = collect_endpoint_error_imports(contract);
-    output.push_str("import type { ");
-    output.push_str(
-        &error_imports
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    output.push_str(" } from \"./errors\"\n\n");
-
-    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
-    endpoints.sort_by(|left, right| {
-        endpoint_namespace(left)
-            .cmp(&endpoint_namespace(right))
-            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
-            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-    });
-
-    let mut namespace = None::<String>;
-    for endpoint in endpoints {
-        let current_namespace = endpoint_namespace(endpoint);
-        if namespace.as_deref() != Some(current_namespace.as_str()) {
-            if namespace.is_some() {
-                output.push_str("}\n\n");
-            }
-            output.push_str("export namespace ");
-            output.push_str(&current_namespace);
-            output.push_str(" {\n");
-            namespace = Some(current_namespace);
-        }
-
-        output.push_str(&render_endpoint(endpoint));
-    }
-
-    if namespace.is_some() {
-        output.push_str("}\n");
-    }
-
-    trim_trailing_blank_lines(output)
+    render_tracked_endpoints(contract).file.contents
 }
 
 /// Renders the generated Effect service tag, service interface, and layer helpers.
 #[must_use]
 pub fn render_layer(contract: &ApiContract) -> String {
-    let mut output = render_package_banner(contract);
-    if contract_has_stream_endpoints(contract) {
-        output.push_str("import { Context, Layer, Effect, Stream } from \"effect\"\n");
-    } else {
-        output.push_str("import { Context, Layer, Effect } from \"effect\"\n");
-    }
-    let runtime_client_imports = collect_runtime_client_imports(contract);
-    if !runtime_client_imports.is_empty() {
-        output.push_str("import { ");
-        output.push_str(
-            &runtime_client_imports
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"@rust-ts-integration/effect-runtime\"\n");
-    }
-
-    let endpoint_namespaces = collect_endpoint_namespaces(contract);
-    if !endpoint_namespaces.is_empty() {
-        output.push_str("import { ");
-        output.push_str(
-            &endpoint_namespaces
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"./endpoints\"\n");
-    }
-
-    let schema_imports = collect_service_schema_imports(contract);
-    if !schema_imports.is_empty() {
-        output.push_str("import { ");
-        output.push_str(
-            &schema_imports
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"./schemas\"\n");
-    }
-
-    let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
-    if !error_metadata_imports.is_empty() {
-        output.push_str("import { ");
-        output.push_str(
-            &error_metadata_imports
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        output.push_str(" } from \"./errors\"\n");
-    }
-
-    let error_type_imports = collect_endpoint_error_imports(contract);
-    output.push_str("import type { ");
-    output.push_str(
-        &error_type_imports
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    output.push_str(" } from \"./errors\"\n\n");
-
-    output.push_str("export interface ServerApiConfig {\n");
-    output.push_str("  readonly baseUrl: string\n");
-    output.push_str("  readonly timeoutMs?: number\n");
-    output.push_str("  readonly fetch?: typeof fetch\n");
-    output.push_str("}\n\n");
-
-    output.push_str(&format!(
-        "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()({}) {{}}\n\n",
-        ts_string(&format!("{}::ServerApi", contract.package_name))
-    ));
-
-    output.push_str("export namespace ServerApi {\n");
-    output.push_str(&render_service_interface(contract));
-    output.push('\n');
-    output.push_str(
-        "  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> => {\n",
-    );
-    output.push_str("    const service: Service = {\n");
-    output.push_str(&render_fetch_service(contract));
-    output.push_str("    }\n");
-    output.push_str("    return Layer.succeed(ServerApi, ServerApi.of(service))\n");
-    output.push_str("  }\n\n");
-    output.push_str("  export const mock = (service: Service): Layer.Layer<ServerApi> =>\n");
-    output.push_str("    Layer.succeed(ServerApi, ServerApi.of(service))\n");
-    output.push_str("}\n");
-
-    trim_trailing_blank_lines(output)
+    render_tracked_layer(contract).file.contents
 }
 
 /// In-memory representation of the hidden generated TypeScript package.
@@ -247,6 +46,7 @@ pub fn render_layer(contract: &ApiContract) -> String {
 pub struct GeneratedPackage {
     pub package_dir: PathBuf,
     pub files: Vec<GeneratedFile>,
+    pub marks: Vec<GeneratedMark>,
     pub tsconfig_paths: TsconfigPaths,
 }
 
@@ -257,6 +57,29 @@ pub struct GeneratedFile {
     pub contents: String,
 }
 
+/// A generated TypeScript range associated with a Rust API symbol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedMark {
+    pub path: String,
+    pub symbol_id: String,
+    pub kind: String,
+    pub range: GeneratedRange,
+}
+
+/// Zero-based UTF-16 range in a generated TypeScript file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedRange {
+    pub start: GeneratedPosition,
+    pub end: GeneratedPosition,
+}
+
+/// Zero-based UTF-16 position in a generated TypeScript file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
 /// TypeScript path mapping metadata for a generated API package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TsconfigPaths {
@@ -264,10 +87,89 @@ pub struct TsconfigPaths {
     pub package_dir: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackedFile {
+    file: GeneratedFile,
+    marks: Vec<GeneratedMark>,
+}
+
+#[derive(Debug)]
+struct TrackedWriter {
+    path: String,
+    contents: String,
+    marks: Vec<GeneratedMark>,
+}
+
+impl TrackedWriter {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            contents: String::new(),
+            marks: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        self.contents.push_str(text);
+    }
+
+    fn mark(&mut self, symbol_id: &SymbolId, kind: &str, text: &str) {
+        let start = self.contents.len();
+        self.contents.push_str(text);
+        let end = self.contents.len();
+        self.marks.push(GeneratedMark {
+            path: self.path.clone(),
+            symbol_id: symbol_id.as_str().to_owned(),
+            kind: kind.to_owned(),
+            range: generated_range_for_offsets(&self.contents, start, end),
+        });
+    }
+
+    fn mark_synthetic(&mut self, symbol_id: String, kind: &str, text: &str) {
+        let start = self.contents.len();
+        self.contents.push_str(text);
+        let end = self.contents.len();
+        self.marks.push(GeneratedMark {
+            path: self.path.clone(),
+            symbol_id,
+            kind: kind.to_owned(),
+            range: generated_range_for_offsets(&self.contents, start, end),
+        });
+    }
+
+    fn into_tracked_file(self) -> TrackedFile {
+        TrackedFile {
+            file: GeneratedFile {
+                path: self.path,
+                contents: trim_trailing_blank_lines(self.contents),
+            },
+            marks: self.marks,
+        }
+    }
+}
+
 /// Builds the generated package files and resolver metadata without writing them.
 #[must_use]
 pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> GeneratedPackage {
     let package_dir = generated_package_dir(target_dir, &contract.package_name);
+    let schemas = render_tracked_schemas(contract);
+    let errors = render_tracked_errors(contract);
+    let endpoints = render_tracked_endpoints(contract);
+    let layer = render_tracked_layer(contract);
+    let mut marks = Vec::new();
+    marks.extend(schemas.marks.clone());
+    marks.extend(errors.marks.clone());
+    marks.extend(endpoints.marks.clone());
+    marks.extend(layer.marks.clone());
+    marks.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+            .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+            .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+    });
+
     let files = vec![
         GeneratedFile {
             path: "package.json".to_owned(),
@@ -277,22 +179,10 @@ pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> Ge
             path: "index.ts".to_owned(),
             contents: render_package_index(contract),
         },
-        GeneratedFile {
-            path: "schemas.ts".to_owned(),
-            contents: render_schemas(contract),
-        },
-        GeneratedFile {
-            path: "errors.ts".to_owned(),
-            contents: render_errors(contract),
-        },
-        GeneratedFile {
-            path: "endpoints.ts".to_owned(),
-            contents: render_endpoints(contract),
-        },
-        GeneratedFile {
-            path: "layer.ts".to_owned(),
-            contents: render_layer(contract),
-        },
+        schemas.file,
+        errors.file,
+        endpoints.file,
+        layer.file,
         GeneratedFile {
             path: "tsconfig.paths.json".to_owned(),
             contents: render_tsconfig_paths(&TsconfigPaths {
@@ -309,6 +199,7 @@ pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> Ge
         },
         package_dir,
         files,
+        marks,
     }
 }
 
@@ -328,12 +219,9 @@ struct SymbolGraph {
 impl SymbolGraph {
     fn from_generated_package(contract: &ApiContract, package: &GeneratedPackage) -> Self {
         let mut symbols = Vec::new();
-        let endpoints_ts = package_file(package, "endpoints.ts");
-        let schemas_ts = package_file(package, "schemas.ts");
-        let errors_ts = package_file(package, "errors.ts");
 
         for endpoint in &contract.endpoints {
-            symbols.push(endpoint_symbol(contract, package, endpoint, endpoints_ts));
+            symbols.push(endpoint_symbol(contract, package, endpoint));
             for field in endpoint.request.path_params.iter() {
                 symbols.push(field_symbol(
                     "routeParam",
@@ -341,7 +229,6 @@ impl SymbolGraph {
                     field,
                     path_with(&endpoint.rust_path, &[&field.rust_name]),
                     path_with(&endpoint.ts_path, &[&field.ts_name]),
-                    endpoints_ts,
                 ));
             }
             for field in &endpoint.request.query_params {
@@ -351,21 +238,20 @@ impl SymbolGraph {
                     field,
                     path_with(&endpoint.rust_path, &[&field.rust_name]),
                     path_with(&endpoint.ts_path, &[&field.ts_name]),
-                    endpoints_ts,
                 ));
             }
         }
 
         for type_def in &contract.types {
-            symbols.push(type_symbol(package, type_def, schemas_ts));
-            collect_type_shape_symbols(package, type_def, schemas_ts, &mut symbols);
+            symbols.push(type_symbol(package, type_def));
+            collect_type_shape_symbols(package, type_def, &mut symbols);
         }
 
         for error in &contract.errors {
-            symbols.push(error_type_symbol(package, error, errors_ts));
+            symbols.push(error_type_symbol(package, error));
             for variant in &error.variants {
-                symbols.push(error_variant_symbol(package, error, variant, errors_ts));
-                symbols.push(error_tag_symbol(package, error, variant, errors_ts));
+                symbols.push(error_variant_symbol(package, error, variant));
+                symbols.push(error_tag_symbol(package, error, variant));
                 let class_name = error_variant_class_name(error, variant);
                 for field in &variant.fields {
                     symbols.push(field_symbol(
@@ -374,7 +260,6 @@ impl SymbolGraph {
                         field,
                         path_with(&error.rust_path, &[&variant.rust_name, &field.rust_name]),
                         path_from(&[&class_name, &field.ts_name]),
-                        errors_ts,
                     ));
                 }
             }
@@ -458,22 +343,13 @@ fn endpoint_symbol(
     contract: &ApiContract,
     package: &GeneratedPackage,
     endpoint: &Endpoint,
-    endpoints_ts: Option<&GeneratedFile>,
 ) -> LinkedSymbol {
     let function_name = endpoint_function_name(endpoint);
     LinkedSymbol {
         id: endpoint.id.as_str().to_owned(),
         kind: "endpoint".to_owned(),
         rust: rust_location(&endpoint.source, Some(true)),
-        typescript: generated_location(
-            package,
-            endpoints_ts,
-            &format!("export const {function_name}"),
-            &function_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, endpoint.id.as_str(), "endpoint"),
         metadata: SymbolMetadata {
             method: Some(endpoint.method.as_str().to_owned()),
             route: Some(endpoint.route.0.clone()),
@@ -493,24 +369,12 @@ fn endpoint_symbol(
     }
 }
 
-fn type_symbol(
-    package: &GeneratedPackage,
-    type_def: &TypeDef,
-    schemas_ts: Option<&GeneratedFile>,
-) -> LinkedSymbol {
+fn type_symbol(package: &GeneratedPackage, type_def: &TypeDef) -> LinkedSymbol {
     LinkedSymbol {
         id: type_def.id.as_str().to_owned(),
         kind: "type".to_owned(),
         rust: rust_location(&type_def.source, Some(true)),
-        typescript: generated_location(
-            package,
-            schemas_ts,
-            &format!("export const {}", type_def.ts_name),
-            &type_def.ts_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, type_def.id.as_str(), "type"),
         metadata: SymbolMetadata {
             rust_path: type_def.rust_path.clone(),
             ts_path: vec![type_def.ts_name.clone()],
@@ -520,24 +384,12 @@ fn type_symbol(
     }
 }
 
-fn error_type_symbol(
-    package: &GeneratedPackage,
-    error: &ErrorDef,
-    errors_ts: Option<&GeneratedFile>,
-) -> LinkedSymbol {
+fn error_type_symbol(package: &GeneratedPackage, error: &ErrorDef) -> LinkedSymbol {
     LinkedSymbol {
         id: error.id.as_str().to_owned(),
         kind: "error".to_owned(),
         rust: rust_location(&error.source, Some(true)),
-        typescript: generated_location(
-            package,
-            errors_ts,
-            &format!("export type {}", error.ts_name),
-            &error.ts_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, error.id.as_str(), "error"),
         metadata: SymbolMetadata {
             rust_path: error.rust_path.clone(),
             ts_path: vec![error.ts_name.clone()],
@@ -551,22 +403,13 @@ fn error_variant_symbol(
     package: &GeneratedPackage,
     error: &ErrorDef,
     variant: &ErrorVariant,
-    errors_ts: Option<&GeneratedFile>,
 ) -> LinkedSymbol {
     let class_name = error_variant_class_name(error, variant);
     LinkedSymbol {
         id: variant.id.as_str().to_owned(),
         kind: "errorVariant".to_owned(),
         rust: rust_location(&variant.source, Some(true)),
-        typescript: generated_location(
-            package,
-            errors_ts,
-            &format!("export class {class_name}"),
-            &class_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, variant.id.as_str(), "errorVariant"),
         metadata: SymbolMetadata {
             rust_path: error
                 .rust_path
@@ -585,24 +428,14 @@ fn error_tag_symbol(
     package: &GeneratedPackage,
     error: &ErrorDef,
     variant: &ErrorVariant,
-    errors_ts: Option<&GeneratedFile>,
 ) -> LinkedSymbol {
     let class_name = error_variant_class_name(error, variant);
+    let id = error_tag_symbol_id(variant);
     LinkedSymbol {
-        id: SymbolId::from_parts("error_tag", &[variant.id.as_str()])
-            .as_str()
-            .to_owned(),
+        id: id.clone(),
         kind: "errorTag".to_owned(),
         rust: rust_location(&variant.source, Some(true)),
-        typescript: generated_location(
-            package,
-            errors_ts,
-            &ts_string(&variant.tag),
-            &variant.tag,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, &id, "errorTag"),
         metadata: SymbolMetadata {
             rust_path: path_with(&error.rust_path, &[&variant.rust_name]),
             ts_path: path_from(&[&class_name, &variant.tag]),
@@ -618,21 +451,12 @@ fn field_symbol(
     field: &Field,
     rust_path: Vec<String>,
     ts_path: Vec<String>,
-    generated_file: Option<&GeneratedFile>,
 ) -> LinkedSymbol {
     LinkedSymbol {
         id: field.id.as_str().to_owned(),
         kind: kind.to_owned(),
         rust: rust_location(&field.source, Some(true)),
-        typescript: generated_location(
-            package,
-            generated_file,
-            &field.ts_name,
-            &field.ts_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, field.id.as_str(), kind),
         metadata: SymbolMetadata {
             rust_path,
             ts_path,
@@ -645,7 +469,6 @@ fn field_symbol(
 fn collect_type_shape_symbols(
     package: &GeneratedPackage,
     type_def: &TypeDef,
-    schemas_ts: Option<&GeneratedFile>,
     symbols: &mut Vec<LinkedSymbol>,
 ) {
     match &type_def.shape {
@@ -657,13 +480,12 @@ fn collect_type_shape_symbols(
                     field,
                     path_with(&type_def.rust_path, &[&field.rust_name]),
                     path_from(&[&type_def.ts_name, &field.ts_name]),
-                    schemas_ts,
                 ));
             }
         }
         TypeShape::Enum(EnumShape { variants }) => {
             for variant in variants {
-                symbols.push(enum_variant_symbol(package, type_def, variant, schemas_ts));
+                symbols.push(enum_variant_symbol(package, type_def, variant));
                 for field in &variant.fields {
                     symbols.push(field_symbol(
                         "field",
@@ -671,7 +493,6 @@ fn collect_type_shape_symbols(
                         field,
                         path_with(&type_def.rust_path, &[&variant.rust_name, &field.rust_name]),
                         path_from(&[&type_def.ts_name, &variant.wire_name, &field.ts_name]),
-                        schemas_ts,
                     ));
                 }
             }
@@ -690,21 +511,12 @@ fn enum_variant_symbol(
     package: &GeneratedPackage,
     type_def: &TypeDef,
     variant: &EnumVariant,
-    schemas_ts: Option<&GeneratedFile>,
 ) -> LinkedSymbol {
     LinkedSymbol {
         id: variant.id.as_str().to_owned(),
         kind: "enumVariant".to_owned(),
         rust: rust_location(&variant.source, Some(true)),
-        typescript: generated_location(
-            package,
-            schemas_ts,
-            &ts_string(&variant.wire_name),
-            &variant.wire_name,
-            true,
-        )
-        .into_iter()
-        .collect(),
+        typescript: generated_locations(package, variant.id.as_str(), "enumVariant"),
         metadata: SymbolMetadata {
             rust_path: path_with(&type_def.rust_path, &[&variant.rust_name]),
             ts_path: path_from(&[&type_def.ts_name, &variant.wire_name]),
@@ -740,31 +552,33 @@ fn path_with(base: &[String], additions: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn package_file<'a>(package: &'a GeneratedPackage, path: &str) -> Option<&'a GeneratedFile> {
-    package.files.iter().find(|file| file.path == path)
+fn generated_locations(
+    package: &GeneratedPackage,
+    symbol_id: &str,
+    kind: &str,
+) -> Vec<GraphLocation> {
+    package
+        .marks
+        .iter()
+        .filter(|mark| mark.symbol_id == symbol_id && mark.kind == kind)
+        .map(|mark| {
+            let range = graph_range_from_generated(mark.range);
+            GraphLocation {
+                file: Some(package.package_dir.join(&mark.path).display().to_string()),
+                range,
+                name_range: Some(range),
+                full_range: Some(range),
+                generated: true,
+                renamable: Some(true),
+            }
+        })
+        .collect()
 }
 
-fn generated_location(
-    package: &GeneratedPackage,
-    file: Option<&GeneratedFile>,
-    anchor: &str,
-    name: &str,
-    renamable: bool,
-) -> Option<GraphLocation> {
-    let file = file?;
-    let anchor_offset = file.contents.find(anchor)?;
-    let name_offset = file.contents[anchor_offset..]
-        .find(name)
-        .map(|offset| anchor_offset + offset)?;
-    let range = range_for_offset(&file.contents, name_offset, name.len());
-    Some(GraphLocation {
-        file: Some(package.package_dir.join(&file.path).display().to_string()),
-        range,
-        name_range: Some(range),
-        full_range: Some(range),
-        generated: true,
-        renamable: Some(renamable),
-    })
+fn error_tag_symbol_id(variant: &ErrorVariant) -> String {
+    SymbolId::from_parts("error_tag", &[variant.id.as_str()])
+        .as_str()
+        .to_owned()
 }
 
 fn rust_location(source: &SourceRange, renamable: Option<bool>) -> GraphLocation {
@@ -810,10 +624,32 @@ fn range_from_source_span(source: &SourceSpan) -> GraphRange {
     }
 }
 
-fn range_for_offset(contents: &str, offset: usize, width: usize) -> GraphRange {
-    let start = position_for_offset(contents, offset);
-    let end = position_for_offset(contents, offset + width);
-    GraphRange { start, end }
+fn graph_range_from_generated(range: GeneratedRange) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: range.start.line,
+            character: range.start.character,
+        },
+        end: GraphPosition {
+            line: range.end.line,
+            character: range.end.character,
+        },
+    }
+}
+
+fn generated_range_for_offsets(contents: &str, start: usize, end: usize) -> GeneratedRange {
+    GeneratedRange {
+        start: generated_position_for_offset(contents, start),
+        end: generated_position_for_offset(contents, end),
+    }
+}
+
+fn generated_position_for_offset(contents: &str, offset: usize) -> GeneratedPosition {
+    let position = position_for_offset(contents, offset);
+    GeneratedPosition {
+        line: position.line,
+        character: position.character,
+    }
 }
 
 fn position_for_offset(contents: &str, offset: usize) -> GraphPosition {
@@ -880,12 +716,650 @@ pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
     )
 }
 
-fn render_type_def(type_def: &TypeDef) -> String {
-    let schema = render_type_shape(&type_def.shape, type_def);
-    format!(
-        "export const {name} = {schema}\nexport type {name} = Schema.Schema.Type<typeof {name}>\nexport type {name}Encoded = Schema.Codec.Encoded<typeof {name}>\n",
-        name = type_def.ts_name,
-    )
+fn render_tracked_schemas(contract: &ApiContract) -> TrackedFile {
+    let mut writer = TrackedWriter::new("schemas.ts");
+    writer.push(&render_package_banner(contract));
+    writer.push("import { Schema } from \"effect\"\n\n");
+
+    let mut types = contract.types.iter().collect::<Vec<_>>();
+    types.sort_by(|left, right| {
+        left.ts_name
+            .cmp(&right.ts_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    for type_def in types {
+        write_tracked_type_def(&mut writer, type_def);
+        writer.push("\n");
+    }
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_type_def(writer: &mut TrackedWriter, type_def: &TypeDef) {
+    writer.push("export const ");
+    writer.mark(&type_def.id, "type", &type_def.ts_name);
+    writer.push(" = ");
+    write_tracked_type_shape(writer, &type_def.shape, type_def, 0);
+    writer.push("\nexport type ");
+    writer.mark(&type_def.id, "type", &type_def.ts_name);
+    writer.push(" = Schema.Schema.Type<typeof ");
+    writer.push(&type_def.ts_name);
+    writer.push(">\nexport type ");
+    writer.mark(
+        &type_def.id,
+        "type",
+        &format!("{}Encoded", type_def.ts_name),
+    );
+    writer.push(" = Schema.Codec.Encoded<typeof ");
+    writer.push(&type_def.ts_name);
+    writer.push(">\n");
+}
+
+fn write_tracked_type_shape(
+    writer: &mut TrackedWriter,
+    shape: &TypeShape,
+    owner: &TypeDef,
+    indent: usize,
+) {
+    match shape {
+        TypeShape::Struct(shape) => write_tracked_struct(writer, shape, indent),
+        TypeShape::Enum(shape) => write_tracked_enum(writer, shape, indent),
+        TypeShape::Primitive(_)
+        | TypeShape::Newtype(_)
+        | TypeShape::Tuple(_)
+        | TypeShape::List(_)
+        | TypeShape::Map { .. }
+        | TypeShape::Option(_)
+        | TypeShape::External(_) => writer.push(&render_type_shape(shape, owner)),
+    }
+}
+
+fn write_tracked_struct(writer: &mut TrackedWriter, shape: &StructShape, indent: usize) {
+    if shape.fields.is_empty() {
+        writer.push("Schema.Struct({})");
+        return;
+    }
+
+    writer.push("Schema.Struct({\n");
+    for field in &shape.fields {
+        writer.push(&render_indent(indent + 2));
+        writer.mark(&field.id, "field", &field.ts_name);
+        writer.push(": ");
+        writer.push(&render_field_schema(field));
+        writer.push(",\n");
+    }
+    writer.push(&render_indent(indent));
+    writer.push("})");
+}
+
+fn write_tracked_enum(writer: &mut TrackedWriter, shape: &EnumShape, indent: usize) {
+    if shape.variants.is_empty() {
+        writer.push("Schema.Never");
+        return;
+    }
+
+    writer.push("Schema.Union([");
+    for (index, variant) in shape.variants.iter().enumerate() {
+        if index > 0 {
+            writer.push(", ");
+        }
+        write_tracked_enum_variant(writer, variant, indent);
+    }
+    writer.push("])");
+}
+
+fn write_tracked_enum_variant(writer: &mut TrackedWriter, variant: &EnumVariant, indent: usize) {
+    if variant.fields.is_empty() {
+        writer.push("Schema.Struct({ _tag: Schema.Literal(\"");
+        writer.mark(&variant.id, "enumVariant", &variant.wire_name);
+        writer.push("\") })");
+        return;
+    }
+
+    writer.push("Schema.Struct({\n");
+    writer.push(&render_indent(indent + 2));
+    writer.push("_tag: Schema.Literal(\"");
+    writer.mark(&variant.id, "enumVariant", &variant.wire_name);
+    writer.push("\"),\n");
+    for field in &variant.fields {
+        writer.push(&render_indent(indent + 2));
+        writer.mark(&field.id, "field", &field.ts_name);
+        writer.push(": ");
+        writer.push(&render_field_schema(field));
+        writer.push(",\n");
+    }
+    writer.push(&render_indent(indent));
+    writer.push("})");
+}
+
+fn render_tracked_endpoints(contract: &ApiContract) -> TrackedFile {
+    let mut writer = TrackedWriter::new("endpoints.ts");
+    writer.push(&render_package_banner(contract));
+    if contract_has_stream_endpoints(contract) {
+        writer.push("import { Effect, Stream } from \"effect\"\n");
+    } else {
+        writer.push("import { Effect } from \"effect\"\n");
+    }
+    writer.push("import { ServerApi } from \"./layer\"\n");
+
+    let schema_imports = collect_endpoint_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import type { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+
+    let error_imports = collect_endpoint_error_imports(contract);
+    writer.push("import type { ");
+    writer.push(
+        &error_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    writer.push(" } from \"./errors\"\n\n");
+
+    let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        endpoint_namespace(left)
+            .cmp(&endpoint_namespace(right))
+            .then_with(|| endpoint_function_name(left).cmp(&endpoint_function_name(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let mut namespace = None::<String>;
+    for endpoint in endpoints {
+        let current_namespace = endpoint_namespace(endpoint);
+        if namespace.as_deref() != Some(current_namespace.as_str()) {
+            if namespace.is_some() {
+                writer.push("}\n\n");
+            }
+            writer.push("export namespace ");
+            writer.push(&current_namespace);
+            writer.push(" {\n");
+            namespace = Some(current_namespace);
+        }
+
+        write_tracked_endpoint(&mut writer, endpoint);
+    }
+
+    if namespace.is_some() {
+        writer.push("}\n");
+    }
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_endpoint(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+    let function_name = endpoint_function_name(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let namespace = endpoint_namespace(endpoint);
+
+    write_tracked_endpoint_args(writer, endpoint);
+    writer.push("\n  export const ");
+    writer.mark(&endpoint.id, "endpoint", &format!("{function_name}Route"));
+    writer.push(" = {\n    method: ");
+    writer.push(&ts_string(endpoint.method.as_str()));
+    writer.push(",\n    path: ");
+    writer.push(&ts_string(&endpoint.route.0));
+    writer.push(",\n    transport: ");
+    writer.push(&ts_string(render_transport(endpoint.transport)));
+    writer.push(",\n  } as const\n\n  export const ");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push(" = (\n    args: ");
+    writer.push(&args_name);
+    writer.push("\n  ): ");
+    writer.push(&render_endpoint_return_type(endpoint, "ServerApi"));
+    writer.push(" =>\n    ServerApi.use((api) => api.");
+    writer.push(&namespace);
+    writer.push(".");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push("(args))\n\n");
+}
+
+fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+    let args_name = endpoint_args_name(endpoint);
+    let mut has_fields = false;
+    writer.push("  export interface ");
+    writer.push(&args_name);
+    if endpoint.request.path_params.is_empty()
+        && endpoint.request.query_params.is_empty()
+        && endpoint.request.body.is_none()
+    {
+        writer.push(" {}\n");
+        return;
+    }
+
+    writer.push(" {\n");
+    for field in &endpoint.request.path_params {
+        has_fields = true;
+        writer.push("    readonly ");
+        mark_property_key(writer, &field.id, "routeParam", &field.ts_name);
+        if matches!(field.optionality, Optionality::Optional) {
+            writer.push("?");
+        }
+        writer.push(": ");
+        writer.push(&render_endpoint_arg_field_type(field));
+        writer.push(";\n");
+    }
+    for field in &endpoint.request.query_params {
+        has_fields = true;
+        writer.push("    readonly ");
+        mark_property_key(writer, &field.id, "queryParam", &field.ts_name);
+        if matches!(field.optionality, Optionality::Optional) {
+            writer.push("?");
+        }
+        writer.push(": ");
+        writer.push(&render_endpoint_arg_field_type(field));
+        writer.push(";\n");
+    }
+    if let Some(body) = &endpoint.request.body {
+        has_fields = true;
+        writer.push("    readonly body: ");
+        writer.push(&render_ts_type_ref(body));
+        writer.push(";\n");
+    }
+    if !has_fields {
+        writer.push("  }\n");
+        return;
+    }
+    writer.push("  }\n");
+}
+
+fn render_tracked_errors(contract: &ApiContract) -> TrackedFile {
+    let mut writer = TrackedWriter::new("errors.ts");
+    writer.push(&render_package_banner(contract));
+    writer.push("import { Schema } from \"effect\"\n");
+
+    let schema_imports = collect_error_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+    writer.push("\n");
+    writer.push(&render_client_errors());
+
+    let mut errors = contract.errors.iter().collect::<Vec<_>>();
+    errors.sort_by(|left, right| {
+        left.ts_name
+            .cmp(&right.ts_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    for error in errors {
+        writer.push("\n");
+        write_tracked_error_def(&mut writer, error);
+    }
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_error_def(writer: &mut TrackedWriter, error: &ErrorDef) {
+    for variant in &error.variants {
+        write_tracked_error_variant(writer, error, variant);
+        writer.push("\n");
+    }
+
+    writer.push("export type ");
+    writer.mark(&error.id, "error", &error.ts_name);
+    writer.push(" =\n");
+    if error.variants.is_empty() {
+        writer.push("  never\n");
+    } else {
+        for variant in &error.variants {
+            writer.push("  | ");
+            writer.mark(
+                &variant.id,
+                "errorVariant",
+                &error_variant_class_name(error, variant),
+            );
+            writer.push("\n");
+        }
+    }
+
+    writer.push("\n");
+    write_tracked_error_status_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_status_by_code_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_schema_by_status_metadata(writer, error);
+    writer.push("\n");
+    write_tracked_error_symbol_metadata(writer, error);
+}
+
+fn write_tracked_error_variant(
+    writer: &mut TrackedWriter,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+) {
+    let fields = variant
+        .fields
+        .iter()
+        .map(|field| (field, render_field_schema(field)))
+        .collect::<Vec<_>>();
+    let class_name = error_variant_class_name(error, variant);
+    writer.push("export class ");
+    writer.mark(&variant.id, "errorVariant", &class_name);
+    writer.push(" extends Schema.TaggedErrorClass<");
+    writer.push(&class_name);
+    writer.push(">()(\n  ");
+    mark_ts_string(
+        writer,
+        error_tag_symbol_id(variant),
+        "errorTag",
+        &variant.tag,
+    );
+    writer.push(",\n");
+    if fields.is_empty() {
+        writer.push("  {}\n");
+    } else {
+        writer.push("  {\n");
+        for (field, schema) in fields {
+            writer.push("    ");
+            mark_property_key(writer, &field.id, "errorField", &field.ts_name);
+            writer.push(": ");
+            writer.push(&schema);
+            writer.push(",\n");
+        }
+        writer.push("  }\n");
+    }
+    writer.push(") {}\n");
+}
+
+fn write_tracked_error_status_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(&error.id, "error", &format!("{}Status", error.ts_name));
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        mark_property_key(
+            writer,
+            &SymbolId::new(error_tag_symbol_id(variant)),
+            "errorTag",
+            &variant.tag,
+        );
+        writer.push(": ");
+        writer.push(&variant.status.0.to_string());
+        writer.push(",\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn write_tracked_error_status_by_code_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(
+        &error.id,
+        "error",
+        &format!("{}StatusByCode", error.ts_name),
+    );
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        writer.push(&variant.status.0.to_string());
+        writer.push(": ");
+        mark_ts_string(
+            writer,
+            error_tag_symbol_id(variant),
+            "errorTag",
+            &variant.tag,
+        );
+        writer.push(",\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn write_tracked_error_schema_by_status_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(
+        &error.id,
+        "error",
+        &format!("{}SchemaByStatus", error.ts_name),
+    );
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        writer.push(&variant.status.0.to_string());
+        writer.push(": ");
+        writer.mark(
+            &variant.id,
+            "errorVariant",
+            &error_variant_class_name(error, variant),
+        );
+        writer.push(",\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn write_tracked_error_symbol_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
+    writer.push("export const ");
+    writer.mark(&error.id, "error", &format!("{}Symbols", error.ts_name));
+    writer.push(" = {\n");
+    for variant in &error.variants {
+        writer.push("  ");
+        mark_property_key(
+            writer,
+            &SymbolId::new(error_tag_symbol_id(variant)),
+            "errorTag",
+            &variant.tag,
+        );
+        writer.push(": {\n");
+        writer.push("    symbolId: ");
+        writer.push(&ts_string(variant.id.as_str()));
+        writer.push(",\n    rustName: ");
+        writer.push(&ts_string(&variant.rust_name));
+        writer.push(",\n    source: ");
+        writer.push(&render_source_range(&variant.source, 4));
+        writer.push(",\n  },\n");
+    }
+    writer.push("} as const\n");
+}
+
+fn render_tracked_layer(contract: &ApiContract) -> TrackedFile {
+    let mut writer = TrackedWriter::new("layer.ts");
+    writer.push(&render_package_banner(contract));
+    if contract_has_stream_endpoints(contract) {
+        writer.push("import { Context, Layer, Effect, Stream } from \"effect\"\n");
+    } else {
+        writer.push("import { Context, Layer, Effect } from \"effect\"\n");
+    }
+    let runtime_client_imports = collect_runtime_client_imports(contract);
+    if !runtime_client_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &runtime_client_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"@rust-ts-integration/effect-runtime\"\n");
+    }
+
+    let endpoint_namespaces = collect_endpoint_namespaces(contract);
+    if !endpoint_namespaces.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &endpoint_namespaces
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./endpoints\"\n");
+    }
+
+    let schema_imports = collect_service_schema_imports(contract);
+    if !schema_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &schema_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./schemas\"\n");
+    }
+
+    let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
+    if !error_metadata_imports.is_empty() {
+        writer.push("import { ");
+        writer.push(
+            &error_metadata_imports
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        writer.push(" } from \"./errors\"\n");
+    }
+
+    let error_type_imports = collect_endpoint_error_imports(contract);
+    writer.push("import type { ");
+    writer.push(
+        &error_type_imports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    writer.push(" } from \"./errors\"\n\n");
+
+    writer.push("export interface ServerApiConfig {\n");
+    writer.push("  readonly baseUrl: string\n");
+    writer.push("  readonly timeoutMs?: number\n");
+    writer.push("  readonly fetch?: typeof fetch\n");
+    writer.push("}\n\n");
+
+    writer.push(&format!(
+        "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()({}) {{}}\n\n",
+        ts_string(&format!("{}::ServerApi", contract.package_name))
+    ));
+
+    writer.push("export namespace ServerApi {\n");
+    write_tracked_service_interface(&mut writer, contract);
+    writer.push("\n");
+    writer.push("  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> => {\n");
+    writer.push("    const service: Service = {\n");
+    write_tracked_fetch_service(&mut writer, contract);
+    writer.push("    }\n");
+    writer.push("    return Layer.succeed(ServerApi, ServerApi.of(service))\n");
+    writer.push("  }\n\n");
+    writer.push("  export const mock = (service: Service): Layer.Layer<ServerApi> =>\n");
+    writer.push("    Layer.succeed(ServerApi, ServerApi.of(service))\n");
+    writer.push("}\n");
+
+    writer.into_tracked_file()
+}
+
+fn write_tracked_service_interface(writer: &mut TrackedWriter, contract: &ApiContract) {
+    writer.push("  export interface Service {\n");
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        writer.push("    readonly ");
+        writer.push(&namespace);
+        writer.push(": {\n");
+        for endpoint in endpoints {
+            writer.push("      readonly ");
+            writer.mark(&endpoint.id, "endpoint", &endpoint_function_name(endpoint));
+            writer.push(": (args: ");
+            writer.push(&endpoint_namespace(endpoint));
+            writer.push(".");
+            writer.push(&endpoint_args_name(endpoint));
+            writer.push(") => ");
+            writer.push(&render_endpoint_return_type(endpoint, "never"));
+            writer.push("\n");
+        }
+        writer.push("    }\n");
+    }
+
+    writer.push("  }\n");
+}
+
+fn write_tracked_fetch_service(writer: &mut TrackedWriter, contract: &ApiContract) {
+    let grouped = group_endpoints_by_namespace(contract);
+
+    for (namespace, endpoints) in grouped {
+        writer.push("      ");
+        writer.push(&namespace);
+        writer.push(": {\n");
+        for endpoint in endpoints {
+            write_tracked_fetch_service_method(writer, endpoint);
+        }
+        writer.push("      },\n");
+    }
+}
+
+fn write_tracked_fetch_service_method(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+    let function_name = endpoint_function_name(endpoint);
+    let namespace = endpoint_namespace(endpoint);
+    let args_name = endpoint_args_name(endpoint);
+    let helper = render_runtime_client_helper(endpoint);
+    let success_decoder = render_success_decoder(&endpoint.response, helper);
+    let error_decoder = render_domain_error_decoder(endpoint, helper);
+    let success = render_response_type(&endpoint.response);
+    let domain_error = render_endpoint_domain_error_type(endpoint);
+
+    writer.push("        ");
+    writer.mark(&endpoint.id, "endpoint", &function_name);
+    writer.push(": ");
+    writer.push(helper);
+    writer.push("<");
+    writer.push(&namespace);
+    writer.push(".");
+    writer.push(&args_name);
+    writer.push(", ");
+    writer.push(&success);
+    writer.push(", ");
+    writer.push(&domain_error);
+    writer.push(">(config, {\n          method: ");
+    writer.push(&ts_string(endpoint.method.as_str()));
+    writer.push(",\n          path: ");
+    writer.push(&namespace);
+    writer.push(".");
+    writer.push(&function_name);
+    writer.push("Route.path,\n          encode: ");
+    writer.push(&render_request_encoder(
+        &endpoint.request,
+        &format!("{namespace}.{args_name}"),
+    ));
+    writer.push(",\n          decodeSuccess: ");
+    writer.push(&success_decoder);
+    writer.push(",\n          decodeError: ");
+    writer.push(&error_decoder);
+    writer.push(",\n        }),\n");
+}
+
+fn render_endpoint_arg_field_type(field: &Field) -> String {
+    let mut field_type = render_ts_type_ref(&field.type_ref);
+    if matches!(field.optionality, Optionality::Nullable) {
+        field_type.push_str(" | null");
+    }
+    field_type
+}
+
+fn mark_property_key(writer: &mut TrackedWriter, symbol_id: &SymbolId, kind: &str, property: &str) {
+    writer.mark(symbol_id, kind, &render_property_key(property));
+}
+
+fn mark_ts_string(writer: &mut TrackedWriter, symbol_id: String, kind: &str, value: &str) {
+    writer.mark_synthetic(symbol_id, kind, &ts_string(value));
 }
 
 fn collect_endpoint_namespaces(contract: &ApiContract) -> BTreeSet<String> {
@@ -922,68 +1396,6 @@ fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
         collect_response_type_imports(&endpoint.response, &mut imports);
     }
     imports
-}
-
-fn render_service_interface(contract: &ApiContract) -> String {
-    let mut output = "  export interface Service {\n".to_owned();
-    let grouped = group_endpoints_by_namespace(contract);
-
-    for (namespace, endpoints) in grouped {
-        output.push_str("    readonly ");
-        output.push_str(&namespace);
-        output.push_str(": {\n");
-        for endpoint in endpoints {
-            output.push_str(&render_service_method(endpoint));
-        }
-        output.push_str("    }\n");
-    }
-
-    output.push_str("  }\n");
-    output
-}
-
-fn render_service_method(endpoint: &Endpoint) -> String {
-    format!(
-        "      readonly {function_name}: (args: {namespace}.{args_name}) => {return_type}\n",
-        function_name = endpoint_function_name(endpoint),
-        namespace = endpoint_namespace(endpoint),
-        args_name = endpoint_args_name(endpoint),
-        return_type = render_endpoint_return_type(endpoint, "never"),
-    )
-}
-
-fn render_fetch_service(contract: &ApiContract) -> String {
-    let mut output = String::new();
-    let grouped = group_endpoints_by_namespace(contract);
-
-    for (namespace, endpoints) in grouped {
-        output.push_str("      ");
-        output.push_str(&namespace);
-        output.push_str(": {\n");
-        for endpoint in endpoints {
-            output.push_str(&render_fetch_service_method(endpoint));
-        }
-        output.push_str("      },\n");
-    }
-
-    output
-}
-
-fn render_fetch_service_method(endpoint: &Endpoint) -> String {
-    let function_name = endpoint_function_name(endpoint);
-    let namespace = endpoint_namespace(endpoint);
-    let args_name = endpoint_args_name(endpoint);
-    let helper = render_runtime_client_helper(endpoint);
-    let success_decoder = render_success_decoder(&endpoint.response, helper);
-    let error_decoder = render_domain_error_decoder(endpoint, helper);
-    let success = render_response_type(&endpoint.response);
-    let domain_error = render_endpoint_domain_error_type(endpoint);
-
-    format!(
-        "        {function_name}: {helper}<{namespace}.{args_name}, {success}, {domain_error}>(config, {{\n          method: {method},\n          path: {namespace}.{function_name}Route.path,\n          encode: {encoder},\n          decodeSuccess: {success_decoder},\n          decodeError: {error_decoder},\n        }}),\n",
-        method = ts_string(endpoint.method.as_str()),
-        encoder = render_request_encoder(&endpoint.request, &format!("{namespace}.{args_name}")),
-    )
 }
 
 fn group_endpoints_by_namespace(contract: &ApiContract) -> Vec<(String, Vec<&Endpoint>)> {
@@ -1066,75 +1478,6 @@ fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<S
         }
     }
     imports
-}
-
-fn render_endpoint(endpoint: &Endpoint) -> String {
-    let function_name = endpoint_function_name(endpoint);
-    let args_name = endpoint_args_name(endpoint);
-
-    format!(
-        "{args_interface}\n  export const {function_name}Route = {{\n    method: {method},\n    path: {path},\n    transport: {transport},\n  }} as const\n\n  export const {function_name} = (\n    args: {args_name}\n  ): {return_type} =>\n    ServerApi.use((api) => api.{namespace}.{function_name}(args))\n\n",
-        args_interface = render_endpoint_args(endpoint),
-        method = ts_string(endpoint.method.as_str()),
-        path = ts_string(&endpoint.route.0),
-        transport = ts_string(render_transport(endpoint.transport)),
-        return_type = render_endpoint_return_type(endpoint, "ServerApi"),
-        namespace = endpoint_namespace(endpoint),
-    )
-}
-
-fn render_endpoint_args(endpoint: &Endpoint) -> String {
-    let args_name = endpoint_args_name(endpoint);
-    let mut fields = Vec::new();
-
-    fields.extend(
-        endpoint
-            .request
-            .path_params
-            .iter()
-            .map(render_endpoint_arg_field),
-    );
-    fields.extend(
-        endpoint
-            .request
-            .query_params
-            .iter()
-            .map(render_endpoint_arg_field),
-    );
-    if let Some(body) = &endpoint.request.body {
-        fields.push(format!("readonly body: {};", render_ts_type_ref(body)));
-    }
-
-    if fields.is_empty() {
-        return format!("  export interface {args_name} {{}}\n");
-    }
-
-    let mut output = format!("  export interface {args_name} {{\n");
-    for field in fields {
-        output.push_str("    ");
-        output.push_str(&field);
-        output.push('\n');
-    }
-    output.push_str("  }\n");
-    output
-}
-
-fn render_endpoint_arg_field(field: &Field) -> String {
-    let optional_marker = match field.optionality {
-        Optionality::Optional => "?",
-        Optionality::Required | Optionality::Nullable => "",
-    };
-    let mut field_type = render_ts_type_ref(&field.type_ref);
-    if matches!(field.optionality, Optionality::Nullable) {
-        field_type.push_str(" | null");
-    }
-
-    format!(
-        "readonly {}{}: {};",
-        render_property_key(&field.ts_name),
-        optional_marker,
-        field_type
-    )
 }
 
 fn render_response_type(response: &ResponseShape) -> String {
@@ -1405,59 +1748,6 @@ fn render_client_errors() -> String {
     output
 }
 
-fn render_error_def(error: &ErrorDef) -> String {
-    let mut output = String::new();
-
-    for variant in &error.variants {
-        output.push_str(&render_error_variant(error, variant));
-        output.push('\n');
-    }
-
-    output.push_str(&format!("export type {} =\n", error.ts_name));
-    if error.variants.is_empty() {
-        output.push_str("  never\n");
-    } else {
-        output.push_str(
-            &error
-                .variants
-                .iter()
-                .map(|variant| format!("  | {}", error_variant_class_name(error, variant)))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-        output.push('\n');
-    }
-
-    output.push('\n');
-    output.push_str(&render_error_status_metadata(error));
-    output.push('\n');
-    output.push_str(&render_error_status_by_code_metadata(error));
-    output.push('\n');
-    output.push_str(&render_error_schema_by_status_metadata(error));
-    output.push('\n');
-    output.push_str(&render_error_symbol_metadata(error));
-
-    output
-}
-
-fn render_error_variant(error: &ErrorDef, variant: &ErrorVariant) -> String {
-    let fields = variant
-        .fields
-        .iter()
-        .map(|field| (field.ts_name.as_str(), render_field_schema(field)))
-        .collect::<Vec<_>>();
-    let fields = fields
-        .iter()
-        .map(|(name, schema)| (*name, schema.as_str()))
-        .collect::<Vec<_>>();
-
-    render_tagged_error_class(
-        &error_variant_class_name(error, variant),
-        &variant.tag,
-        &fields,
-    )
-}
-
 fn render_tagged_error_class(class_name: &str, tag: &str, fields: &[(&str, &str)]) -> String {
     let mut output = format!(
         "export class {class_name} extends Schema.TaggedErrorClass<{class_name}>()(\n  {},\n",
@@ -1479,63 +1769,6 @@ fn render_tagged_error_class(class_name: &str, tag: &str, fields: &[(&str, &str)
     }
 
     output.push_str(") {}\n");
-    output
-}
-
-fn render_error_status_metadata(error: &ErrorDef) -> String {
-    let mut output = format!("export const {}Status = {{\n", error.ts_name);
-    for variant in &error.variants {
-        output.push_str("  ");
-        output.push_str(&render_property_key(&variant.tag));
-        output.push_str(": ");
-        output.push_str(&variant.status.0.to_string());
-        output.push_str(",\n");
-    }
-    output.push_str("} as const\n");
-    output
-}
-
-fn render_error_status_by_code_metadata(error: &ErrorDef) -> String {
-    let mut output = format!("export const {}StatusByCode = {{\n", error.ts_name);
-    for variant in &error.variants {
-        output.push_str("  ");
-        output.push_str(&variant.status.0.to_string());
-        output.push_str(": ");
-        output.push_str(&ts_string(&variant.tag));
-        output.push_str(",\n");
-    }
-    output.push_str("} as const\n");
-    output
-}
-
-fn render_error_schema_by_status_metadata(error: &ErrorDef) -> String {
-    let mut output = format!("export const {}SchemaByStatus = {{\n", error.ts_name);
-    for variant in &error.variants {
-        output.push_str("  ");
-        output.push_str(&variant.status.0.to_string());
-        output.push_str(": ");
-        output.push_str(&error_variant_class_name(error, variant));
-        output.push_str(",\n");
-    }
-    output.push_str("} as const\n");
-    output
-}
-
-fn render_error_symbol_metadata(error: &ErrorDef) -> String {
-    let mut output = format!("export const {}Symbols = {{\n", error.ts_name);
-    for variant in &error.variants {
-        output.push_str("  ");
-        output.push_str(&render_property_key(&variant.tag));
-        output.push_str(": {\n");
-        output.push_str("    symbolId: ");
-        output.push_str(&ts_string(variant.id.as_str()));
-        output.push_str(",\n    rustName: ");
-        output.push_str(&ts_string(&variant.rust_name));
-        output.push_str(",\n    source: ");
-        output.push_str(&render_source_range(&variant.source, 4));
-        output.push_str(",\n  },\n");
-    }
-    output.push_str("} as const\n");
     output
 }
 
@@ -2389,6 +2622,13 @@ export * from "./layer"
                 && location["file"]
                     .as_str()
                     .is_some_and(|file| file.ends_with("endpoints.ts"))));
+        assert!(endpoint["typescript"]
+            .as_array()
+            .expect("endpoint ts locations")
+            .iter()
+            .any(|location| location["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("layer.ts"))));
 
         assert_eq!(
             find_symbol(symbols, "fixture:field:getUser:id")["kind"],
@@ -2411,6 +2651,16 @@ export * from "./layer"
             "errorVariant"
         );
         assert!(symbols.iter().any(|symbol| symbol["kind"] == "errorTag"));
+        for symbol in symbols {
+            assert!(
+                !symbol["typescript"]
+                    .as_array()
+                    .expect("typescript locations")
+                    .is_empty(),
+                "missing generated TypeScript range for {}",
+                symbol["id"]
+            );
+        }
     }
 
     #[test]

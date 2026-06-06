@@ -331,7 +331,7 @@ Acceptance criteria:
 - TS definition on an error tag lands on the Rust enum variant.
 - Rename edits only the relevant identifier/range.
 
-### B4. Track generated TypeScript ranges
+### B4. Track generated TypeScript ranges [done]
 
 Goal: generated TS declarations must map back to Rust.
 
