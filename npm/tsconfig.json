@@ -15,7 +15,8 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "strict": true,
-    "target": "ES2022"
+    "target": "ES2022",
+    "tsBuildInfoFile": "node_modules/.cache/workspace.tsbuildinfo"
   },
   "files": [],
   "references": [

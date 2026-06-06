@@ -8,10 +8,14 @@
     "language-server-wrapper"
   ],
   "scripts": {
-    "format": "prettier --check .",
-    "test": "npm run typecheck --workspaces && npm run test:runtime --workspace @rust-ts-integration/effect-runtime && npm run test:wrapper --workspace @rust-ts-integration/language-server",
+    "test": "npm run typecheck && npm run test:runtime && npm run test:lsp-wrapper",
     "test:lsp-wrapper": "npm run test:wrapper --workspace @rust-ts-integration/language-server",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "test:runtime": "npm run test:runtime --workspace @rust-ts-integration/effect-runtime",
+    "typecheck": "npm run typecheck:workspaces && npm run typecheck:generated",
+    "typecheck:generated": "cargo test -p api-gen-effect-v4 generated_package_typecheck_fixture_compiles_against_pinned_effect_beta",
+    "typecheck:lsp-wrapper": "npm run typecheck --workspace @rust-ts-integration/language-server",
+    "typecheck:runtime": "npm run typecheck --workspace @rust-ts-integration/effect-runtime",
+    "typecheck:workspaces": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

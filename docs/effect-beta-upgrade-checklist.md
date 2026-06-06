@@ -8,5 +8,5 @@ Use this checklist when intentionally bumping the repository-pinned Effect v4 be
 - Review `npm/effect-runtime/src/compat.ts` before changing generated output.
 - Update generator expectations and generated TypeScript fixture snapshots only after the compat surface is correct.
 - Run `npm test` from `npm/`.
-- Run `cargo test -p api-gen-effect-v4 generated_package_typecheck_fixture_compiles_against_pinned_effect_beta` before merging the bump.
+- Run `npm run typecheck:generated` from `npm/` before merging the bump.
 - Run `cargo test --workspace`.

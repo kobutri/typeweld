@@ -8,7 +8,7 @@
     "./compat": "./src/compat.ts"
   },
   "scripts": {
-    "test:runtime": "rm -rf ../node_modules/.cache/effect-runtime-runtime-test && tsc --project tsconfig.json --outDir ../node_modules/.cache/effect-runtime-runtime-test --noEmit false && node test/sse-runtime.mjs ../node_modules/.cache/effect-runtime-runtime-test/index.js && node test/binary-runtime.mjs ../node_modules/.cache/effect-runtime-runtime-test/index.js",
+    "test:runtime": "rm -rf ../node_modules/.cache/effect-runtime-runtime-test ../node_modules/.cache/effect-runtime-runtime-test.tsbuildinfo && tsc --project tsconfig.json --outDir ../node_modules/.cache/effect-runtime-runtime-test --tsBuildInfoFile ../node_modules/.cache/effect-runtime-runtime-test.tsbuildinfo --noEmit false && node test/sse-runtime.mjs ../node_modules/.cache/effect-runtime-runtime-test/index.js && node test/binary-runtime.mjs ../node_modules/.cache/effect-runtime-runtime-test/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

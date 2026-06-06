@@ -4,6 +4,27 @@ This project turns a Rust API contract into an Effect-native TypeScript package.
 Rust remains the source of truth: endpoint routes, request shapes, response
 types, domain errors, and symbol locations all come from Rust metadata.
 
+## 0. Install repository TypeScript tooling
+
+The repository's JavaScript workspace lives under `npm/` and is locked with
+`npm/package-lock.json`:
+
+```sh
+npm --prefix npm ci
+```
+
+Run the same TypeScript validation command used by CI with:
+
+```sh
+npm --prefix npm test
+```
+
+That command typechecks the runtime and language-server wrapper workspaces,
+typechecks the generated-package fixture against the pinned Effect beta, and
+runs the runtime and wrapper tests. For narrower checks, use
+`npm --prefix npm run typecheck:generated`, `npm --prefix npm run test:runtime`,
+or `npm --prefix npm run test:lsp-wrapper`.
+
 ## 1. Define Rust API types
 
 ```rust

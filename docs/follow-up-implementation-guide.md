@@ -828,7 +828,7 @@ Acceptance criteria:
 - The wrapper starts the gateway from an editor or command line.
 - Wrapper tests verify argument forwarding and failure messages.
 
-### I2. Add root package-manager files
+### I2. Add root package-manager files [done]
 
 Goal: make TS checks reproducible.
 
