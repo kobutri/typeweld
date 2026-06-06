@@ -401,6 +401,7 @@ dependencies = [
  "api-core",
  "api-macros",
  "axum",
+ "clap",
  "futures-util",
  "serde",
  "tokio",
