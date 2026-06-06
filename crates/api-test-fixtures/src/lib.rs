@@ -196,5 +196,6 @@ fn range(
         start_column,
         end_line,
         end_column,
+        full_range: None,
     }
 }

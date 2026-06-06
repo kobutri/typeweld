@@ -126,6 +126,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                                 start_column: column!(),
                                 end_line: line!(),
                                 end_column: column!(),
+                                full_range: None,
                             },
                         }
                     })
@@ -182,6 +183,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                         start_column: column!(),
                         end_line: line!(),
                         end_column: column!(),
+                        full_range: None,
                     },
                 }
             }
@@ -254,6 +256,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     start_column: column!(),
                     end_line: line!(),
                     end_column: column!(),
+                    full_range: None,
                 },
             }
         });
@@ -274,6 +277,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     start_column: column!(),
                     end_line: line!(),
                     end_column: column!(),
+                    full_range: None,
                 },
             }
         });
@@ -324,6 +328,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                         start_column: column!(),
                         end_line: line!(),
                         end_column: column!(),
+                        full_range: None,
                     },
                 }
             }
@@ -355,6 +360,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                         start_column: column!(),
                         end_line: line!(),
                         end_column: column!(),
+                        full_range: None,
                     },
                 }
             }
@@ -580,6 +586,7 @@ fn endpoint_field(name: &str, ty: &Type) -> proc_macro2::TokenStream {
                 start_column: column!(),
                 end_line: line!(),
                 end_column: column!(),
+                full_range: None,
             },
         }
     }
@@ -851,6 +858,7 @@ fn field_def(
                 start_column: column!(),
                 end_line: line!(),
                 end_column: column!(),
+                full_range: None,
             },
         }
     }

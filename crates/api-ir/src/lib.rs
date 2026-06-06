@@ -238,6 +238,17 @@ pub struct SourceRange {
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_range: Option<SourceSpan>,
+}
+
+/// A one-based source span persisted inside [`SourceRange`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SourceSpan {
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 /// Stable identity for any Rust API symbol represented in the IR.
@@ -659,6 +670,7 @@ mod tests {
             start_column: 1,
             end_line: 1,
             end_column: 10,
+            full_range: None,
         }
     }
 

@@ -573,6 +573,7 @@ fn usage_source_range(file: &str, line: u32, column: usize, width: usize) -> Sou
         start_column,
         end_line: line,
         end_column,
+        full_range: None,
     }
 }
 

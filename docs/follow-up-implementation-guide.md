@@ -314,7 +314,7 @@ Acceptance criteria:
 - `api-ls` no longer depends on hand-authored graph fixtures.
 - Generated declarations can redirect to Rust source.
 
-### B3. Add precise Rust source ranges
+### B3. Add precise Rust source ranges [done]
 
 Goal: field-level navigation and rename must land on identifiers.
 

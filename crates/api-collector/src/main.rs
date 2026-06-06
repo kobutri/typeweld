@@ -11,7 +11,8 @@ use api_collector::{
     write_effect_usage_index, EffectUsageIndex, EndpointUsage, TypeScriptSourceFile,
 };
 use api_gen_effect_v4::{render_generated_package, render_symbol_graph, GeneratedPackage};
-use api_ir::ApiContract;
+use api_ir::{ApiContract, Field, SourceRange, SourceSpan, TypeShape};
+use syn::spanned::Spanned;
 
 fn main() -> ExitCode {
     match run_with_args(env::args().skip(1)) {
@@ -366,8 +367,401 @@ fn collect_package_contract(
         options.no_default_features,
         &metadata,
     )?;
-    let contract = run_temp_collector(&collector_dir)?;
+    let mut contract = run_temp_collector(&collector_dir)?;
+    refine_contract_source_ranges(&mut contract, metadata, package, &lib_crate_name)?;
     Ok((resolved, contract))
+}
+
+#[derive(Debug, Default)]
+struct RustSourceIndex {
+    functions: BTreeMap<Vec<String>, SourceRange>,
+    endpoint_params: BTreeMap<Vec<String>, SourceRange>,
+    types: BTreeMap<Vec<String>, SourceRange>,
+    fields: BTreeMap<Vec<String>, SourceRange>,
+    variants: BTreeMap<Vec<String>, SourceRange>,
+}
+
+fn refine_contract_source_ranges(
+    contract: &mut ApiContract,
+    metadata: &cargo_metadata::Metadata,
+    package: &cargo_metadata::Package,
+    lib_crate_name: &str,
+) -> Result<(), String> {
+    let source_index = RustSourceIndex::for_package(metadata, package, lib_crate_name)?;
+
+    for endpoint in &mut contract.endpoints {
+        if let Some(source) = source_index.functions.get(&endpoint.rust_path) {
+            endpoint.source = source.clone();
+        }
+        let endpoint_path = endpoint.rust_path.clone();
+        for field in endpoint
+            .request
+            .path_params
+            .iter_mut()
+            .chain(endpoint.request.query_params.iter_mut())
+        {
+            refine_field_source(
+                field,
+                &symbol_path(&endpoint_path, &[&field.rust_name]),
+                &source_index,
+            );
+        }
+    }
+
+    for type_def in &mut contract.types {
+        if let Some(source) = source_index.types.get(&type_def.rust_path) {
+            type_def.source = source.clone();
+        }
+        let type_path = type_def.rust_path.clone();
+        match &mut type_def.shape {
+            TypeShape::Struct(shape) => {
+                for field in &mut shape.fields {
+                    refine_field_source(
+                        field,
+                        &symbol_path(&type_path, &[&field.rust_name]),
+                        &source_index,
+                    );
+                }
+            }
+            TypeShape::Enum(shape) => {
+                for variant in &mut shape.variants {
+                    let variant_path = symbol_path(&type_path, &[&variant.rust_name]);
+                    if let Some(source) = source_index.variants.get(&variant_path) {
+                        variant.source = source.clone();
+                    }
+                    for field in &mut variant.fields {
+                        refine_field_source(
+                            field,
+                            &symbol_path(&variant_path, &[&field.rust_name]),
+                            &source_index,
+                        );
+                    }
+                }
+            }
+            TypeShape::Primitive(_)
+            | TypeShape::Newtype(_)
+            | TypeShape::Tuple(_)
+            | TypeShape::List(_)
+            | TypeShape::Map { .. }
+            | TypeShape::Option(_)
+            | TypeShape::External(_) => {}
+        }
+    }
+
+    for error in &mut contract.errors {
+        if let Some(source) = source_index.types.get(&error.rust_path) {
+            error.source = source.clone();
+        }
+        let error_path = error.rust_path.clone();
+        for variant in &mut error.variants {
+            let variant_path = symbol_path(&error_path, &[&variant.rust_name]);
+            if let Some(source) = source_index.variants.get(&variant_path) {
+                variant.source = source.clone();
+            }
+            for field in &mut variant.fields {
+                refine_field_source(
+                    field,
+                    &symbol_path(&variant_path, &[&field.rust_name]),
+                    &source_index,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn refine_field_source(field: &mut Field, path: &[String], source_index: &RustSourceIndex) {
+    if let Some(source) = source_index
+        .fields
+        .get(path)
+        .or_else(|| source_index.endpoint_params.get(path))
+    {
+        field.source = source.clone();
+    }
+}
+
+impl RustSourceIndex {
+    fn for_package(
+        metadata: &cargo_metadata::Metadata,
+        package: &cargo_metadata::Package,
+        lib_crate_name: &str,
+    ) -> Result<Self, String> {
+        let lib_target = package_lib_target(package)?;
+        let root = lib_target.src_path.clone().into_std_path_buf();
+        let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+        let mut index = Self::default();
+        let mut visited = BTreeSet::new();
+        index.index_file(
+            &root,
+            &[lib_crate_name.to_owned()],
+            &workspace_root,
+            &mut visited,
+        )?;
+        Ok(index)
+    }
+
+    fn index_file(
+        &mut self,
+        file: &Path,
+        module_path: &[String],
+        workspace_root: &Path,
+        visited: &mut BTreeSet<PathBuf>,
+    ) -> Result<(), String> {
+        let canonical = fs::canonicalize(file).map_err(|error| {
+            format!(
+                "failed to resolve Rust source file `{}`: {error}",
+                file.display()
+            )
+        })?;
+        if !visited.insert(canonical) {
+            return Ok(());
+        }
+
+        let contents = fs::read_to_string(file).map_err(|error| {
+            format!(
+                "failed to read Rust source file `{}`: {error}",
+                file.display()
+            )
+        })?;
+        let parsed = syn::parse_file(&contents).map_err(|error| {
+            format!(
+                "failed to parse Rust source file `{}`: {error}",
+                file.display()
+            )
+        })?;
+        let source_file = source_file_label(file, workspace_root);
+        self.index_items(
+            &parsed.items,
+            module_path,
+            file,
+            &contents,
+            &source_file,
+            workspace_root,
+            visited,
+        )
+    }
+
+    fn index_items(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+        file: &Path,
+        contents: &str,
+        source_file: &str,
+        workspace_root: &Path,
+        visited: &mut BTreeSet<PathBuf>,
+    ) -> Result<(), String> {
+        for item in items {
+            match item {
+                syn::Item::Fn(item_fn) => {
+                    self.index_function(module_path, item_fn, contents, source_file);
+                }
+                syn::Item::Struct(item_struct) => {
+                    self.index_struct(module_path, item_struct, contents, source_file);
+                }
+                syn::Item::Enum(item_enum) => {
+                    self.index_enum(module_path, item_enum, contents, source_file);
+                }
+                syn::Item::Mod(item_mod) => {
+                    let child_path = symbol_path(module_path, &[&item_mod.ident.to_string()]);
+                    if let Some((_, items)) = &item_mod.content {
+                        self.index_items(
+                            items,
+                            &child_path,
+                            file,
+                            contents,
+                            source_file,
+                            workspace_root,
+                            visited,
+                        )?;
+                    } else if let Some(module_file) =
+                        resolve_module_file(file, &item_mod.ident.to_string())
+                    {
+                        self.index_file(&module_file, &child_path, workspace_root, visited)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn index_function(
+        &mut self,
+        module_path: &[String],
+        item_fn: &syn::ItemFn,
+        contents: &str,
+        source_file: &str,
+    ) {
+        let function_path = symbol_path(module_path, &[&item_fn.sig.ident.to_string()]);
+        if let Some(source) = source_range_from_spans(
+            source_file,
+            contents,
+            item_fn.sig.ident.span(),
+            item_fn.span(),
+        ) {
+            self.functions.insert(function_path.clone(), source);
+        }
+
+        for input in &item_fn.sig.inputs {
+            let syn::FnArg::Typed(input) = input else {
+                continue;
+            };
+            let syn::Pat::Ident(pat_ident) = input.pat.as_ref() else {
+                continue;
+            };
+            if let Some(source) =
+                source_range_from_spans(source_file, contents, pat_ident.ident.span(), input.span())
+            {
+                self.endpoint_params.insert(
+                    symbol_path(&function_path, &[&pat_ident.ident.to_string()]),
+                    source,
+                );
+            }
+        }
+    }
+
+    fn index_struct(
+        &mut self,
+        module_path: &[String],
+        item_struct: &syn::ItemStruct,
+        contents: &str,
+        source_file: &str,
+    ) {
+        let type_path = symbol_path(module_path, &[&item_struct.ident.to_string()]);
+        if let Some(source) = source_range_from_spans(
+            source_file,
+            contents,
+            item_struct.ident.span(),
+            item_struct.span(),
+        ) {
+            self.types.insert(type_path.clone(), source);
+        }
+        if let syn::Fields::Named(fields) = &item_struct.fields {
+            for field in &fields.named {
+                let Some(ident) = &field.ident else {
+                    continue;
+                };
+                if let Some(source) =
+                    source_range_from_spans(source_file, contents, ident.span(), field.span())
+                {
+                    self.fields
+                        .insert(symbol_path(&type_path, &[&ident.to_string()]), source);
+                }
+            }
+        }
+    }
+
+    fn index_enum(
+        &mut self,
+        module_path: &[String],
+        item_enum: &syn::ItemEnum,
+        contents: &str,
+        source_file: &str,
+    ) {
+        let type_path = symbol_path(module_path, &[&item_enum.ident.to_string()]);
+        if let Some(source) = source_range_from_spans(
+            source_file,
+            contents,
+            item_enum.ident.span(),
+            item_enum.span(),
+        ) {
+            self.types.insert(type_path.clone(), source);
+        }
+
+        for variant in &item_enum.variants {
+            let variant_path = symbol_path(&type_path, &[&variant.ident.to_string()]);
+            if let Some(source) =
+                source_range_from_spans(source_file, contents, variant.ident.span(), variant.span())
+            {
+                self.variants.insert(variant_path.clone(), source);
+            }
+            if let syn::Fields::Named(fields) = &variant.fields {
+                for field in &fields.named {
+                    let Some(ident) = &field.ident else {
+                        continue;
+                    };
+                    if let Some(source) =
+                        source_range_from_spans(source_file, contents, ident.span(), field.span())
+                    {
+                        self.fields
+                            .insert(symbol_path(&variant_path, &[&ident.to_string()]), source);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn source_range_from_spans(
+    file: &str,
+    contents: &str,
+    name_span: proc_macro2::Span,
+    full_span: proc_macro2::Span,
+) -> Option<SourceRange> {
+    let name = source_span_from_span(contents, name_span)?;
+    let full = source_span_from_span(contents, full_span).unwrap_or(name);
+    Some(SourceRange {
+        file: file.to_owned(),
+        start_line: name.start_line,
+        start_column: name.start_column,
+        end_line: name.end_line,
+        end_column: name.end_column,
+        full_range: Some(full),
+    })
+}
+
+fn source_span_from_span(contents: &str, span: proc_macro2::Span) -> Option<SourceSpan> {
+    let start = span.start();
+    let end = span.end();
+    if start.line == 0 || end.line == 0 {
+        return None;
+    }
+    Some(SourceSpan {
+        start_line: u32::try_from(start.line).ok()?,
+        start_column: utf16_column(contents, start.line, start.column)?,
+        end_line: u32::try_from(end.line).ok()?,
+        end_column: utf16_column(contents, end.line, end.column)?,
+    })
+}
+
+fn utf16_column(contents: &str, line_number: usize, byte_column: usize) -> Option<u32> {
+    let line = contents.lines().nth(line_number.checked_sub(1)?)?;
+    let prefix = line.get(..byte_column).unwrap_or(line);
+    let utf16_units = prefix
+        .chars()
+        .map(|character| u32::try_from(character.len_utf16()).unwrap_or(1))
+        .sum::<u32>();
+    Some(utf16_units + 1)
+}
+
+fn source_file_label(file: &Path, workspace_root: &Path) -> String {
+    let path = file.strip_prefix(workspace_root).unwrap_or(file);
+    normalize_path(path)
+}
+
+fn resolve_module_file(current_file: &Path, module_name: &str) -> Option<PathBuf> {
+    let parent = current_file.parent()?;
+    let stem = current_file.file_stem()?.to_string_lossy();
+    let module_base = if stem == "lib" || stem == "mod" {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem.as_ref())
+    };
+    [
+        module_base.join(format!("{module_name}.rs")),
+        module_base.join(module_name).join("mod.rs"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn symbol_path(base: &[String], additions: &[&str]) -> Vec<String> {
+    base.iter()
+        .cloned()
+        .chain(additions.iter().map(|addition| (*addition).to_owned()))
+        .collect()
 }
 
 fn load_cargo_metadata(manifest_path: &Path) -> Result<cargo_metadata::Metadata, String> {
@@ -576,6 +970,12 @@ fn resolve_collect_target(
 }
 
 fn package_lib_crate_name(package: &cargo_metadata::Package) -> Result<String, String> {
+    package_lib_target(package).map(|target| target.name.replace('-', "_"))
+}
+
+fn package_lib_target(
+    package: &cargo_metadata::Package,
+) -> Result<&cargo_metadata::Target, String> {
     package
         .targets
         .iter()
@@ -587,7 +987,6 @@ fn package_lib_crate_name(package: &cargo_metadata::Package) -> Result<String, S
                 )
             })
         })
-        .map(|target| target.name.replace('-', "_"))
         .ok_or_else(|| {
             format!(
                 "api collect package `{}` must expose a library target so the temporary collector can depend on it",
@@ -1620,6 +2019,144 @@ pub fn api() -> ApiModule {
     }
 
     #[test]
+    fn collect_refines_rust_identifier_ranges_for_symbol_graph() {
+        let root = test_root("collect-ranges");
+        let server_dir = root.join("server");
+        fs::create_dir_all(server_dir.join("src")).expect("create server src");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["server"]
+resolver = "2"
+"#,
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            server_dir.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "server"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.rust_ts]
+ts_package = "@workspace/server-api"
+api_root = "server::api"
+
+[dependencies]
+api-core = {{ path = {api_core_path} }}
+api-macros = {{ path = {api_macros_path} }}
+"#,
+                api_core_path =
+                    toml_string(&repo_root().join("crates/api-core").display().to_string()),
+                api_macros_path =
+                    toml_string(&repo_root().join("crates/api-macros").display().to_string()),
+            ),
+        )
+        .expect("write server manifest");
+        fs::write(
+            server_dir.join("src/lib.rs"),
+            r#"pub mod users;
+
+pub fn api() -> api_core::ApiModule {
+    users::api()
+}
+"#,
+        )
+        .expect("write lib");
+        let users_rs = r#"use api_core::{api_module, ApiModule, ApiType, Json, Path};
+
+#[derive(api_macros::ApiType)]
+pub struct User {
+    pub id: i64,
+    pub display_name: String,
+}
+
+#[derive(api_macros::ApiError)]
+pub enum GetUserError {
+    #[api_error(status = 404)]
+    UserNotFound { id: i64 },
+}
+
+#[api_macros::api(method = "GET", path = "/users/{id}")]
+pub async fn get_user(id: Path<i64>) -> Result<Json<User>, GetUserError> {
+    let _ = id;
+    todo!()
+}
+
+pub fn api() -> ApiModule {
+    api_module!(name = "server", endpoints = [get_user])
+}
+"#;
+        fs::write(server_dir.join("src/users.rs"), users_rs).expect("write users module");
+
+        let contract_path = root.join("contract.json");
+        let target_dir = root.join("target");
+        run_with_args(vec![
+            "collect".to_owned(),
+            "--manifest-path".to_owned(),
+            root.join("Cargo.toml").display().to_string(),
+            "--target-dir".to_owned(),
+            target_dir.display().to_string(),
+            "--package".to_owned(),
+            "server".to_owned(),
+            "--out".to_owned(),
+            contract_path.display().to_string(),
+        ])
+        .expect("collect contract with refined ranges");
+        run_with_args(vec![
+            "gen".to_owned(),
+            "--contract".to_owned(),
+            contract_path.display().to_string(),
+            "--target-dir".to_owned(),
+            target_dir.display().to_string(),
+        ])
+        .expect("generate symbol graph");
+
+        let graph: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(target_dir.join("api-contract/rust-ts-symbols.json"))
+                .expect("read symbol graph"),
+        )
+        .expect("parse symbol graph");
+        let display_name = find_symbol_by_rust_path(
+            &graph,
+            "field",
+            &["server", "users", "User", "display_name"],
+        );
+        assert_eq!(display_name["rust"]["file"], "server/src/users.rs");
+        assert_eq!(
+            display_name["rust"]["range"],
+            expected_lsp_range(users_rs, "display_name")
+        );
+        assert!(
+            display_name["rust"]["fullRange"]["start"]["character"]
+                .as_u64()
+                .expect("full range start character")
+                < display_name["rust"]["range"]["start"]["character"]
+                    .as_u64()
+                    .expect("name range start character")
+        );
+
+        let error_tag = find_symbol_by_rust_path(
+            &graph,
+            "errorTag",
+            &["server", "users", "GetUserError", "UserNotFound"],
+        );
+        assert_eq!(
+            error_tag["rust"]["range"],
+            expected_lsp_range(users_rs, "UserNotFound")
+        );
+        assert!(
+            error_tag["rust"]["fullRange"]["start"]["line"]
+                .as_u64()
+                .expect("full range start line")
+                <= error_tag["rust"]["range"]["start"]["line"]
+                    .as_u64()
+                    .expect("name range start line")
+        );
+    }
+
+    #[test]
     fn collect_reports_multiple_metadata_packages_when_package_is_omitted() {
         let root = test_root("collect-multiple-metadata");
         for package in ["server", "admin"] {
@@ -1831,5 +2368,51 @@ pub fn api() -> ApiModule {{
             ),
         )
         .expect("write package lib");
+    }
+
+    fn find_symbol_by_rust_path<'a>(
+        graph: &'a serde_json::Value,
+        kind: &str,
+        rust_path: &[&str],
+    ) -> &'a serde_json::Value {
+        let expected_path = serde_json::json!(rust_path);
+        graph["symbols"]
+            .as_array()
+            .expect("symbols array")
+            .iter()
+            .find(|symbol| {
+                symbol["kind"] == kind && symbol["metadata"]["rustPath"] == expected_path
+            })
+            .unwrap_or_else(|| panic!("missing {kind} symbol for rust path {rust_path:?}"))
+    }
+
+    fn expected_lsp_range(contents: &str, needle: &str) -> serde_json::Value {
+        let offset = contents.find(needle).expect("needle appears in source");
+        let start = lsp_position(contents, offset);
+        let end = lsp_position(contents, offset + needle.len());
+        serde_json::json!({
+            "start": start,
+            "end": end
+        })
+    }
+
+    fn lsp_position(contents: &str, offset: usize) -> serde_json::Value {
+        let mut line = 0_u32;
+        let mut character = 0_u32;
+        for (index, ch) in contents.char_indices() {
+            if index >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += u32::try_from(ch.len_utf16()).unwrap_or(1);
+            }
+        }
+        serde_json::json!({
+            "line": line,
+            "character": character
+        })
     }
 }

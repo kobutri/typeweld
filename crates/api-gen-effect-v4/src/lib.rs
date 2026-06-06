@@ -7,8 +7,8 @@ use std::{
 
 use api_ir::{
     ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
-    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, StructShape, SymbolId,
-    Transport, TypeDef, TypeRef, TypeShape,
+    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, SourceSpan, StructShape,
+    SymbolId, Transport, TypeDef, TypeRef, TypeShape,
 };
 use serde::Serialize;
 
@@ -769,17 +769,35 @@ fn generated_location(
 
 fn rust_location(source: &SourceRange, renamable: Option<bool>) -> GraphLocation {
     let range = range_from_source(source);
+    let full_range = source
+        .full_range
+        .as_ref()
+        .map(range_from_source_span)
+        .unwrap_or(range);
     GraphLocation {
         file: (!source.file.is_empty()).then(|| source.file.clone()),
         range,
         name_range: Some(range),
-        full_range: Some(range),
+        full_range: Some(full_range),
         generated: false,
         renamable,
     }
 }
 
 fn range_from_source(source: &SourceRange) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: source.start_line.saturating_sub(1),
+            character: source.start_column.saturating_sub(1),
+        },
+        end: GraphPosition {
+            line: source.end_line.saturating_sub(1),
+            character: source.end_column.saturating_sub(1),
+        },
+    }
+}
+
+fn range_from_source_span(source: &SourceSpan) -> GraphRange {
     GraphRange {
         start: GraphPosition {
             line: source.start_line.saturating_sub(1),
@@ -2526,6 +2544,7 @@ export namespace users {
             start_column: 0,
             end_line: line,
             end_column: 0,
+            full_range: None,
         }
     }
 

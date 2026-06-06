@@ -32,8 +32,10 @@ dependencies = [
  "api-ir",
  "api-test-fixtures",
  "cargo_metadata",
+ "proc-macro2",
  "serde",
  "serde_json",
+ "syn",
 ]
 
 [[package]]
