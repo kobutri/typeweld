@@ -3,7 +3,7 @@
 The Axum adapter converts explicit API metadata into Axum routes while keeping
 the contract layer framework-neutral.
 
-## Basic shape
+## Runnable shape
 
 ```rust
 use api_axum::{router, Json, Path};
@@ -42,7 +42,19 @@ fn app() -> axum::Router {
         })
         .into_router()
 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    println!("listening on http://{}", listener.local_addr()?);
+
+    axum::serve(listener, app()).await?;
+    Ok(())
+}
 ```
+
+The `app()` function only builds the Axum router. A binary still needs to bind a
+listener and pass that router to `axum::serve`.
 
 ## Server-sent events
 
