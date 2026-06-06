@@ -11,6 +11,122 @@ pub struct ApiContract {
     pub errors: Vec<ErrorDef>,
 }
 
+pub const IR_V2_SCHEMA_VERSION: u32 = 2;
+
+/// Versioned API contract model for post-v1 tooling.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ApiContractV2 {
+    pub schema_version: u32,
+    pub package: PackageMetadata,
+    pub endpoints: Vec<EndpointV2>,
+    pub types: Vec<TypeDef>,
+    pub errors: Vec<ErrorDef>,
+}
+
+/// Package identity and generated package dependencies.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PackageMetadata {
+    pub ts_package: String,
+    pub cargo_package: Option<String>,
+    pub dependencies: Vec<PackageDependency>,
+}
+
+/// One dependency edge from this generated API package to another.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PackageDependency {
+    pub cargo_package: String,
+    pub ts_package: String,
+}
+
+/// Versioned endpoint model with explicit success-channel metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct EndpointV2 {
+    pub id: SymbolId,
+    pub rust_path: Vec<String>,
+    pub rust_name: String,
+    pub ts_path: Vec<String>,
+    pub route: RoutePattern,
+    pub method: HttpMethod,
+    pub request: RequestShape,
+    pub success: SuccessChannel,
+    pub errors: Vec<ErrorRef>,
+    pub effect: EffectMetadata,
+    pub source: SourceRange,
+    pub allow_unused: bool,
+}
+
+/// Effect-specific endpoint requirements.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct EffectMetadata {
+    pub requirements: Vec<EffectRequirement>,
+}
+
+/// A required Effect environment/service for an endpoint accessor.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum EffectRequirement {
+    Service { name: String },
+}
+
+/// Success channel carried by generated Effect or Stream accessors.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SuccessChannel {
+    pub transport: SuccessTransport,
+    pub status: Option<HttpStatus>,
+    pub body: SuccessBody,
+}
+
+/// Success transport and high-level runtime shape.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum SuccessTransport {
+    UnaryHttp,
+    ServerSentEvents,
+    WebSocketDuplex,
+    BinaryDownload,
+    BinaryUpload,
+}
+
+/// Success body shape, intentionally extensible for binary transports.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum SuccessBody {
+    Empty,
+    Json(TypeRef),
+    Stream(TypeRef),
+    Binary { content_type: Option<String> },
+}
+
+impl ApiContract {
+    #[must_use]
+    pub fn to_v2(&self) -> ApiContractV2 {
+        ApiContractV2::from(self)
+    }
+}
+
+impl From<&ApiContract> for ApiContractV2 {
+    fn from(contract: &ApiContract) -> Self {
+        Self {
+            schema_version: IR_V2_SCHEMA_VERSION,
+            package: PackageMetadata {
+                ts_package: contract.package_name.clone(),
+                cargo_package: None,
+                dependencies: Vec::new(),
+            },
+            endpoints: contract
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.to_v2(&contract.package_name))
+                .collect(),
+            types: contract.types.clone(),
+            errors: contract.errors.clone(),
+        }
+    }
+}
+
+impl From<ApiContract> for ApiContractV2 {
+    fn from(contract: ApiContract) -> Self {
+        Self::from(&contract)
+    }
+}
+
 /// A callable API endpoint.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Endpoint {
@@ -26,6 +142,70 @@ pub struct Endpoint {
     pub errors: Vec<ErrorRef>,
     pub source: SourceRange,
     pub allow_unused: bool,
+}
+
+impl Endpoint {
+    #[must_use]
+    pub fn to_v2(&self, package_name: &str) -> EndpointV2 {
+        EndpointV2 {
+            id: self.id.clone(),
+            rust_path: self.rust_path.clone(),
+            rust_name: self.rust_name.clone(),
+            ts_path: self.ts_path.clone(),
+            route: self.route.clone(),
+            method: self.method,
+            request: self.request.clone(),
+            success: SuccessChannel::from_response_shape(&self.response, self.transport),
+            errors: self.errors.clone(),
+            effect: EffectMetadata {
+                requirements: vec![EffectRequirement::Service {
+                    name: format!("{package_name}::ServerApi"),
+                }],
+            },
+            source: self.source.clone(),
+            allow_unused: self.allow_unused,
+        }
+    }
+}
+
+impl SuccessChannel {
+    #[must_use]
+    pub fn from_response_shape(response: &ResponseShape, transport: Transport) -> Self {
+        match response {
+            ResponseShape::Empty => Self {
+                transport: SuccessTransport::from(transport),
+                status: Some(HttpStatus(204)),
+                body: SuccessBody::Empty,
+            },
+            ResponseShape::Json(type_ref) => Self {
+                transport: SuccessTransport::from(transport),
+                status: Some(HttpStatus(200)),
+                body: SuccessBody::Json(type_ref.clone()),
+            },
+            ResponseShape::Created(type_ref) => Self {
+                transport: SuccessTransport::from(transport),
+                status: Some(HttpStatus(201)),
+                body: SuccessBody::Json(type_ref.clone()),
+            },
+            ResponseShape::Stream(type_ref) => Self {
+                transport: SuccessTransport::from(transport),
+                status: Some(HttpStatus(200)),
+                body: SuccessBody::Stream(type_ref.clone()),
+            },
+        }
+    }
+}
+
+impl From<Transport> for SuccessTransport {
+    fn from(transport: Transport) -> Self {
+        match transport {
+            Transport::UnaryHttp => Self::UnaryHttp,
+            Transport::ServerSentEvents => Self::ServerSentEvents,
+            Transport::WebSocketDuplex => Self::WebSocketDuplex,
+            Transport::BinaryDownload => Self::BinaryDownload,
+            Transport::BinaryUpload => Self::BinaryUpload,
+        }
+    }
 }
 
 /// A named data type that can cross the API boundary.
@@ -154,6 +334,7 @@ pub struct RequestShape {
 pub enum ResponseShape {
     Empty,
     Json(TypeRef),
+    Created(TypeRef),
     Stream(TypeRef),
 }
 
@@ -372,6 +553,76 @@ mod tests {
 
         assert!(json.contains("UnaryHttp"));
         assert!(json.contains("ServerSentEvents"));
+    }
+
+    #[test]
+    fn v1_contract_converts_to_v2_success_channels() {
+        let user_id = SymbolId::from_parts("type", &["example", "User"]);
+        let error_id = SymbolId::from_parts("error", &["example", "GetUserError"]);
+        let contract = ApiContract {
+            package_name: "example-api".to_owned(),
+            endpoints: vec![
+                endpoint(
+                    "get_user",
+                    "/users/:id",
+                    HttpMethod::Get,
+                    Transport::UnaryHttp,
+                    ResponseShape::Json(type_ref(user_id.clone(), "User")),
+                    error_id.clone(),
+                ),
+                endpoint(
+                    "create_user",
+                    "/users",
+                    HttpMethod::Post,
+                    Transport::UnaryHttp,
+                    ResponseShape::Created(type_ref(user_id.clone(), "User")),
+                    error_id.clone(),
+                ),
+                endpoint(
+                    "delete_user",
+                    "/users/:id",
+                    HttpMethod::Delete,
+                    Transport::UnaryHttp,
+                    ResponseShape::Empty,
+                    error_id.clone(),
+                ),
+                endpoint(
+                    "watch_users",
+                    "/users/events",
+                    HttpMethod::Get,
+                    Transport::ServerSentEvents,
+                    ResponseShape::Stream(type_ref(user_id, "User")),
+                    error_id,
+                ),
+            ],
+            types: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let v2 = contract.to_v2();
+
+        assert_eq!(v2.schema_version, IR_V2_SCHEMA_VERSION);
+        assert_eq!(v2.package.ts_package, "example-api");
+        assert_eq!(v2.endpoints[0].success.status, Some(HttpStatus(200)));
+        assert!(matches!(v2.endpoints[0].success.body, SuccessBody::Json(_)));
+        assert_eq!(v2.endpoints[1].success.status, Some(HttpStatus(201)));
+        assert!(matches!(v2.endpoints[1].success.body, SuccessBody::Json(_)));
+        assert_eq!(v2.endpoints[2].success.status, Some(HttpStatus(204)));
+        assert_eq!(v2.endpoints[2].success.body, SuccessBody::Empty);
+        assert_eq!(
+            v2.endpoints[3].success.transport,
+            SuccessTransport::ServerSentEvents
+        );
+        assert!(matches!(
+            v2.endpoints[3].success.body,
+            SuccessBody::Stream(_)
+        ));
+        assert_eq!(
+            v2.endpoints[0].effect.requirements,
+            vec![EffectRequirement::Service {
+                name: "example-api::ServerApi".to_owned()
+            }]
+        );
     }
 
     fn endpoint(

@@ -13,9 +13,9 @@ help: the trait `ApiType` is not implemented for `NotApiType`
             &str
             BTreeMap<std::string::String, T>
             Body<T>
-            Created<T>
             HashMap<std::string::String, T>
             NoContent
             Query<T>
             Sse<T>
+            User
           and $N others

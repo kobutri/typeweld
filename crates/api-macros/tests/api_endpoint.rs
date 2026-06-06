@@ -1,6 +1,6 @@
 use api_core::{
     ir::{HttpMethod, ResponseShape, Transport},
-    ApiType, Json, Path, Query, Sse,
+    ApiType, Created, Json, Path, Query, Sse,
 };
 
 #[derive(api_macros::ApiType)]
@@ -20,6 +20,12 @@ enum GetUserError {
 #[allow(dead_code)]
 async fn get_user(id: Path<i64>, filter: Query<String>) -> Result<Json<User>, GetUserError> {
     let _ = (id, filter);
+    unimplemented!()
+}
+
+#[api_macros::api(method = "POST", path = "/users")]
+#[allow(dead_code)]
+async fn create_user() -> Result<Created<User>, GetUserError> {
     unimplemented!()
 }
 
@@ -62,6 +68,17 @@ fn api_endpoint_macro_emits_sse_metadata() {
         panic!("expected stream response");
     };
     assert_eq!(item.name, "User");
+}
+
+#[test]
+fn api_endpoint_macro_preserves_created_response_shape() {
+    let endpoint = __api_endpoint_create_user();
+
+    assert_eq!(endpoint.method, HttpMethod::Post);
+    let ResponseShape::Created(response) = endpoint.response else {
+        panic!("expected created response");
+    };
+    assert_eq!(response.name, "User");
 }
 
 #[test]

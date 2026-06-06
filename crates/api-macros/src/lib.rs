@@ -611,10 +611,20 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
         });
     }
 
-    if let Some(inner) = extractor_inner(ty, "Json").or_else(|| extractor_inner(ty, "Created")) {
+    if let Some(inner) = extractor_inner(ty, "Json") {
         return Ok(EndpointReturn {
             response: quote! {
                 ::api_core::ir::ResponseShape::Json(<#inner as ::api_core::ApiType>::type_ref())
+            },
+            errors: Vec::new(),
+            registrations: vec![contract_register_type_call(inner)],
+        });
+    }
+
+    if let Some(inner) = extractor_inner(ty, "Created") {
+        return Ok(EndpointReturn {
+            response: quote! {
+                ::api_core::ir::ResponseShape::Created(<#inner as ::api_core::ApiType>::type_ref())
             },
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],

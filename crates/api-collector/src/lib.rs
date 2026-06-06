@@ -131,7 +131,9 @@ pub fn collect_contract(input: CollectorInput) -> ApiContract {
         }
         match &endpoint.response {
             ResponseShape::Empty => {}
-            ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+            ResponseShape::Json(type_ref)
+            | ResponseShape::Created(type_ref)
+            | ResponseShape::Stream(type_ref) => {
                 collect_type_ref(type_ref, &mut needed_types);
             }
         }

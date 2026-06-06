@@ -510,7 +510,9 @@ fn collect_request_type_imports(request: &RequestShape, imports: &mut BTreeSet<S
 fn collect_response_type_imports(response: &ResponseShape, imports: &mut BTreeSet<String>) {
     match response {
         ResponseShape::Empty => {}
-        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => {
             collect_type_ref_import(type_ref, imports);
         }
     }
@@ -612,9 +614,9 @@ fn render_endpoint_arg_field(field: &Field) -> String {
 fn render_response_type(response: &ResponseShape) -> String {
     match response {
         ResponseShape::Empty => "void".to_owned(),
-        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
-            render_ts_type_ref(type_ref)
-        }
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => render_ts_type_ref(type_ref),
     }
 }
 
@@ -626,7 +628,7 @@ fn render_endpoint_return_type(endpoint: &Endpoint, requirements: &str) -> Strin
         ResponseShape::Stream(_) => {
             format!("Stream.Stream<{success}, {error}, {requirements}>")
         }
-        ResponseShape::Empty | ResponseShape::Json(_) => {
+        ResponseShape::Empty | ResponseShape::Json(_) | ResponseShape::Created(_) => {
             format!("Effect.Effect<{success}, {error}, {requirements}>")
         }
     }
@@ -711,7 +713,9 @@ fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
 fn render_success_decoder(response: &ResponseShape, helper: &str) -> String {
     match response {
         ResponseShape::Empty => "() => Effect.void",
-        ResponseShape::Json(type_ref) | ResponseShape::Stream(type_ref) => {
+        ResponseShape::Json(type_ref)
+        | ResponseShape::Created(type_ref)
+        | ResponseShape::Stream(type_ref) => {
             return format!("(input) => {helper}.decode(input, {})", type_ref.name);
         }
     }

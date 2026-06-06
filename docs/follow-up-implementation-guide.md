@@ -278,7 +278,7 @@ Acceptance criteria:
 
 ## Track B: IR v2 and symbol graph
 
-### B1. Introduce versioned IR v2
+### B1. Introduce versioned IR v2 [done]
 
 Goal: represent full API contract semantics.
 
