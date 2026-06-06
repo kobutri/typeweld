@@ -756,7 +756,7 @@ Acceptance criteria:
 
 ## Track H: Axum and transport integration
 
-### H1. Couple route registration to endpoint descriptors
+### H1. Couple route registration to endpoint descriptors [done]
 
 Goal: avoid divergence between API metadata and actual Axum routes.
 

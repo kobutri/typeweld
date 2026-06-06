@@ -8,6 +8,7 @@ use api_core::{
 };
 use axum::{
     extract::{FromRequest, FromRequestParts},
+    handler::Handler,
     http::{request::Parts, StatusCode},
     response::{
         sse::{Event, Sse as AxumSse},
@@ -54,11 +55,42 @@ where
         }
     }
 
+    /// Register a handler using the endpoint descriptor's declared method and route.
     #[must_use]
-    pub fn route(mut self, endpoint: Endpoint, method_router: MethodRouter<S>) -> Self {
-        self.router = self
-            .router
-            .route(&normalize_route_path(&endpoint.route.0), method_router);
+    pub fn route<H, T>(mut self, endpoint: Endpoint, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        let Endpoint { method, route, .. } = endpoint;
+        self.router = self.router.route(
+            &normalize_route_path(&route.0),
+            method_router(method, handler),
+        );
+        self
+    }
+
+    /// Register a handler under an explicitly overridden method and route.
+    ///
+    /// Prefer [`Self::route`] for ordinary API endpoints. This helper is for
+    /// deliberate adapter-level exceptions where the Axum mount point is not
+    /// the contract route.
+    #[must_use]
+    pub fn route_override<H, T>(
+        mut self,
+        _endpoint: Endpoint,
+        method: HttpMethod,
+        path: impl AsRef<str>,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.router = self.router.route(
+            &normalize_route_path(path.as_ref()),
+            method_router(method, handler),
+        );
         self
     }
 
@@ -81,7 +113,7 @@ pub fn router(module: ApiModule) -> ApiRouter {
 #[must_use]
 pub fn method_router<H, T, S>(method: HttpMethod, handler: H) -> MethodRouter<S>
 where
-    H: axum::handler::Handler<T, S>,
+    H: Handler<T, S>,
     T: 'static,
     S: Clone + Send + Sync + 'static,
 {
@@ -498,9 +530,7 @@ mod tests {
     async fn registers_handlers_from_endpoint_metadata() {
         let module = ApiModule::new("users");
         let endpoint = Endpoint::new(HttpMethod::Get, "/users/{id}");
-        let app = router(module)
-            .route(endpoint, method_router(HttpMethod::Get, get_user))
-            .into_router();
+        let app = router(module).route(endpoint, get_user).into_router();
 
         let response = app
             .oneshot(
@@ -524,12 +554,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_uses_descriptor_path_and_method() {
+        let endpoint = Endpoint::new(HttpMethod::Post, "/users");
+        let app = router(ApiModule::new("users"))
+            .route(endpoint, create_user)
+            .into_router();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/users")
+                    .header("content-type", "application/json")
+                    .body(AxumBody::from(r#"{"name":"Grace"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let wrong_method = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/users")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let wrong_path = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/people")
+                    .header("content-type", "application/json")
+                    .body(AxumBody::from(r#"{"name":"Grace"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(wrong_path.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn route_override_makes_contract_divergence_explicit() {
+        let endpoint = Endpoint::new(HttpMethod::Post, "/contract-users");
+        let app = router(ApiModule::new("users"))
+            .route_override(endpoint, HttpMethod::Get, "/legacy-users/{id}", get_user)
+            .into_router();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/legacy-users/42?filter=active")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let contract_route = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/contract-users")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(contract_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn serializes_domain_errors_with_declared_status() {
         let app = router(ApiModule::new("users"))
-            .route(
-                Endpoint::new(HttpMethod::Get, "/missing/:id"),
-                method_router(HttpMethod::Get, missing_user),
-            )
+            .route(Endpoint::new(HttpMethod::Get, "/missing/:id"), missing_user)
             .into_router();
 
         let response = app
@@ -556,10 +666,7 @@ mod tests {
     #[tokio::test]
     async fn decodes_json_body_and_maps_created_status() {
         let app = router(ApiModule::new("users"))
-            .route(
-                Endpoint::new(HttpMethod::Post, "/users"),
-                method_router(HttpMethod::Post, create_user),
-            )
+            .route(Endpoint::new(HttpMethod::Post, "/users"), create_user)
             .into_router();
 
         let response = app
@@ -587,10 +694,7 @@ mod tests {
     #[tokio::test]
     async fn serializes_sse_items_and_domain_errors() {
         let app = router(ApiModule::new("events"))
-            .route(
-                Endpoint::new(HttpMethod::Get, "/events"),
-                method_router(HttpMethod::Get, user_events),
-            )
+            .route(Endpoint::new(HttpMethod::Get, "/events"), user_events)
             .into_router();
 
         let response = app
