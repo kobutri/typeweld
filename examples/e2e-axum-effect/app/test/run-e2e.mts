@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -32,22 +33,28 @@ try {
   server.kill("SIGTERM")
 }
 
-function buildServer() {
+function buildServer(): void {
   execFileSync("cargo", ["build", "-q", "-p", "e2e-axum-effect-server"], {
     cwd: repoRoot,
     stdio: "inherit",
   })
 }
 
-function waitForListening(child) {
+function waitForListening(child: ChildProcess): Promise<string> {
   return new Promise((resolveListening, reject) => {
     let output = ""
     const timeout = setTimeout(() => {
       reject(new Error(`server did not print LISTENING line; stdout so far:\n${output}`))
     }, 30_000)
 
+    if (child.stdout === null) {
+      clearTimeout(timeout)
+      reject(new Error("server stdout was not piped"))
+      return
+    }
+
     child.stdout.setEncoding("utf8")
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", (chunk: string) => {
       output += chunk
       const line = output.split(/\r?\n/).find((candidate) =>
         candidate.startsWith("LISTENING "),
@@ -57,11 +64,11 @@ function waitForListening(child) {
         resolveListening(line.slice("LISTENING ".length).trim())
       }
     })
-    child.once("exit", (code, signal) => {
+    child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       clearTimeout(timeout)
       reject(new Error(`server exited before listening; code=${code} signal=${signal}`))
     })
-    child.once("error", (error) => {
+    child.once("error", (error: Error) => {
       clearTimeout(timeout)
       reject(error)
     })

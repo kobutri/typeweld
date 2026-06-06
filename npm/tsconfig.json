@@ -27,6 +27,9 @@
       "path": "./language-server-wrapper"
     },
     {
+      "path": "./semantic-usage-scanner"
+    },
+    {
       "path": "./vscode-extension"
     }
   ]

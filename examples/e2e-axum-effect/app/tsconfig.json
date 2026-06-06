@@ -8,6 +8,8 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
+    "typeRoots": ["../../../npm/node_modules/@types"],
+    "types": ["node"],
     "paths": {
       "@rust-ts-integration/effect-runtime": [
         "../../../npm/effect-runtime/src/index.ts"
@@ -26,5 +28,5 @@
       ]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.mts"]
 }

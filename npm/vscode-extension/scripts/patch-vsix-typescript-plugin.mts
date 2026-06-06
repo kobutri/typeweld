@@ -32,7 +32,7 @@ execFileSync("zip", ["-qr", vsixPath, "extension/node_modules"], {
 
 console.log(`Patched TypeScript server plugin into ${vsixPath}`)
 
-function assertFile(path, label) {
+function assertFile(path: string, label: string): void {
   try {
     if (statSync(path).isFile()) {
       return
@@ -42,7 +42,7 @@ function assertFile(path, label) {
   throw new Error(`Missing ${label}: ${path}`)
 }
 
-function assertDirectory(path, label) {
+function assertDirectory(path: string, label: string): void {
   try {
     if (statSync(path).isDirectory()) {
       return

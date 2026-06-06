@@ -2,8 +2,10 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema, Stream } from "effect"
 
 import {
+  type ApiClientError,
   DecodeError,
   RemoteProtocolError,
+  type SseEndpoint,
   UnexpectedStatusError,
   makeSseClient,
 } from "../src/index"
@@ -21,22 +23,27 @@ const ErrorSchemaByStatus = {
   404: NotFound,
 }
 
+type Item = typeof Item.Type
+type DomainError = NotFound
+type SseError = DomainError | ApiClientError
+type ItemStream = Stream.Stream<Item, SseError>
+
 const endpoint = {
   method: "GET",
   path: "/events",
-  decodeSuccess: (input) => makeSseClient.decode(input, Item),
+  decodeSuccess: (input: unknown) => makeSseClient.decode(input, Item),
   decodeError: (status, input) => {
-    const schema = ErrorSchemaByStatus[status]
+    const schema = ErrorSchemaByStatus[status as keyof typeof ErrorSchemaByStatus]
     if (schema !== undefined) {
       return makeSseClient.decode(input, schema)
     }
     return undefined
   },
-}
+} satisfies SseEndpoint<Record<string, never>, Item, DomainError>
 
 const encoder = new TextEncoder()
 
-const responseFromSse = (body) =>
+const responseFromSse = (body: BodyInit) =>
   new Response(body, {
     status: 200,
     headers: {
@@ -44,16 +51,22 @@ const responseFromSse = (body) =>
     },
   })
 
-const streamFromResponse = (response) =>
+const streamFromResponse = (response: Response): ItemStream =>
   makeSseClient({
     baseUrl: "http://api.test",
     fetch: async () => response,
   }, endpoint)({})
 
-const collectFromResponse = (response, transform = (stream) => stream) =>
+const collectFromResponse = (
+  response: Response,
+  transform: (stream: ItemStream) => ItemStream = (stream) => stream,
+) =>
   Stream.runCollect(transform(streamFromResponse(response)))
 
-const failureFromResponse = (response, transform = (stream) => stream) =>
+const failureFromResponse = (
+  response: Response,
+  transform: (stream: ItemStream) => ItemStream = (stream) => stream,
+) =>
   collectFromResponse(response, transform).pipe(Effect.flip)
 
 describe("SSE runtime protocol", () => {
@@ -85,7 +98,9 @@ describe("SSE runtime protocol", () => {
         responseFromSse('event: api-error\ndata: {"status":404,"body":{"_tag":"NotFound","id":9}}\n\n'),
       )
 
-      expect(domainError).toBeInstanceOf(NotFound)
+      if (!(domainError instanceof NotFound)) {
+        throw new Error(`Expected NotFound, received ${String(domainError)}`)
+      }
       expect(domainError.id).toBe(9)
     }))
 
@@ -109,7 +124,9 @@ describe("SSE runtime protocol", () => {
         responseFromSse('event: api-error\ndata: {"status":418,"body":{"_tag":"NotFound","id":1}}\n\n'),
       )
 
-      expect(unknownStatus).toBeInstanceOf(UnexpectedStatusError)
+      if (!(unknownStatus instanceof UnexpectedStatusError)) {
+        throw new Error(`Expected UnexpectedStatusError, received ${String(unknownStatus)}`)
+      }
       expect(unknownStatus.status).toBe(418)
     }))
 

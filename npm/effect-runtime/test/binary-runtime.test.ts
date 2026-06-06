@@ -2,6 +2,10 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 
 import {
+  type ApiClientError,
+  type BinaryDownloadEndpoint,
+  type BinaryRequestBody,
+  type BinaryUploadEndpoint,
   EncodeError,
   makeBinaryDownloadClient,
   makeBinaryUploadClient,
@@ -20,8 +24,17 @@ const ErrorSchemaByStatus = {
   404: NotFound,
 }
 
-const decodeError = (helper) => (status, input) => {
-  const schema = ErrorSchemaByStatus[status]
+type Item = typeof Item.Type
+type DomainError = NotFound
+type DownloadArgs = { readonly id: number }
+type UploadArgs = DownloadArgs & { readonly body: BinaryRequestBody }
+
+type BinaryDecodeHelper = {
+  readonly decode: typeof makeBinaryDownloadClient.decode
+}
+
+const decodeError = (helper: BinaryDecodeHelper) => (status: number, input: unknown) => {
+  const schema = ErrorSchemaByStatus[status as keyof typeof ErrorSchemaByStatus]
   if (schema !== undefined) {
     return helper.decode(input, schema)
   }
@@ -33,7 +46,7 @@ const downloadEndpoint = {
   path: "/files/{id}",
   encode: (args) => ({ path: { id: args.id } }),
   decodeError: decodeError(makeBinaryDownloadClient),
-}
+} satisfies BinaryDownloadEndpoint<DownloadArgs, DomainError>
 
 const uploadEndpoint = {
   method: "POST",
@@ -43,16 +56,16 @@ const uploadEndpoint = {
     body: args.body,
     bodyKind: "binary",
   }),
-  decodeSuccess: (input) => makeBinaryUploadClient.decode(input, Item),
+  decodeSuccess: (input: unknown) => makeBinaryUploadClient.decode(input, Item),
   decodeError: decodeError(makeBinaryUploadClient),
-}
+} satisfies BinaryUploadEndpoint<UploadArgs, Item, DomainError>
 
-const failureFromEffect = (effect) => effect.pipe(Effect.flip)
+const failureFromEffect = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.flip)
 
 describe("binary runtime protocol", () => {
   it.effect("downloads binary responses", () =>
     Effect.gen(function* () {
-      let downloadRequest
+      let downloadRequest: { readonly url: string; readonly method: string | undefined } | undefined
       const downloaded = yield* makeBinaryDownloadClient({
         baseUrl: "https://api.example.test",
         fetch: async (url, init) => {
@@ -88,13 +101,22 @@ describe("binary runtime protocol", () => {
         }, downloadEndpoint)({ id: 9 }),
       )
 
-      expect(domainError).toBeInstanceOf(NotFound)
+      if (!(domainError instanceof NotFound)) {
+        throw new Error(`Expected NotFound, received ${String(domainError)}`)
+      }
       expect(domainError.id).toBe(9)
     }))
 
   it.effect("uploads binary request bodies", () =>
     Effect.gen(function* () {
-      let uploadRequest
+      let uploadRequest:
+        | {
+          readonly url: string
+          readonly method: string | undefined
+          readonly contentType: string | null
+          readonly bytes: ReadonlyArray<number>
+        }
+        | undefined
       const uploaded = yield* makeBinaryUploadClient({
         baseUrl: "https://api.example.test",
         fetch: async (url, init) => {
@@ -131,7 +153,7 @@ describe("binary runtime protocol", () => {
           fetch: async () => {
             throw new Error("fetch should not be called for invalid binary bodies")
           },
-        }, uploadEndpoint)({ id: 1, body: { unsupported: true } }),
+        }, uploadEndpoint)({ id: 1, body: { unsupported: true } as unknown as BinaryRequestBody }),
       )
 
       expect(encodeError).toBeInstanceOf(EncodeError)

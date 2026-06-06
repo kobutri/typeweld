@@ -11,6 +11,12 @@ const repositoryRoot = resolve(npmRoot, "..")
 const languageServerBinaryName = process.platform === "win32" ? "api-ls.exe" : "api-ls"
 const apiBinaryName = process.platform === "win32" ? "api.exe" : "api"
 
+type PreparePackageOptions = {
+  readonly apiBinary?: string
+  readonly binary?: string
+  readonly platformDir?: string
+}
+
 const options = parseArgs(process.argv.slice(2))
 const platformDir = options.platformDir ?? `${process.platform}-${process.arch}`
 const binaryPath = resolve(
@@ -75,15 +81,15 @@ if (copiedApiBinary) {
   console.log(`Prepared ${platformDir} api binary at ${apiBinaryTarget}`)
 }
 
-function defaultLanguageServerBinaryPath() {
+function defaultLanguageServerBinaryPath(): string {
   return join(repositoryRoot, "target", "release", languageServerBinaryName)
 }
 
-function defaultApiBinaryPath() {
+function defaultApiBinaryPath(): string {
   return join(repositoryRoot, "target", "release", apiBinaryName)
 }
 
-function maybeCopyApiBinary(source, target) {
+function maybeCopyApiBinary(source: string, target: string): boolean {
   try {
     if (!statSync(source).isFile()) {
       return false
@@ -99,13 +105,13 @@ function maybeCopyApiBinary(source, target) {
   return true
 }
 
-function copyDirectory(source, target) {
+function copyDirectory(source: string, target: string): void {
   rmSync(target, { force: true, recursive: true })
   mkdirSync(dirname(target), { recursive: true })
   cpSync(source, target, { recursive: true })
 }
 
-function assertFile(path, label) {
+function assertFile(path: string, label: string): void {
   try {
     if (!statSync(path).isFile()) {
       throw new Error("not a file")
@@ -115,8 +121,12 @@ function assertFile(path, label) {
   }
 }
 
-function parseArgs(args) {
-  const parsed = {}
+function parseArgs(args: readonly string[]): PreparePackageOptions {
+  const parsed: {
+    apiBinary?: string
+    binary?: string
+    platformDir?: string
+  } = {}
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === "--binary") {
@@ -132,7 +142,7 @@ function parseArgs(args) {
   return parsed
 }
 
-function requireValue(args, index, flag) {
+function requireValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index]
   if (value === undefined || value.startsWith("--")) {
     throw new Error(`${flag} requires a value`)

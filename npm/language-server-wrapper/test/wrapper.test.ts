@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { dirname, delimiter, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { expect, it } from "@effect/vitest"
+import type { SpawnSyncReturns } from "node:child_process"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
@@ -175,7 +176,11 @@ it("prints clear diagnostics when the configured gateway is missing", () => {
  * @param {NodeJS.ProcessEnv} env
  * @param {string=} input
  */
-function runWrapper(args, env, input = "") {
+function runWrapper(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  input = "",
+): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [tsxCli, wrapperPath, ...args], {
     cwd: packageRoot,
     encoding: "utf8",
@@ -187,7 +192,7 @@ function runWrapper(args, env, input = "") {
 /**
  * @returns {NodeJS.ProcessEnv}
  */
-function cleanEnv() {
+function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
   delete env.API_LS_BINARY
   delete env.RUST_TS_API_LS
@@ -200,7 +205,7 @@ function cleanEnv() {
   return env
 }
 
-function createTempDir() {
+function createTempDir(): string {
   return mkdtempSync(join(tmpdir(), "api-ls-wrapper-"))
 }
 
@@ -208,7 +213,7 @@ function createTempDir() {
  * @param {string} path
  * @param {string} body
  */
-function writeExecutable(path, body) {
+function writeExecutable(path: string, body: string): void {
   writeFileSync(path, `#!/usr/bin/env node\n${body}`)
   chmodSync(path, 0o755)
 }
