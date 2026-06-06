@@ -7,9 +7,10 @@ use std::{
 
 use api_ir::{
     ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
-    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, StructShape, Transport,
-    TypeDef, TypeRef, TypeShape,
+    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, StructShape, SymbolId,
+    Transport, TypeDef, TypeRef, TypeShape,
 };
+use serde::Serialize;
 
 #[must_use]
 pub fn render_package_banner(contract: &ApiContract) -> String {
@@ -309,6 +310,513 @@ pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> Ge
         package_dir,
         files,
     }
+}
+
+/// Renders the cross-language symbol graph consumed by `api-ls` and build lints.
+#[must_use]
+pub fn render_symbol_graph(contract: &ApiContract, package: &GeneratedPackage) -> String {
+    let graph = SymbolGraph::from_generated_package(contract, package);
+    serde_json::to_string_pretty(&graph).expect("symbol graph serialization should not fail")
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolGraph {
+    symbols: Vec<LinkedSymbol>,
+}
+
+impl SymbolGraph {
+    fn from_generated_package(contract: &ApiContract, package: &GeneratedPackage) -> Self {
+        let mut symbols = Vec::new();
+        let endpoints_ts = package_file(package, "endpoints.ts");
+        let schemas_ts = package_file(package, "schemas.ts");
+        let errors_ts = package_file(package, "errors.ts");
+
+        for endpoint in &contract.endpoints {
+            symbols.push(endpoint_symbol(contract, package, endpoint, endpoints_ts));
+            for field in endpoint.request.path_params.iter() {
+                symbols.push(field_symbol(
+                    "routeParam",
+                    package,
+                    field,
+                    path_with(&endpoint.rust_path, &[&field.rust_name]),
+                    path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    endpoints_ts,
+                ));
+            }
+            for field in &endpoint.request.query_params {
+                symbols.push(field_symbol(
+                    "queryParam",
+                    package,
+                    field,
+                    path_with(&endpoint.rust_path, &[&field.rust_name]),
+                    path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    endpoints_ts,
+                ));
+            }
+        }
+
+        for type_def in &contract.types {
+            symbols.push(type_symbol(package, type_def, schemas_ts));
+            collect_type_shape_symbols(package, type_def, schemas_ts, &mut symbols);
+        }
+
+        for error in &contract.errors {
+            symbols.push(error_type_symbol(package, error, errors_ts));
+            for variant in &error.variants {
+                symbols.push(error_variant_symbol(package, error, variant, errors_ts));
+                symbols.push(error_tag_symbol(package, error, variant, errors_ts));
+                let class_name = error_variant_class_name(error, variant);
+                for field in &variant.fields {
+                    symbols.push(field_symbol(
+                        "errorField",
+                        package,
+                        field,
+                        path_with(&error.rust_path, &[&variant.rust_name, &field.rust_name]),
+                        path_from(&[&class_name, &field.ts_name]),
+                        errors_ts,
+                    ));
+                }
+            }
+        }
+
+        symbols.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Self { symbols }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedSymbol {
+    id: String,
+    kind: String,
+    rust: GraphLocation,
+    #[serde(default)]
+    typescript: Vec<GraphLocation>,
+    #[serde(default)]
+    metadata: SymbolMetadata,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effect_signature: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rust_path: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ts_path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    allow_unused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rename_placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reserved_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphLocation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    range: GraphRange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_range: Option<GraphRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_range: Option<GraphRange>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    generated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renamable: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GraphRange {
+    start: GraphPosition,
+    end: GraphPosition,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GraphPosition {
+    line: u32,
+    character: u32,
+}
+
+fn endpoint_symbol(
+    contract: &ApiContract,
+    package: &GeneratedPackage,
+    endpoint: &Endpoint,
+    endpoints_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    let function_name = endpoint_function_name(endpoint);
+    LinkedSymbol {
+        id: endpoint.id.as_str().to_owned(),
+        kind: "endpoint".to_owned(),
+        rust: rust_location(&endpoint.source, Some(true)),
+        typescript: generated_location(
+            package,
+            endpoints_ts,
+            &format!("export const {function_name}"),
+            &function_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            method: Some(endpoint.method.as_str().to_owned()),
+            route: Some(endpoint.route.0.clone()),
+            effect_signature: Some(render_endpoint_return_type(endpoint, "ServerApi")),
+            errors: endpoint
+                .errors
+                .iter()
+                .map(|error| error.name.clone())
+                .collect(),
+            rust_path: endpoint.rust_path.clone(),
+            ts_path: endpoint.ts_path.clone(),
+            usage_count: Some(0),
+            allow_unused: endpoint.allow_unused,
+            rename_placeholder: Some(function_name),
+            reserved_names: sibling_endpoint_names(contract, endpoint),
+        },
+    }
+}
+
+fn type_symbol(
+    package: &GeneratedPackage,
+    type_def: &TypeDef,
+    schemas_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: type_def.id.as_str().to_owned(),
+        kind: "type".to_owned(),
+        rust: rust_location(&type_def.source, Some(true)),
+        typescript: generated_location(
+            package,
+            schemas_ts,
+            &format!("export const {}", type_def.ts_name),
+            &type_def.ts_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path: type_def.rust_path.clone(),
+            ts_path: vec![type_def.ts_name.clone()],
+            rename_placeholder: Some(type_def.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_type_symbol(
+    package: &GeneratedPackage,
+    error: &ErrorDef,
+    errors_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: error.id.as_str().to_owned(),
+        kind: "error".to_owned(),
+        rust: rust_location(&error.source, Some(true)),
+        typescript: generated_location(
+            package,
+            errors_ts,
+            &format!("export type {}", error.ts_name),
+            &error.ts_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path: error.rust_path.clone(),
+            ts_path: vec![error.ts_name.clone()],
+            rename_placeholder: Some(error.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_variant_symbol(
+    package: &GeneratedPackage,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+    errors_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    let class_name = error_variant_class_name(error, variant);
+    LinkedSymbol {
+        id: variant.id.as_str().to_owned(),
+        kind: "errorVariant".to_owned(),
+        rust: rust_location(&variant.source, Some(true)),
+        typescript: generated_location(
+            package,
+            errors_ts,
+            &format!("export class {class_name}"),
+            &class_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path: error
+                .rust_path
+                .iter()
+                .cloned()
+                .chain(std::iter::once(variant.rust_name.clone()))
+                .collect(),
+            ts_path: vec![class_name.clone()],
+            rename_placeholder: Some(class_name),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn error_tag_symbol(
+    package: &GeneratedPackage,
+    error: &ErrorDef,
+    variant: &ErrorVariant,
+    errors_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    let class_name = error_variant_class_name(error, variant);
+    LinkedSymbol {
+        id: SymbolId::from_parts("error_tag", &[variant.id.as_str()])
+            .as_str()
+            .to_owned(),
+        kind: "errorTag".to_owned(),
+        rust: rust_location(&variant.source, Some(true)),
+        typescript: generated_location(
+            package,
+            errors_ts,
+            &ts_string(&variant.tag),
+            &variant.tag,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path: path_with(&error.rust_path, &[&variant.rust_name]),
+            ts_path: path_from(&[&class_name, &variant.tag]),
+            rename_placeholder: Some(variant.tag.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn field_symbol(
+    kind: &str,
+    package: &GeneratedPackage,
+    field: &Field,
+    rust_path: Vec<String>,
+    ts_path: Vec<String>,
+    generated_file: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: field.id.as_str().to_owned(),
+        kind: kind.to_owned(),
+        rust: rust_location(&field.source, Some(true)),
+        typescript: generated_location(
+            package,
+            generated_file,
+            &field.ts_name,
+            &field.ts_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path,
+            ts_path,
+            rename_placeholder: Some(field.ts_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn collect_type_shape_symbols(
+    package: &GeneratedPackage,
+    type_def: &TypeDef,
+    schemas_ts: Option<&GeneratedFile>,
+    symbols: &mut Vec<LinkedSymbol>,
+) {
+    match &type_def.shape {
+        TypeShape::Struct(StructShape { fields }) => {
+            for field in fields {
+                symbols.push(field_symbol(
+                    "field",
+                    package,
+                    field,
+                    path_with(&type_def.rust_path, &[&field.rust_name]),
+                    path_from(&[&type_def.ts_name, &field.ts_name]),
+                    schemas_ts,
+                ));
+            }
+        }
+        TypeShape::Enum(EnumShape { variants }) => {
+            for variant in variants {
+                symbols.push(enum_variant_symbol(package, type_def, variant, schemas_ts));
+                for field in &variant.fields {
+                    symbols.push(field_symbol(
+                        "field",
+                        package,
+                        field,
+                        path_with(&type_def.rust_path, &[&variant.rust_name, &field.rust_name]),
+                        path_from(&[&type_def.ts_name, &variant.wire_name, &field.ts_name]),
+                        schemas_ts,
+                    ));
+                }
+            }
+        }
+        TypeShape::Primitive(_)
+        | TypeShape::Newtype(_)
+        | TypeShape::Tuple(_)
+        | TypeShape::List(_)
+        | TypeShape::Map { .. }
+        | TypeShape::Option(_)
+        | TypeShape::External(_) => {}
+    }
+}
+
+fn enum_variant_symbol(
+    package: &GeneratedPackage,
+    type_def: &TypeDef,
+    variant: &EnumVariant,
+    schemas_ts: Option<&GeneratedFile>,
+) -> LinkedSymbol {
+    LinkedSymbol {
+        id: variant.id.as_str().to_owned(),
+        kind: "enumVariant".to_owned(),
+        rust: rust_location(&variant.source, Some(true)),
+        typescript: generated_location(
+            package,
+            schemas_ts,
+            &ts_string(&variant.wire_name),
+            &variant.wire_name,
+            true,
+        )
+        .into_iter()
+        .collect(),
+        metadata: SymbolMetadata {
+            rust_path: path_with(&type_def.rust_path, &[&variant.rust_name]),
+            ts_path: path_from(&[&type_def.ts_name, &variant.wire_name]),
+            rename_placeholder: Some(variant.wire_name.clone()),
+            ..SymbolMetadata::default()
+        },
+    }
+}
+
+fn sibling_endpoint_names(contract: &ApiContract, endpoint: &Endpoint) -> Vec<String> {
+    let namespace = endpoint_namespace(endpoint);
+    let mut names = contract
+        .endpoints
+        .iter()
+        .filter(|candidate| {
+            candidate.id != endpoint.id && endpoint_namespace(candidate) == namespace
+        })
+        .map(endpoint_function_name)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn path_from(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|part| (*part).to_owned()).collect()
+}
+
+fn path_with(base: &[String], additions: &[&str]) -> Vec<String> {
+    base.iter()
+        .cloned()
+        .chain(additions.iter().map(|addition| (*addition).to_owned()))
+        .collect()
+}
+
+fn package_file<'a>(package: &'a GeneratedPackage, path: &str) -> Option<&'a GeneratedFile> {
+    package.files.iter().find(|file| file.path == path)
+}
+
+fn generated_location(
+    package: &GeneratedPackage,
+    file: Option<&GeneratedFile>,
+    anchor: &str,
+    name: &str,
+    renamable: bool,
+) -> Option<GraphLocation> {
+    let file = file?;
+    let anchor_offset = file.contents.find(anchor)?;
+    let name_offset = file.contents[anchor_offset..]
+        .find(name)
+        .map(|offset| anchor_offset + offset)?;
+    let range = range_for_offset(&file.contents, name_offset, name.len());
+    Some(GraphLocation {
+        file: Some(package.package_dir.join(&file.path).display().to_string()),
+        range,
+        name_range: Some(range),
+        full_range: Some(range),
+        generated: true,
+        renamable: Some(renamable),
+    })
+}
+
+fn rust_location(source: &SourceRange, renamable: Option<bool>) -> GraphLocation {
+    let range = range_from_source(source);
+    GraphLocation {
+        file: (!source.file.is_empty()).then(|| source.file.clone()),
+        range,
+        name_range: Some(range),
+        full_range: Some(range),
+        generated: false,
+        renamable,
+    }
+}
+
+fn range_from_source(source: &SourceRange) -> GraphRange {
+    GraphRange {
+        start: GraphPosition {
+            line: source.start_line.saturating_sub(1),
+            character: source.start_column.saturating_sub(1),
+        },
+        end: GraphPosition {
+            line: source.end_line.saturating_sub(1),
+            character: source.end_column.saturating_sub(1),
+        },
+    }
+}
+
+fn range_for_offset(contents: &str, offset: usize, width: usize) -> GraphRange {
+    let start = position_for_offset(contents, offset);
+    let end = position_for_offset(contents, offset + width);
+    GraphRange { start, end }
+}
+
+fn position_for_offset(contents: &str, offset: usize) -> GraphPosition {
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, ch) in contents.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += u32::try_from(ch.len_utf16()).unwrap_or(1);
+        }
+    }
+    GraphPosition { line, character }
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Cache path convention for hidden generated packages.
@@ -1816,6 +2324,78 @@ export * from "./layer"
     }
 
     #[test]
+    fn renders_symbol_graph_for_generated_package() {
+        let mut contract = api_test_fixtures::basic_contract();
+        contract.types.push(TypeDef {
+            id: SymbolId::new("fixture:type:AccountState"),
+            rust_path: vec![
+                "fixture".to_owned(),
+                "users".to_owned(),
+                "AccountState".to_owned(),
+            ],
+            rust_name: "AccountState".to_owned(),
+            ts_name: "AccountState".to_owned(),
+            shape: TypeShape::Enum(EnumShape {
+                variants: vec![EnumVariant {
+                    id: SymbolId::new("fixture:enum:AccountState:Active"),
+                    rust_name: "Active".to_owned(),
+                    wire_name: "active".to_owned(),
+                    fields: Vec::new(),
+                    source: source_file("crates/server/src/types.rs", 30),
+                }],
+            }),
+            source: source_file("crates/server/src/types.rs", 29),
+        });
+        let package = render_generated_package(&contract, Path::new("target"));
+
+        let graph = render_symbol_graph(&contract, &package);
+        assert_eq!(graph, render_symbol_graph(&contract, &package));
+
+        let value: serde_json::Value = serde_json::from_str(&graph).expect("parse symbol graph");
+        let symbols = value["symbols"].as_array().expect("symbols array");
+        let endpoint = find_symbol(symbols, "fixture:endpoint:getUser");
+        assert_eq!(endpoint["kind"], "endpoint");
+        assert_eq!(endpoint["metadata"]["method"], "GET");
+        assert_eq!(endpoint["metadata"]["route"], "/users/{id}");
+        assert_eq!(
+            endpoint["metadata"]["tsPath"],
+            serde_json::json!(["users", "getUser"])
+        );
+        assert!(endpoint["rust"]["nameRange"].is_object());
+        assert!(endpoint["rust"]["fullRange"].is_object());
+        assert!(endpoint["typescript"]
+            .as_array()
+            .expect("endpoint ts locations")
+            .iter()
+            .any(|location| location["generated"] == true
+                && location["file"]
+                    .as_str()
+                    .is_some_and(|file| file.ends_with("endpoints.ts"))));
+
+        assert_eq!(
+            find_symbol(symbols, "fixture:field:getUser:id")["kind"],
+            "routeParam"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:type:AccountState")["kind"],
+            "type"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:enum:AccountState:Active")["kind"],
+            "enumVariant"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:field:User:displayName")["kind"],
+            "field"
+        );
+        assert_eq!(
+            find_symbol(symbols, "fixture:error:GetUserError:UserNotFound")["kind"],
+            "errorVariant"
+        );
+        assert!(symbols.iter().any(|symbol| symbol["kind"] == "errorTag"));
+    }
+
+    #[test]
     fn fixture_generated_endpoints_snapshot_is_deterministic() {
         let contract = api_test_fixtures::basic_contract();
         let package = render_generated_package(&contract, Path::new("target"));
@@ -1947,5 +2527,12 @@ export namespace users {
             end_line: line,
             end_column: 0,
         }
+    }
+
+    fn find_symbol<'a>(symbols: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+        symbols
+            .iter()
+            .find(|symbol| symbol["id"] == id)
+            .unwrap_or_else(|| panic!("missing symbol `{id}`"))
     }
 }

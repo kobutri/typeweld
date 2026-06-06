@@ -8,9 +8,9 @@ use std::{
 
 use api_collector::{
     collect_empty_contract, discover_workspace, scan_effect_usages, write_contract_json,
-    write_effect_usage_index, TypeScriptSourceFile,
+    write_effect_usage_index, EffectUsageIndex, EndpointUsage, TypeScriptSourceFile,
 };
-use api_gen_effect_v4::{render_generated_package, GeneratedPackage};
+use api_gen_effect_v4::{render_generated_package, render_symbol_graph, GeneratedPackage};
 use api_ir::ApiContract;
 
 fn main() -> ExitCode {
@@ -82,6 +82,10 @@ fn gen_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     let contract = read_contract(&options.contract)?;
     let package = render_generated_package(&contract, &options.target_dir);
     write_generated_package(&package)?;
+    write_symbol_graph_json(
+        &render_symbol_graph(&contract, &package),
+        &options.target_dir,
+    )?;
     println!("generated {}", package.package_dir.display());
     Ok(())
 }
@@ -104,13 +108,16 @@ fn gen_workspace_command(args: impl Iterator<Item = String>) -> Result<(), Strin
     let target_dir = target_dir.unwrap_or_else(|| PathBuf::from("target"));
     let graph = read_workspace_contract_graph(&workspace_contract)?;
 
+    let mut symbol_graphs = Vec::new();
     for package_info in workspace_generation_order(&graph)? {
         let contract = read_contract(Path::new(&package_info.contract_path))?;
         let package = render_generated_package(&contract, &target_dir);
         write_generated_package(&package)?;
+        symbol_graphs.push(render_symbol_graph(&contract, &package));
         println!("generated {}", package.package_dir.display());
     }
     write_workspace_tsconfig_paths(&graph, &target_dir)?;
+    write_symbol_graph_json(&merge_symbol_graphs(&symbol_graphs)?, &target_dir)?;
     Ok(())
 }
 
@@ -153,6 +160,8 @@ fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String
     let mut args = args;
     let mut contract = None;
     let mut out = None;
+    let mut symbol_graph = None;
+    let mut explicit_symbol_graph = false;
     let mut ts_files = Vec::new();
     let mut ts_dirs = Vec::new();
 
@@ -160,6 +169,10 @@ fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String
         match arg.as_str() {
             "--contract" => contract = args.next().map(PathBuf::from),
             "--out" => out = args.next().map(PathBuf::from),
+            "--symbol-graph" => {
+                symbol_graph = args.next().map(PathBuf::from);
+                explicit_symbol_graph = true;
+            }
             "--ts" => ts_files.push(required_path(&mut args, "--ts")?),
             "--ts-dir" => ts_dirs.push(required_path(&mut args, "--ts-dir")?),
             other => return Err(format!("unknown api check-usages argument `{other}`")),
@@ -185,6 +198,17 @@ fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String
         })?;
     }
     write_effect_usage_index(&index, &out).map_err(|error| error.to_string())?;
+    let symbol_graph = symbol_graph.or_else(|| default_symbol_graph_for_usage_out(&out));
+    if let Some(symbol_graph) = symbol_graph {
+        if symbol_graph.is_file() {
+            update_symbol_graph_usage_locations(&symbol_graph, &index)?;
+        } else if explicit_symbol_graph {
+            return Err(format!(
+                "api check-usages --symbol-graph path does not exist: {}",
+                symbol_graph.display()
+            ));
+        }
+    }
     println!(
         "wrote usage index {} with {} usage(s)",
         out.display(),
@@ -981,6 +1005,177 @@ fn write_generated_package(package: &GeneratedPackage) -> Result<(), String> {
     Ok(())
 }
 
+fn write_symbol_graph_json(symbol_graph: &str, target_dir: &Path) -> Result<(), String> {
+    let path = target_dir.join("api-contract").join("rust-ts-symbols.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create symbol graph directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&path, symbol_graph)
+        .map_err(|error| format!("failed to write symbol graph `{}`: {error}", path.display()))
+}
+
+fn default_symbol_graph_for_usage_out(out: &Path) -> Option<PathBuf> {
+    let parent = out.parent()?;
+    let graph_dir = parent.file_name()?.to_string_lossy();
+    if graph_dir != "graph" {
+        return None;
+    }
+    Some(parent.parent()?.join("rust-ts-symbols.json"))
+}
+
+fn update_symbol_graph_usage_locations(
+    symbol_graph_path: &Path,
+    index: &EffectUsageIndex,
+) -> Result<(), String> {
+    let contents = fs::read_to_string(symbol_graph_path).map_err(|error| {
+        format!(
+            "failed to read symbol graph `{}`: {error}",
+            symbol_graph_path.display()
+        )
+    })?;
+    let mut value = serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
+        format!(
+            "failed to parse symbol graph `{}`: {error}",
+            symbol_graph_path.display()
+        )
+    })?;
+    let symbols = value
+        .get_mut("symbols")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            format!(
+                "symbol graph `{}` is missing a symbols array",
+                symbol_graph_path.display()
+            )
+        })?;
+
+    let mut summaries = BTreeMap::<String, u64>::new();
+    for endpoint in &index.endpoints {
+        summaries.insert(endpoint.endpoint_id.as_str().to_owned(), endpoint.strong);
+    }
+
+    let mut usages = BTreeMap::<String, Vec<&EndpointUsage>>::new();
+    for usage in &index.usages {
+        usages
+            .entry(usage.endpoint_id.as_str().to_owned())
+            .or_default()
+            .push(usage);
+    }
+
+    for symbol in symbols {
+        let Some(symbol_object) = symbol.as_object_mut() else {
+            continue;
+        };
+        if symbol_object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("endpoint")
+        {
+            continue;
+        }
+        let Some(id) = symbol_object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+
+        if let Some(strong) = summaries.get(&id) {
+            let metadata = symbol_object
+                .entry("metadata")
+                .or_insert_with(|| serde_json::json!({}));
+            let Some(metadata) = metadata.as_object_mut() else {
+                continue;
+            };
+            metadata.insert("usageCount".to_owned(), serde_json::json!(strong));
+        }
+
+        let typescript = symbol_object
+            .entry("typescript")
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(typescript) = typescript.as_array_mut() else {
+            continue;
+        };
+        typescript.retain(|location| {
+            location
+                .get("generated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
+        if let Some(endpoint_usages) = usages.get(&id) {
+            for usage in endpoint_usages {
+                typescript.push(usage_location_json(usage));
+            }
+        }
+    }
+
+    let updated = serde_json::to_string_pretty(&value)
+        .map_err(|error| format!("failed to serialize symbol graph: {error}"))?;
+    fs::write(symbol_graph_path, updated).map_err(|error| {
+        format!(
+            "failed to write symbol graph `{}`: {error}",
+            symbol_graph_path.display()
+        )
+    })
+}
+
+fn usage_location_json(usage: &EndpointUsage) -> serde_json::Value {
+    let range = source_range_json(&usage.source);
+    serde_json::json!({
+        "file": usage.file.clone(),
+        "range": range.clone(),
+        "nameRange": range.clone(),
+        "fullRange": range,
+        "generated": false,
+        "renamable": false
+    })
+}
+
+fn source_range_json(source: &api_ir::SourceRange) -> serde_json::Value {
+    serde_json::json!({
+        "start": {
+            "line": source.start_line.saturating_sub(1),
+            "character": source.start_column.saturating_sub(1)
+        },
+        "end": {
+            "line": source.end_line.saturating_sub(1),
+            "character": source.end_column.saturating_sub(1)
+        }
+    })
+}
+
+fn merge_symbol_graphs(graphs: &[String]) -> Result<String, String> {
+    let mut symbols = Vec::new();
+    for graph in graphs {
+        let value = serde_json::from_str::<serde_json::Value>(graph)
+            .map_err(|error| format!("failed to parse generated symbol graph: {error}"))?;
+        let graph_symbols = value
+            .get("symbols")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "generated symbol graph is missing a symbols array".to_owned())?;
+        symbols.extend(graph_symbols.iter().cloned());
+    }
+    symbols.sort_by(|left, right| {
+        let left_key = (
+            left.get("kind").and_then(serde_json::Value::as_str),
+            left.get("id").and_then(serde_json::Value::as_str),
+        );
+        let right_key = (
+            right.get("kind").and_then(serde_json::Value::as_str),
+            right.get("id").and_then(serde_json::Value::as_str),
+        );
+        left_key.cmp(&right_key)
+    });
+    serde_json::to_string_pretty(&serde_json::json!({ "symbols": symbols }))
+        .map_err(|error| format!("failed to serialize merged symbol graph: {error}"))
+}
+
 fn stale_generated_files(package: &GeneratedPackage) -> Result<Vec<String>, String> {
     let mut stale = Vec::new();
 
@@ -1067,7 +1262,7 @@ fn usage() -> String {
         "  api gen --workspace-contract <path> [--target-dir <dir>]",
         "  api watch --contract <path> [--target-dir <dir>] [--once]",
         "  api check --contract <path> [--target-dir <dir>]",
-        "  api check-usages --contract <path> --out <path> [--ts <file>] [--ts-dir <dir>]",
+        "  api check-usages --contract <path> --out <path> [--symbol-graph <path>] [--ts <file>] [--ts-dir <dir>]",
         "  api doctor [--manifest-path <Cargo.toml>]",
     ]
     .join("\n")
@@ -1116,6 +1311,11 @@ mod tests {
             .join("_workspace_server-api");
         assert!(package_dir.join("index.ts").is_file());
         assert!(package_dir.join("endpoints.ts").is_file());
+        let symbol_graph = fs::read_to_string(target_dir.join("api-contract/rust-ts-symbols.json"))
+            .expect("read symbol graph");
+        assert!(symbol_graph.contains("\"kind\": \"endpoint\""));
+        assert!(symbol_graph.contains("fixture:endpoint:getUser"));
+        assert!(symbol_graph.contains("\"generated\": true"));
     }
 
     #[test]
@@ -1156,6 +1356,60 @@ export const program = Effect.gen(function* () {
         let usage_json = fs::read_to_string(usage_path).expect("read usage index");
         assert!(usage_json.contains("\"strong\": 1"));
         assert!(usage_json.contains("\"accessor_path\": ["));
+    }
+
+    #[test]
+    fn check_usages_enriches_symbol_graph_with_user_locations() {
+        let root = test_root("check-usages-symbol-graph");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let contract_path = root.join("contract.json");
+        let target_dir = root.join("target");
+        let usage_path = target_dir.join("api-contract/graph/effect-usage-index.json");
+        let ts_path = root.join("src/client.ts");
+        fs::write(
+            &contract_path,
+            serde_json::to_string_pretty(&api_test_fixtures::basic_contract())
+                .expect("serialize contract"),
+        )
+        .expect("write contract");
+
+        run_with_args(vec![
+            "gen".to_owned(),
+            "--contract".to_owned(),
+            contract_path.display().to_string(),
+            "--target-dir".to_owned(),
+            target_dir.display().to_string(),
+        ])
+        .expect("generate package");
+
+        fs::write(
+            &ts_path,
+            r#"import { users } from "@workspace/server-api"
+
+export const program = Effect.gen(function* () {
+  yield* users.getUser({ id: 1 })
+})
+"#,
+        )
+        .expect("write ts");
+
+        run_with_args(vec![
+            "check-usages".to_owned(),
+            "--contract".to_owned(),
+            contract_path.display().to_string(),
+            "--out".to_owned(),
+            usage_path.display().to_string(),
+            "--ts".to_owned(),
+            ts_path.display().to_string(),
+        ])
+        .expect("check usages");
+
+        let symbol_graph = fs::read_to_string(target_dir.join("api-contract/rust-ts-symbols.json"))
+            .expect("read symbol graph");
+        assert!(symbol_graph.contains("\"usageCount\": 1"));
+        assert!(symbol_graph.contains("src/client.ts"));
+        assert!(symbol_graph.contains("\"generated\": false"));
+        assert!(symbol_graph.contains("\"renamable\": false"));
     }
 
     #[test]
@@ -1493,6 +1747,11 @@ resolver = "2"
                 .expect("read workspace tsconfig paths");
         assert!(paths.contains("@workspace/server-api"));
         assert!(paths.contains("@workspace/admin-api"));
+        let symbol_graph =
+            fs::read_to_string(root.join("target/api-contract/rust-ts-symbols.json"))
+                .expect("read workspace symbol graph");
+        assert!(symbol_graph.contains("get_server_user"));
+        assert!(symbol_graph.contains("get_admin_user"));
     }
 
     fn test_root(name: &str) -> PathBuf {

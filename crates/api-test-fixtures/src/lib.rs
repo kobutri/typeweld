@@ -148,49 +148,6 @@ pub fn basic_contract() -> ApiContract {
     }
 }
 
-#[must_use]
-pub fn basic_symbol_graph_json() -> String {
-    r#"{
-  "symbols": [
-    {
-      "id": "fixture:endpoint:getUser",
-      "kind": "endpoint",
-      "rust": {
-        "file": "crates/server/src/users.rs",
-        "range": {
-          "start": { "line": 17, "character": 13 },
-          "end": { "line": 17, "character": 21 }
-        },
-        "renamable": true
-      },
-      "typescript": [
-        {
-          "file": "app/src/client.ts",
-          "range": {
-            "start": { "line": 4, "character": 15 },
-            "end": { "line": 4, "character": 23 }
-          },
-          "renamable": true
-        }
-      ],
-      "metadata": {
-        "method": "GET",
-        "route": "/users/{id}",
-        "effectSignature": "Effect.Effect<User, GetUserError | ApiClientError, ServerApi>",
-        "errors": ["GetUserError"],
-        "rustPath": ["fixture", "users", "get_user"],
-        "tsPath": ["users", "getUser"],
-        "usageCount": 1,
-        "renamePlaceholder": "getUser",
-        "reservedNames": ["createUser"]
-      }
-    }
-  ]
-}
-"#
-    .to_owned()
-}
-
 fn type_ref(id: &str, name: &str) -> TypeRef {
     TypeRef {
         id: SymbolId::new(id),

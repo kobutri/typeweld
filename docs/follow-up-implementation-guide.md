@@ -297,7 +297,7 @@ Acceptance criteria:
 - `Sse<T>` -> stream success.
 - Binary upload/download can be represented without another breaking IR change.
 
-### B2. Produce `rust-ts-symbols.json`
+### B2. Produce `rust-ts-symbols.json` [done]
 
 Goal: generate the graph consumed by `api-ls` and `api-build`.
 

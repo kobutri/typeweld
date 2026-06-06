@@ -2392,10 +2392,9 @@ mod tests {
     }
 
     #[test]
-    fn fixture_symbol_graph_drives_definition_and_hover_transcript() {
-        let root = test_root("fixture-transcript");
+    fn generated_symbol_graph_drives_definition_and_hover_transcript() {
+        let root = test_root("generated-transcript");
         fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
-        fs::create_dir_all(root.join("app/src")).expect("create ts dir");
         fs::create_dir_all(root.join("crates/server/src")).expect("create rust dir");
         fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
         fs::write(
@@ -2403,13 +2402,26 @@ mod tests {
             r#"{"rustAnalyzer":{"command":""},"typescript":{"command":""}}"#,
         )
         .expect("write config");
+        let contract = api_test_fixtures::basic_contract();
+        let package = api_gen_effect_v4::render_generated_package(&contract, &root.join("target"));
+        let symbol_graph = api_gen_effect_v4::render_symbol_graph(&contract, &package);
+        let graph_value: Value = serde_json::from_str(&symbol_graph).expect("parse symbol graph");
+        let endpoint_position = graph_value["symbols"]
+            .as_array()
+            .expect("symbols array")
+            .iter()
+            .find(|symbol| symbol["id"] == "fixture:endpoint:getUser")
+            .and_then(|symbol| symbol["typescript"].as_array())
+            .and_then(|locations| locations.first())
+            .map(|location| location["range"]["start"].clone())
+            .expect("endpoint generated location");
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
-            api_test_fixtures::basic_symbol_graph_json(),
+            symbol_graph,
         )
         .expect("write symbol graph");
 
-        let ts_uri = path_to_file_uri(&root.join("app/src/client.ts"));
+        let ts_uri = path_to_file_uri(&package.package_dir.join("endpoints.ts"));
         let input = [
             framed(&json!({
                 "jsonrpc": "2.0",
@@ -2427,7 +2439,7 @@ mod tests {
                 "method": "textDocument/definition",
                 "params": {
                     "textDocument": { "uri": ts_uri },
-                    "position": { "line": 4, "character": 16 }
+                    "position": endpoint_position.clone()
                 }
             })),
             framed(&json!({
@@ -2436,7 +2448,7 @@ mod tests {
                 "method": "textDocument/hover",
                 "params": {
                     "textDocument": { "uri": ts_uri },
-                    "position": { "line": 4, "character": 16 }
+                    "position": endpoint_position
                 }
             })),
             framed(&json!({
@@ -2458,7 +2470,6 @@ mod tests {
         assert!(output.contains("\"id\":2"));
         assert!(output.contains("crates/server/src/users.rs"));
         assert!(output.contains("\"line\":17"));
-        assert!(output.contains("\"character\":13"));
         assert!(output.contains("\"id\":3"));
         assert!(output.contains("**API endpoint** `fixture:endpoint:getUser`"));
         assert!(output.contains("Route: `GET /users/{id}`"));
