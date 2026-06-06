@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -46,29 +47,70 @@ fn run_with_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
 fn collect_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     let options = CollectOptions::parse(args)?;
 
+    if options.empty {
+        let out = options
+            .out
+            .clone()
+            .ok_or_else(|| "api collect --empty requires --out <path>".to_owned())?;
+        let package_name = options.package_name.clone().ok_or_else(|| {
+            "api collect --empty requires --package-name <ts-package-name>".to_owned()
+        })?;
+        let contract = collect_empty_contract(package_name);
+        return write_contract_json(&contract, out).map_err(|error| error.to_string());
+    }
+
+    if options.workspace {
+        let graph_path = collect_workspace_contracts(&options)?;
+        println!("wrote workspace contract graph {}", graph_path.display());
+        return Ok(());
+    }
+
     let out = options
         .out
         .clone()
         .ok_or_else(|| "api collect requires --out <path>".to_owned())?;
-
-    let contract = if options.empty {
-        let package_name = options.package_name.clone().ok_or_else(|| {
-            "api collect --empty requires --package-name <ts-package-name>".to_owned()
-        })?;
-        collect_empty_contract(package_name)
-    } else {
-        collect_cargo_contract(&options)?
-    };
-
+    let contract = collect_cargo_contract(&options)?;
     write_contract_json(&contract, out).map_err(|error| error.to_string())
 }
 
 fn gen_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let options = ContractTargetOptions::parse(args, "api gen")?;
+    let args = args.collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--workspace-contract") {
+        return gen_workspace_command(args.into_iter());
+    }
+    let options = ContractTargetOptions::parse(args.into_iter(), "api gen")?;
     let contract = read_contract(&options.contract)?;
     let package = render_generated_package(&contract, &options.target_dir);
     write_generated_package(&package)?;
     println!("generated {}", package.package_dir.display());
+    Ok(())
+}
+
+fn gen_workspace_command(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut args = args;
+    let mut workspace_contract = None;
+    let mut target_dir = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--workspace-contract" => workspace_contract = args.next().map(PathBuf::from),
+            "--target-dir" | "--out-dir" => target_dir = args.next().map(PathBuf::from),
+            other => return Err(format!("unknown api gen argument `{other}`")),
+        }
+    }
+
+    let workspace_contract = workspace_contract
+        .ok_or_else(|| "api gen requires --workspace-contract <path>".to_owned())?;
+    let target_dir = target_dir.unwrap_or_else(|| PathBuf::from("target"));
+    let graph = read_workspace_contract_graph(&workspace_contract)?;
+
+    for package_info in workspace_generation_order(&graph)? {
+        let contract = read_contract(Path::new(&package_info.contract_path))?;
+        let package = render_generated_package(&contract, &target_dir);
+        write_generated_package(&package)?;
+        println!("generated {}", package.package_dir.display());
+    }
+    write_workspace_tsconfig_paths(&graph, &target_dir)?;
     Ok(())
 }
 
@@ -185,6 +227,19 @@ struct RustTsPackageMetadata {
     features: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct WorkspaceContractGraph {
+    packages: Vec<WorkspaceContractPackage>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct WorkspaceContractPackage {
+    cargo_package: String,
+    ts_package: String,
+    contract_path: String,
+    dependencies: Vec<String>,
+}
+
 #[derive(Debug)]
 struct ResolvedCollectTarget {
     ts_package_name: String,
@@ -204,6 +259,7 @@ struct CollectOptions {
     all_features: bool,
     no_default_features: bool,
     empty: bool,
+    workspace: bool,
 }
 
 impl CollectOptions {
@@ -220,6 +276,7 @@ impl CollectOptions {
             all_features: false,
             no_default_features: false,
             empty: false,
+            workspace: false,
         };
 
         while let Some(arg) = args.next() {
@@ -243,6 +300,7 @@ impl CollectOptions {
                 "--all-features" => options.all_features = true,
                 "--no-default-features" => options.no_default_features = true,
                 "--empty" => options.empty = true,
+                "--workspace" => options.workspace = true,
                 other => return Err(format!("unknown api collect argument `{other}`")),
             }
         }
@@ -254,16 +312,17 @@ impl CollectOptions {
 }
 
 fn collect_cargo_contract(options: &CollectOptions) -> Result<ApiContract, String> {
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .manifest_path(&options.manifest_path)
-        .exec()
-        .map_err(|error| {
-            format!(
-                "api collect could not inspect `{}`: {error}",
-                options.manifest_path.display()
-            )
-        })?;
+    let metadata = load_cargo_metadata(&options.manifest_path)?;
     let package = resolve_collect_package(&metadata, options.cargo_package.as_deref())?;
+    let (_, contract) = collect_package_contract(options, &metadata, package)?;
+    Ok(contract)
+}
+
+fn collect_package_contract(
+    options: &CollectOptions,
+    metadata: &cargo_metadata::Metadata,
+    package: &cargo_metadata::Package,
+) -> Result<(ResolvedCollectTarget, ApiContract), String> {
     let package_metadata = package_rust_ts_metadata(package)?;
     let lib_crate_name = package_lib_crate_name(package)?;
     let resolved = resolve_collect_target(options, package, package_metadata, &lib_crate_name)?;
@@ -283,7 +342,110 @@ fn collect_cargo_contract(options: &CollectOptions) -> Result<ApiContract, Strin
         options.no_default_features,
         &metadata,
     )?;
-    run_temp_collector(&collector_dir)
+    let contract = run_temp_collector(&collector_dir)?;
+    Ok((resolved, contract))
+}
+
+fn load_cargo_metadata(manifest_path: &Path) -> Result<cargo_metadata::Metadata, String> {
+    cargo_metadata::MetadataCommand::new()
+        .manifest_path(manifest_path)
+        .exec()
+        .map_err(|error| {
+            format!(
+                "api collect could not inspect `{}`: {error}",
+                manifest_path.display()
+            )
+        })
+}
+
+fn collect_workspace_contracts(options: &CollectOptions) -> Result<PathBuf, String> {
+    let metadata = load_cargo_metadata(&options.manifest_path)?;
+    let packages = api_enabled_packages(&metadata)?;
+    if packages.is_empty() {
+        return Err(
+            "api collect --workspace found no packages with [package.metadata.rust_ts]".to_owned(),
+        );
+    }
+
+    let target_dir = options
+        .target_dir
+        .clone()
+        .unwrap_or_else(|| metadata.target_directory.clone().into_std_path_buf());
+    let contract_dir = target_dir.join("api-contract").join("contracts");
+    fs::create_dir_all(&contract_dir).map_err(|error| {
+        format!(
+            "failed to create workspace contract directory `{}`: {error}",
+            contract_dir.display()
+        )
+    })?;
+
+    let api_package_names = packages
+        .iter()
+        .map(|package| package.name.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut graph_packages = Vec::new();
+
+    for package in packages {
+        let (resolved, contract) = collect_package_contract(options, &metadata, package)?;
+        let contract_path =
+            contract_dir.join(format!("{}.json", sanitize_package_dir_name(&package.name)));
+        write_contract_json(&contract, &contract_path).map_err(|error| {
+            format!(
+                "failed to write workspace contract `{}`: {error}",
+                contract_path.display()
+            )
+        })?;
+
+        graph_packages.push(WorkspaceContractPackage {
+            cargo_package: package.name.to_string(),
+            ts_package: resolved.ts_package_name,
+            contract_path: contract_path.display().to_string(),
+            dependencies: api_dependency_edges(package, &api_package_names),
+        });
+    }
+
+    graph_packages.sort_by(|left, right| left.cargo_package.cmp(&right.cargo_package));
+    let graph = WorkspaceContractGraph {
+        packages: graph_packages,
+    };
+    let graph_path = target_dir
+        .join("api-contract")
+        .join("workspace-contract.json");
+    if let Some(parent) = graph_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create workspace graph directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let json = serde_json::to_string_pretty(&graph)
+        .map_err(|error| format!("failed to serialize workspace contract graph: {error}"))?;
+    fs::write(&graph_path, json).map_err(|error| {
+        format!(
+            "failed to write workspace contract graph `{}`: {error}",
+            graph_path.display()
+        )
+    })?;
+    Ok(graph_path)
+}
+
+fn api_dependency_edges(
+    package: &cargo_metadata::Package,
+    api_package_names: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut dependencies = package
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            api_package_names
+                .contains(dependency.name.as_str())
+                .then(|| dependency.name.to_string())
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
 }
 
 fn resolve_collect_package<'a>(
@@ -636,6 +798,14 @@ fn rust_string(value: &str) -> String {
     toml_string(value)
 }
 
+fn json_string(value: &str) -> String {
+    toml_string(value)
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[derive(Debug)]
 struct ContractTargetOptions {
     contract: PathBuf,
@@ -672,6 +842,122 @@ fn read_contract(path: &Path) -> Result<ApiContract, String> {
         .map_err(|error| format!("failed to read contract `{}`: {error}", path.display()))?;
     serde_json::from_str(&contents)
         .map_err(|error| format!("failed to parse contract `{}`: {error}", path.display()))
+}
+
+fn read_workspace_contract_graph(path: &Path) -> Result<WorkspaceContractGraph, String> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read workspace contract graph `{}`: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "failed to parse workspace contract graph `{}`: {error}",
+            path.display()
+        )
+    })
+}
+
+fn workspace_generation_order(
+    graph: &WorkspaceContractGraph,
+) -> Result<Vec<&WorkspaceContractPackage>, String> {
+    let by_package = graph
+        .packages
+        .iter()
+        .map(|package| (package.cargo_package.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut temporary = BTreeSet::new();
+    let mut permanent = BTreeSet::new();
+    let mut ordered = Vec::new();
+
+    for package in &graph.packages {
+        visit_workspace_package(
+            package.cargo_package.as_str(),
+            &by_package,
+            &mut temporary,
+            &mut permanent,
+            &mut ordered,
+        )?;
+    }
+
+    Ok(ordered)
+}
+
+fn visit_workspace_package<'a>(
+    package_name: &'a str,
+    by_package: &BTreeMap<&'a str, &'a WorkspaceContractPackage>,
+    temporary: &mut BTreeSet<&'a str>,
+    permanent: &mut BTreeSet<&'a str>,
+    ordered: &mut Vec<&'a WorkspaceContractPackage>,
+) -> Result<(), String> {
+    if permanent.contains(package_name) {
+        return Ok(());
+    }
+    if !temporary.insert(package_name) {
+        return Err(format!(
+            "workspace contract graph contains a dependency cycle at `{package_name}`"
+        ));
+    }
+
+    let package = by_package.get(package_name).ok_or_else(|| {
+        format!("workspace contract graph references unknown package `{package_name}`")
+    })?;
+    for dependency in &package.dependencies {
+        if by_package.contains_key(dependency.as_str()) {
+            visit_workspace_package(dependency, by_package, temporary, permanent, ordered)?;
+        }
+    }
+
+    temporary.remove(package_name);
+    permanent.insert(package_name);
+    ordered.push(*package);
+    Ok(())
+}
+
+fn write_workspace_tsconfig_paths(
+    graph: &WorkspaceContractGraph,
+    target_dir: &Path,
+) -> Result<(), String> {
+    let path = target_dir
+        .join("api-contract")
+        .join("effect-v4")
+        .join("tsconfig.paths.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create workspace TypeScript paths directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut entries = Vec::new();
+    for package in &graph.packages {
+        let package_dir = api_gen_effect_v4::generated_package_dir(target_dir, &package.ts_package);
+        let package_dir = normalize_path(&package_dir);
+        entries.push(format!(
+            "      {package_name}: [\n        {index_path}\n      ]",
+            package_name = json_string(&package.ts_package),
+            index_path = json_string(&format!("{package_dir}/index.ts")),
+        ));
+        entries.push(format!(
+            "      {package_glob}: [\n        {package_dir_glob}\n      ]",
+            package_glob = json_string(&format!("{}/*", package.ts_package)),
+            package_dir_glob = json_string(&format!("{package_dir}/*")),
+        ));
+    }
+
+    let contents = format!(
+        "{{\n  \"compilerOptions\": {{\n    \"paths\": {{\n{}\n    }}\n  }}\n}}\n",
+        entries.join(",\n")
+    );
+    fs::write(&path, contents).map_err(|error| {
+        format!(
+            "failed to write workspace TypeScript paths `{}`: {error}",
+            path.display()
+        )
+    })
 }
 
 fn write_generated_package(package: &GeneratedPackage) -> Result<(), String> {
@@ -775,8 +1061,10 @@ fn usage() -> String {
     [
         "usage:",
         "  api collect --package <cargo-package> --out <path> [--api-root <path::to::api>] [--package-name <ts-package>] [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--features <list>] [--all-features] [--no-default-features]",
+        "  api collect --workspace [--manifest-path <Cargo.toml>] [--target-dir <dir>]",
         "  api collect --empty --package-name <ts-package> --out <path>",
         "  api gen --contract <path> [--target-dir <dir>]",
+        "  api gen --workspace-contract <path> [--target-dir <dir>]",
         "  api watch --contract <path> [--target-dir <dir>] [--once]",
         "  api check --contract <path> [--target-dir <dir>]",
         "  api check-usages --contract <path> --out <path> [--ts <file>] [--ts-dir <dir>]",
@@ -1123,6 +1411,90 @@ resolver = "2"
         assert!(error.contains("admin"));
     }
 
+    #[test]
+    fn workspace_collect_writes_graph_and_gen_uses_dependency_order() {
+        let root = test_root("workspace-graph");
+        fs::create_dir_all(&root).expect("create workspace root");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["server", "admin"]
+resolver = "2"
+"#,
+        )
+        .expect("write workspace manifest");
+        write_workspace_api_package(
+            &root,
+            "server",
+            "@workspace/server-api",
+            &[],
+            "ServerUser",
+            "get_server_user",
+            "/server/users",
+        );
+        write_workspace_api_package(
+            &root,
+            "admin",
+            "@workspace/admin-api",
+            &[("server", "../server")],
+            "AdminUser",
+            "get_admin_user",
+            "/admin/users",
+        );
+
+        run_with_args(vec![
+            "collect".to_owned(),
+            "--workspace".to_owned(),
+            "--manifest-path".to_owned(),
+            root.join("Cargo.toml").display().to_string(),
+            "--target-dir".to_owned(),
+            root.join("target").display().to_string(),
+        ])
+        .expect("collect workspace contracts");
+
+        let graph_path = root.join("target/api-contract/workspace-contract.json");
+        let graph: WorkspaceContractGraph =
+            serde_json::from_str(&fs::read_to_string(&graph_path).expect("read graph"))
+                .expect("parse graph");
+        let admin = graph
+            .packages
+            .iter()
+            .find(|package| package.cargo_package == "admin")
+            .expect("admin graph package");
+        assert_eq!(graph.packages.len(), 2);
+        assert_eq!(admin.dependencies, ["server"]);
+        for package in &graph.packages {
+            assert!(Path::new(&package.contract_path).is_file());
+        }
+
+        run_with_args(vec![
+            "gen".to_owned(),
+            "--workspace-contract".to_owned(),
+            graph_path.display().to_string(),
+            "--target-dir".to_owned(),
+            root.join("target").display().to_string(),
+        ])
+        .expect("generate workspace packages");
+
+        assert!(api_gen_effect_v4::generated_package_dir(
+            &root.join("target"),
+            "@workspace/server-api"
+        )
+        .join("index.ts")
+        .is_file());
+        assert!(api_gen_effect_v4::generated_package_dir(
+            &root.join("target"),
+            "@workspace/admin-api"
+        )
+        .join("index.ts")
+        .is_file());
+        let paths =
+            fs::read_to_string(root.join("target/api-contract/effect-v4/tsconfig.paths.json"))
+                .expect("read workspace tsconfig paths");
+        assert!(paths.contains("@workspace/server-api"));
+        assert!(paths.contains("@workspace/admin-api"));
+    }
+
     fn test_root(name: &str) -> PathBuf {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!("api-cli-{name}-{}-{id}", std::process::id()));
@@ -1136,5 +1508,69 @@ resolver = "2"
             .and_then(Path::parent)
             .expect("api-collector is under crates/")
             .to_path_buf()
+    }
+
+    fn write_workspace_api_package(
+        root: &Path,
+        package: &str,
+        ts_package: &str,
+        dependencies: &[(&str, &str)],
+        dto: &str,
+        endpoint: &str,
+        route: &str,
+    ) {
+        let package_dir = root.join(package);
+        fs::create_dir_all(package_dir.join("src")).expect("create package src");
+        let dependency_lines = dependencies
+            .iter()
+            .map(|(name, path)| format!("{name} = {{ path = {path} }}", path = toml_string(path)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(
+            package_dir.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{package}"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.rust_ts]
+ts_package = "{ts_package}"
+api_root = "{package}::api"
+
+[dependencies]
+api-core = {{ path = {api_core_path} }}
+api-macros = {{ path = {api_macros_path} }}
+{dependency_lines}
+"#,
+                api_core_path =
+                    toml_string(&repo_root().join("crates/api-core").display().to_string()),
+                api_macros_path =
+                    toml_string(&repo_root().join("crates/api-macros").display().to_string()),
+            ),
+        )
+        .expect("write package manifest");
+        fs::write(
+            package_dir.join("src/lib.rs"),
+            format!(
+                r#"use api_core::{{api_module, ApiModule, Json}};
+
+#[derive(api_macros::ApiType)]
+pub struct {dto} {{
+    id: i64,
+}}
+
+#[api_macros::api(method = "GET", path = "{route}")]
+pub async fn {endpoint}() -> Json<{dto}> {{
+    todo!()
+}}
+
+pub fn api() -> ApiModule {{
+    api_module!(name = "{package}", endpoints = [{endpoint}])
+}}
+"#
+            ),
+        )
+        .expect("write package lib");
     }
 }

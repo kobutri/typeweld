@@ -259,7 +259,7 @@ Acceptance criteria:
 - CLI flags override metadata.
 - Multiple API-enabled workspace packages are discoverable.
 
-### A5. Build a workspace contract graph
+### A5. Build a workspace contract graph [done]
 
 Goal: support multiple Rust crates and multiple generated TS packages.
 
