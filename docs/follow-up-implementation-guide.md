@@ -698,7 +698,7 @@ Acceptance criteria:
 
 ## Track G: build, CI, and command workflow
 
-### G1. Implement `cargo api check`
+### G1. Implement `cargo api check` [done]
 
 Goal: one command validates the whole system.
 

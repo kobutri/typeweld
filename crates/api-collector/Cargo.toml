@@ -13,6 +13,7 @@ name = "api"
 path = "src/main.rs"
 
 [dependencies]
+api-build = { path = "../api-build" }
 api-core = { path = "../api-core" }
 api-gen-effect-v4 = { path = "../api-gen-effect-v4" }
 api-ir = { path = "../api-ir" }

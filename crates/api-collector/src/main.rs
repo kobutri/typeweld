@@ -6,6 +6,7 @@ use std::{
     process::ExitCode,
 };
 
+use api_build::{check_usage_lints, UsageLintConfig, UsageLintLevel};
 use api_collector::{
     collect_empty_contract, discover_workspace, try_scan_effect_usages, write_contract_json,
     write_effect_usage_index, EffectUsageIndex, EndpointUsage, ErrorUsage, FieldUsage,
@@ -137,9 +138,24 @@ fn watch_command(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn check_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let options = ContractTargetOptions::parse(args, "api check")?;
-    let contract = read_contract(&options.contract)?;
-    let expected = render_generated_package(&contract, &options.target_dir);
+    let options = CheckOptions::parse(args)?;
+    if options.legacy_stale_check() {
+        let contract = options
+            .contract
+            .as_ref()
+            .expect("legacy check requires contract");
+        return check_generated_package_is_current(contract, &options.target_dir);
+    }
+
+    run_full_check(&options)
+}
+
+fn check_generated_package_is_current(
+    contract_path: &Path,
+    target_dir: &Path,
+) -> Result<(), String> {
+    let contract = read_contract(contract_path)?;
+    let expected = render_generated_package(&contract, target_dir);
     let stale = stale_generated_files(&expected)?;
 
     if stale.is_empty() {
@@ -151,10 +167,461 @@ fn check_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     } else {
         Err(format!(
             "generated package is stale; run `api gen --contract {} --target-dir {}`\n{}",
-            options.contract.display(),
-            options.target_dir.display(),
+            contract_path.display(),
+            target_dir.display(),
             stale.join("\n")
         ))
+    }
+}
+
+fn run_full_check(options: &CheckOptions) -> Result<(), String> {
+    let checked_contracts = check_collect_contracts(options)?;
+    let packages = check_generate_contracts(&checked_contracts, &options.target_dir)?;
+    typecheck_generated_packages(&packages, &options.target_dir)?;
+    let usage_index = check_update_usage_index(options, &checked_contracts)?;
+    check_run_usage_lints(options, usage_index.is_some())?;
+    if options.cargo_check {
+        run_cargo_check_with_usage_lints(options)?;
+    }
+
+    println!(
+        "api check passed for {} contract(s)",
+        checked_contracts.len()
+    );
+    Ok(())
+}
+
+fn check_collect_contracts(options: &CheckOptions) -> Result<Vec<CheckedContract>, String> {
+    if let Some(contract_path) = &options.contract {
+        return Ok(vec![CheckedContract {
+            contract: read_contract(contract_path)?,
+        }]);
+    }
+
+    let collect_options = options.collect_options();
+    let metadata = load_cargo_metadata(&options.manifest_path)?;
+    let packages = api_enabled_packages(&metadata)?;
+    if packages.is_empty() {
+        return Err(
+            "api check found no packages with [package.metadata.rust_ts]; pass --contract or add package metadata"
+                .to_owned(),
+        );
+    }
+
+    if options.workspace || (options.cargo_package.is_none() && packages.len() > 1) {
+        let graph_path = collect_workspace_contracts(&collect_options)?;
+        let graph = read_workspace_contract_graph(&graph_path)?;
+        return workspace_generation_order(&graph)?
+            .into_iter()
+            .map(|package| {
+                let path = PathBuf::from(&package.contract_path);
+                Ok(CheckedContract {
+                    contract: read_contract(&path)?,
+                })
+            })
+            .collect();
+    }
+
+    let package = resolve_collect_package(&metadata, options.cargo_package.as_deref())?;
+    let (_, contract) = collect_package_contract(&collect_options, &metadata, package)?;
+    let contract_dir = options.target_dir.join("api-contract").join("contracts");
+    fs::create_dir_all(&contract_dir).map_err(|error| {
+        format!(
+            "failed to create check contract directory `{}`: {error}",
+            contract_dir.display()
+        )
+    })?;
+    let path = contract_dir.join(format!("{}.json", sanitize_package_dir_name(&package.name)));
+    write_contract_json(&contract, &path).map_err(|error| {
+        format!(
+            "failed to write check contract `{}`: {error}",
+            path.display()
+        )
+    })?;
+    Ok(vec![CheckedContract { contract }])
+}
+
+fn check_generate_contracts(
+    checked_contracts: &[CheckedContract],
+    target_dir: &Path,
+) -> Result<Vec<GeneratedPackage>, String> {
+    let mut packages = Vec::new();
+    let mut symbol_graphs = Vec::new();
+
+    for checked in checked_contracts {
+        let package = render_generated_package(&checked.contract, target_dir);
+        write_generated_package(&package)?;
+        symbol_graphs.push(render_symbol_graph(&checked.contract, &package));
+        packages.push(package);
+    }
+    write_packages_tsconfig_paths(&packages, target_dir)?;
+
+    let symbol_graph = if symbol_graphs.len() == 1 {
+        symbol_graphs.into_iter().next().expect("one symbol graph")
+    } else {
+        merge_symbol_graphs(&symbol_graphs)?
+    };
+    write_symbol_graph_json(&symbol_graph, target_dir)?;
+
+    Ok(packages)
+}
+
+fn check_update_usage_index(
+    options: &CheckOptions,
+    checked_contracts: &[CheckedContract],
+) -> Result<Option<PathBuf>, String> {
+    let mut ts_files = options.ts_files.clone();
+    for dir in &options.ts_dirs {
+        collect_ts_files(dir, &mut ts_files)?;
+    }
+    if ts_files.is_empty() && matches!(options.unused_endpoint_lints, UsageLintLevel::Off) {
+        return Ok(None);
+    }
+
+    let sources = read_ts_sources(&ts_files)?;
+    let indexes = checked_contracts
+        .iter()
+        .map(|checked| try_scan_effect_usages(&checked.contract, &sources))
+        .collect::<Result<Vec<_>, _>>()?;
+    let merged = merge_usage_indexes(indexes);
+    let usage_path = options.usage_index_path();
+    if let Some(parent) = usage_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create usage index directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    write_effect_usage_index(&merged, &usage_path).map_err(|error| error.to_string())?;
+    update_symbol_graph_usage_locations(&options.symbol_graph_path(), &merged)?;
+    Ok(Some(usage_path))
+}
+
+fn check_run_usage_lints(
+    options: &CheckOptions,
+    usage_index_available: bool,
+) -> Result<(), String> {
+    if matches!(options.unused_endpoint_lints, UsageLintLevel::Off) {
+        return Ok(());
+    }
+    if !usage_index_available {
+        return Err("api check cannot run unused endpoint lints without a usage index".to_owned());
+    }
+
+    let report = check_usage_lints(&UsageLintConfig {
+        usage_index: options.usage_index_path(),
+        symbol_graph: options.symbol_graph_path(),
+        lint_level: options.unused_endpoint_lints,
+        generated_lint_path: options
+            .target_dir
+            .join("api-contract")
+            .join("build")
+            .join("api_usage_lints.rs"),
+    })
+    .map_err(|error| error.to_string())?;
+
+    for diagnostic in &report.diagnostics {
+        eprintln!("{}", diagnostic.message);
+    }
+    if matches!(options.unused_endpoint_lints, UsageLintLevel::Deny)
+        && !report.diagnostics.is_empty()
+    {
+        return Err(format!(
+            "api check failed because {} unused endpoint diagnostic(s) were denied",
+            report.diagnostics.len()
+        ));
+    }
+    Ok(())
+}
+
+fn run_cargo_check_with_usage_lints(options: &CheckOptions) -> Result<(), String> {
+    let mut command = Command::new("cargo");
+    command
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(&options.manifest_path)
+        .env("API_USAGE_INDEX", options.usage_index_path())
+        .env("API_SYMBOL_GRAPH", options.symbol_graph_path())
+        .env(
+            "API_UNUSED_ENDPOINTS",
+            match options.unused_endpoint_lints {
+                UsageLintLevel::Off => "off",
+                UsageLintLevel::Warn => "warn",
+                UsageLintLevel::Deny => "deny",
+            },
+        );
+    let status = command
+        .status()
+        .map_err(|error| format!("failed to run cargo check: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cargo check failed with {status}"))
+    }
+}
+
+fn merge_usage_indexes(mut indexes: Vec<EffectUsageIndex>) -> EffectUsageIndex {
+    let Some(mut merged) = indexes.first().cloned() else {
+        return EffectUsageIndex::default();
+    };
+    merged.package_name = if indexes.len() == 1 {
+        merged.package_name
+    } else {
+        "workspace".to_owned()
+    };
+    for index in indexes.drain(1..) {
+        merged.endpoints.extend(index.endpoints);
+        merged.usages.extend(index.usages);
+        merged.error_usages.extend(index.error_usages);
+        merged.field_usages.extend(index.field_usages);
+        merged.diagnostics.extend(index.diagnostics);
+    }
+    merged.endpoints.sort_by(|left, right| {
+        left.endpoint_id
+            .cmp(&right.endpoint_id)
+            .then_with(|| left.accessor_path.cmp(&right.accessor_path))
+    });
+    merged.usages.sort_by(|left, right| {
+        left.endpoint_id
+            .cmp(&right.endpoint_id)
+            .then_with(|| left.file.cmp(&right.file))
+            .then_with(|| left.source.start_line.cmp(&right.source.start_line))
+            .then_with(|| left.source.start_column.cmp(&right.source.start_column))
+    });
+    merged
+}
+
+fn typecheck_generated_packages(
+    packages: &[GeneratedPackage],
+    target_dir: &Path,
+) -> Result<(), String> {
+    let tsc = repo_root().join("npm/node_modules/typescript/bin/tsc");
+    if !tsc.is_file() {
+        return Err(format!(
+            "missing local TypeScript compiler at {}; run `npm install` in npm/",
+            tsc.display()
+        ));
+    }
+    let check_dir = target_dir.join("api-contract").join("check");
+    fs::create_dir_all(&check_dir).map_err(|error| {
+        format!(
+            "failed to create generated typecheck directory `{}`: {error}",
+            check_dir.display()
+        )
+    })?;
+    let tsconfig = check_dir.join("generated-tsconfig.json");
+    fs::write(&tsconfig, generated_typecheck_tsconfig(packages)).map_err(|error| {
+        format!(
+            "failed to write generated typecheck config `{}`: {error}",
+            tsconfig.display()
+        )
+    })?;
+    let output = Command::new("node")
+        .arg(&tsc)
+        .arg("--noEmit")
+        .arg("-p")
+        .arg(&tsconfig)
+        .current_dir(repo_root())
+        .output()
+        .map_err(|error| format!("failed to run generated package typecheck: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "generated package typecheck failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn generated_typecheck_tsconfig(packages: &[GeneratedPackage]) -> String {
+    let mut paths = Vec::new();
+    let mut include = Vec::new();
+    for package in packages {
+        let package_dir = normalize_path(&package.package_dir);
+        let package_name = &package.tsconfig_paths.package_name;
+        paths.push(format!(
+            "      {}: [{}]",
+            json_string(package_name),
+            json_string(&format!("{package_dir}/index.ts"))
+        ));
+        paths.push(format!(
+            "      {}: [{}]",
+            json_string(&format!("{package_name}/*")),
+            json_string(&format!("{package_dir}/*"))
+        ));
+        include.push(format!(
+            "  {}",
+            json_string(&format!("{package_dir}/**/*.ts"))
+        ));
+    }
+    let runtime_dir = normalize_path(&repo_root().join("npm/effect-runtime/src"));
+    paths.push(format!(
+        "      \"@rust-ts-integration/effect-runtime\": [{}]",
+        json_string(&format!("{runtime_dir}/index.ts"))
+    ));
+    paths.push(format!(
+        "      \"@rust-ts-integration/effect-runtime/compat\": [{}]",
+        json_string(&format!("{runtime_dir}/compat.ts"))
+    ));
+    paths.push(format!(
+        "      \"@rust-ts-integration/effect-runtime/*\": [{}]",
+        json_string(&format!("{runtime_dir}/*"))
+    ));
+    format!(
+        "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\n{}\n  ]\n}}\n",
+        paths.join(",\n"),
+        include.join(",\n"),
+    )
+}
+
+fn write_packages_tsconfig_paths(
+    packages: &[GeneratedPackage],
+    target_dir: &Path,
+) -> Result<(), String> {
+    let graph = WorkspaceContractGraph {
+        packages: packages
+            .iter()
+            .map(|package| WorkspaceContractPackage {
+                cargo_package: package.tsconfig_paths.package_name.clone(),
+                ts_package: package.tsconfig_paths.package_name.clone(),
+                contract_path: String::new(),
+                dependencies: Vec::new(),
+            })
+            .collect(),
+    };
+    write_workspace_tsconfig_paths(&graph, target_dir)
+}
+
+#[derive(Clone, Debug)]
+struct CheckedContract {
+    contract: ApiContract,
+}
+
+#[derive(Debug)]
+struct CheckOptions {
+    contract: Option<PathBuf>,
+    target_dir: PathBuf,
+    manifest_path: PathBuf,
+    cargo_package: Option<String>,
+    package_name: Option<String>,
+    api_root: Option<String>,
+    features: Vec<String>,
+    all_features: bool,
+    no_default_features: bool,
+    workspace: bool,
+    ts_files: Vec<PathBuf>,
+    ts_dirs: Vec<PathBuf>,
+    unused_endpoint_lints: UsageLintLevel,
+    cargo_check: bool,
+}
+
+impl CheckOptions {
+    fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut args = args;
+        let mut options = Self {
+            contract: None,
+            target_dir: PathBuf::from("target"),
+            manifest_path: PathBuf::from("Cargo.toml"),
+            cargo_package: None,
+            package_name: None,
+            api_root: None,
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            workspace: false,
+            ts_files: Vec::new(),
+            ts_dirs: Vec::new(),
+            unused_endpoint_lints: UsageLintLevel::Warn,
+            cargo_check: false,
+        };
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--contract" => options.contract = args.next().map(PathBuf::from),
+                "--target-dir" | "--out-dir" => {
+                    options.target_dir = required_path(&mut args, "--target-dir")?;
+                }
+                "--manifest-path" => {
+                    options.manifest_path = required_path(&mut args, "--manifest-path")?;
+                }
+                "--package" | "-p" => options.cargo_package = args.next(),
+                "--package-name" => options.package_name = args.next(),
+                "--api-root" => options.api_root = args.next(),
+                "--features" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--features requires <features>".to_owned())?;
+                    options.features.extend(parse_features(&value));
+                }
+                "--all-features" => options.all_features = true,
+                "--no-default-features" => options.no_default_features = true,
+                "--workspace" => options.workspace = true,
+                "--ts" => options.ts_files.push(required_path(&mut args, "--ts")?),
+                "--ts-dir" => options.ts_dirs.push(required_path(&mut args, "--ts-dir")?),
+                "--deny-unused-endpoints" => {
+                    options.unused_endpoint_lints = UsageLintLevel::Deny;
+                }
+                "--warn-unused-endpoints" => {
+                    options.unused_endpoint_lints = UsageLintLevel::Warn;
+                }
+                "--allow-unused-endpoints" | "--no-unused-endpoint-lints" => {
+                    options.unused_endpoint_lints = UsageLintLevel::Off;
+                }
+                "--cargo-check" => options.cargo_check = true,
+                other => return Err(format!("unknown api check argument `{other}`")),
+            }
+        }
+        options.features.sort();
+        options.features.dedup();
+        Ok(options)
+    }
+
+    fn legacy_stale_check(&self) -> bool {
+        self.contract.is_some()
+            && !self.workspace
+            && self.cargo_package.is_none()
+            && self.package_name.is_none()
+            && self.api_root.is_none()
+            && self.features.is_empty()
+            && !self.all_features
+            && !self.no_default_features
+            && self.ts_files.is_empty()
+            && self.ts_dirs.is_empty()
+            && matches!(self.unused_endpoint_lints, UsageLintLevel::Warn)
+            && !self.cargo_check
+    }
+
+    fn collect_options(&self) -> CollectOptions {
+        CollectOptions {
+            package_name: self.package_name.clone(),
+            cargo_package: self.cargo_package.clone(),
+            api_root: self.api_root.clone(),
+            out: None,
+            manifest_path: self.manifest_path.clone(),
+            target_dir: Some(self.target_dir.clone()),
+            features: self.features.clone(),
+            all_features: self.all_features,
+            no_default_features: self.no_default_features,
+            empty: false,
+            workspace: self.workspace,
+        }
+    }
+
+    fn usage_index_path(&self) -> PathBuf {
+        self.target_dir
+            .join("api-contract")
+            .join("graph")
+            .join("effect-usage-index.json")
+    }
+
+    fn symbol_graph_path(&self) -> PathBuf {
+        self.target_dir
+            .join("api-contract")
+            .join("rust-ts-symbols.json")
     }
 }
 
@@ -1230,6 +1697,10 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 #[derive(Debug)]
 struct ContractTargetOptions {
     contract: PathBuf,
@@ -1719,7 +2190,7 @@ fn usage() -> String {
         "  api gen --contract <path> [--target-dir <dir>]",
         "  api gen --workspace-contract <path> [--target-dir <dir>]",
         "  api watch --contract <path> [--target-dir <dir>] [--once]",
-        "  api check --contract <path> [--target-dir <dir>]",
+        "  api check [--contract <path> | --package <cargo-package> | --workspace] [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--ts <file>] [--ts-dir <dir>] [--deny-unused-endpoints] [--cargo-check]",
         "  api check-usages --contract <path> --out <path> [--symbol-graph <path>] [--ts <file>] [--ts-dir <dir>]",
         "  api doctor [--manifest-path <Cargo.toml>]",
     ]
@@ -1887,6 +2358,89 @@ export const program = Effect.gen(function* () {
             &graph,
             "fixture:error:GetUserError:UserNotFound"
         ));
+    }
+
+    #[test]
+    fn check_runs_full_workflow_and_updates_usage_index() {
+        let root = test_root("check-full");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let contract_path = root.join("contract.json");
+        let target_dir = root.join("target");
+        let ts_path = root.join("src/client.ts");
+        fs::write(
+            &contract_path,
+            serde_json::to_string_pretty(&api_test_fixtures::basic_contract())
+                .expect("serialize contract"),
+        )
+        .expect("write contract");
+        fs::write(
+            &ts_path,
+            r#"import { Effect } from "effect"
+import { users } from "@workspace/server-api"
+
+export const program = Effect.gen(function* () {
+  const user = yield* users.getUser({ id: 1n })
+  return user.displayName
+}).pipe(
+  Effect.catchTag("UserNotFound", (error) => Effect.succeed(error.id)),
+)
+"#,
+        )
+        .expect("write ts");
+
+        run_with_args(vec![
+            "check".to_owned(),
+            "--contract".to_owned(),
+            contract_path.display().to_string(),
+            "--target-dir".to_owned(),
+            target_dir.display().to_string(),
+            "--ts".to_owned(),
+            ts_path.display().to_string(),
+        ])
+        .expect("full api check");
+
+        let usage_path = target_dir.join("api-contract/graph/effect-usage-index.json");
+        let symbol_graph_path = target_dir.join("api-contract/rust-ts-symbols.json");
+        let generated_tsconfig = target_dir.join("api-contract/check/generated-tsconfig.json");
+        let generated_paths = target_dir.join("api-contract/effect-v4/tsconfig.paths.json");
+        assert!(usage_path.is_file());
+        assert!(generated_tsconfig.is_file());
+        assert!(generated_paths.is_file());
+        let usage_index = fs::read_to_string(&usage_path).expect("read usage index");
+        assert!(usage_index.contains("\"strong\": 1"));
+        let symbol_graph = fs::read_to_string(symbol_graph_path).expect("read symbol graph");
+        assert!(symbol_graph.contains("\"usageCount\": 1"));
+        assert!(symbol_graph.contains("src/client.ts"));
+    }
+
+    #[test]
+    fn check_deny_unused_endpoints_fails_without_strong_usage() {
+        let root = test_root("check-deny-unused");
+        fs::create_dir_all(&root).expect("create root");
+        let contract_path = root.join("contract.json");
+        let target_dir = root.join("target");
+        fs::write(
+            &contract_path,
+            serde_json::to_string_pretty(&api_test_fixtures::basic_contract())
+                .expect("serialize contract"),
+        )
+        .expect("write contract");
+
+        let error = run_with_args(vec![
+            "check".to_owned(),
+            "--contract".to_owned(),
+            contract_path.display().to_string(),
+            "--target-dir".to_owned(),
+            target_dir.display().to_string(),
+            "--deny-unused-endpoints".to_owned(),
+        ])
+        .expect_err("deny unused endpoints should fail");
+
+        assert!(error.contains("unused endpoint diagnostic"));
+        assert!(error.contains("denied"));
+        assert!(target_dir
+            .join("api-contract/graph/effect-usage-index.json")
+            .is_file());
     }
 
     #[test]
