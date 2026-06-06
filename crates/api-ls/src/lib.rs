@@ -25,6 +25,7 @@ const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
 const OPEN_GENERATED_FILE_COMMAND: &str = "api-ls.openGeneratedPackageFile";
 const PRIVATE_TYPESCRIPT_COMMAND_PREFIX: &str = "_typescript.";
 const RESERVED_TYPESCRIPT_COMMANDS: [&str; 1] = ["typescript.tsserverRequest"];
+const BACKEND_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `api-ls` configuration loaded from the workspace root.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -298,6 +299,7 @@ impl AsyncLspServer {
                             "rust-analyzer",
                             &workspace.config.rust_analyzer,
                             message.params.clone(),
+                            &workspace,
                             self.event_tx.clone(),
                             log_file.clone(),
                         )
@@ -333,6 +335,7 @@ impl AsyncLspServer {
                             "TypeScript/Effect",
                             &workspace.config.typescript,
                             typescript_params,
+                            &workspace,
                             self.event_tx.clone(),
                             log_file.clone(),
                         )
@@ -1401,6 +1404,20 @@ impl BackendKind {
         match self {
             Self::Rust => "rust-analyzer",
             Self::TypeScript => "typescript-effect",
+        }
+    }
+
+    const fn config_key(self) -> &'static str {
+        match self {
+            Self::Rust => "rustAnalyzer",
+            Self::TypeScript => "typescript",
+        }
+    }
+
+    const fn default_command(self) -> &'static str {
+        match self {
+            Self::Rust => "rust-analyzer",
+            Self::TypeScript => "typescript-language-server",
         }
     }
 }
@@ -2939,7 +2956,7 @@ async fn prepare_generated_package_cache(
                 .await;
                 None
             } else {
-                return Err(error);
+                return Err(api_watch_start_diagnostic(workspace, &error));
             }
         }
     };
@@ -2948,7 +2965,9 @@ async fn prepare_generated_package_cache(
         let tsconfig = wait_for_generated_package_cache(workspace, &mut api_watch).await?;
         Ok((tsconfig, Some(api_watch)))
     } else {
-        ensure_generated_package_cache(workspace).map(|path| (path, None))
+        ensure_generated_package_cache(workspace)
+            .map(|path| (path, None))
+            .map_err(|error| generated_cache_diagnostic(workspace, &error))
     }
 }
 
@@ -3025,6 +3044,54 @@ fn api_watch_command_label(command: &ResolvedApiWatchCommand, args: &[String]) -
         .join(" ")
 }
 
+fn api_watch_start_diagnostic(workspace: &WorkspaceConfig, error: &str) -> String {
+    let command = workspace_api_watch_command_label(workspace);
+    [
+        "api-ls could not start apiWatch to refresh generated TypeScript packages.".to_owned(),
+        format!("Configured command: `{command}`."),
+        format!("Workspace root: `{}`.", workspace.root.display()),
+        format!("Generated package cache: `{}`.", workspace.generated_cache_dir.display()),
+        format!("Start error: {error}."),
+        "Install or build the project CLI, set `apiWatch.command` in `.api-ls.json` to the executable path, or run `api gen` before starting the editor.".to_owned(),
+    ]
+    .join("\n")
+}
+
+fn generated_cache_diagnostic(workspace: &WorkspaceConfig, error: &str) -> String {
+    let mut lines = vec![error.to_owned()];
+    if workspace.config.api_watch.enabled {
+        lines.push(
+            "apiWatch is enabled, but api-ls did not find a sibling `api` binary and no `apiWatch.command` is configured.".to_owned(),
+        );
+        lines.push(
+            "Set `apiWatch.command` in `.api-ls.json` to your project CLI, or run `api gen` once before starting the editor.".to_owned(),
+        );
+    } else {
+        lines.push(
+            "apiWatch is disabled, so api-ls cannot generate the cache automatically.".to_owned(),
+        );
+        lines.push("Enable `apiWatch`, or run `api gen` before starting the editor.".to_owned());
+    }
+    lines.join("\n")
+}
+
+fn workspace_api_watch_command_label(workspace: &WorkspaceConfig) -> String {
+    if !workspace.config.api_watch.command.trim().is_empty() {
+        return api_watch_command_label(
+            &ResolvedApiWatchCommand {
+                command: workspace.config.api_watch.command.clone(),
+                args: workspace.config.api_watch.args.clone(),
+            },
+            &workspace.config.api_watch.args,
+        );
+    }
+
+    std::iter::once(platform_api_binary_name())
+        .chain(workspace.config.api_watch.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn spawn_api_watch_log_task<R>(
     stream_name: &'static str,
     stream: R,
@@ -3080,17 +3147,30 @@ async fn start_required_backend(
     label: &str,
     command: &BackendCommand,
     initialize_params: Value,
+    workspace: &WorkspaceConfig,
     event_tx: mpsc::UnboundedSender<GatewayEvent>,
     log_file: Option<PathBuf>,
 ) -> Result<AsyncBackend, String> {
-    AsyncBackend::start(kind, label, command, initialize_params, event_tx, log_file)
-        .await
-        .map_err(|error| {
-            format!(
-                "api-ls requires the {label} backend to start and initialize; configured command: {}; error: {error}; help: install the backend or update `.api-ls.json` for this workspace",
-                backend_command_label(command)
-            )
-        })
+    AsyncBackend::start(
+        kind,
+        label,
+        command,
+        initialize_params,
+        &workspace.root,
+        event_tx,
+        log_file,
+    )
+    .await
+    .map_err(|error| backend_start_diagnostic(kind, label, command, workspace, &error))
+}
+
+#[derive(Debug)]
+enum BackendStartFailure {
+    EmptyCommand,
+    Spawn(std::io::Error),
+    MissingStdio(&'static str),
+    InitializeWrite(String),
+    InitializeResponse(String),
 }
 
 impl AsyncBackend {
@@ -3099,32 +3179,34 @@ impl AsyncBackend {
         name: &str,
         command: &BackendCommand,
         initialize_params: Value,
+        current_dir: &Path,
         event_tx: mpsc::UnboundedSender<GatewayEvent>,
         log_file: Option<PathBuf>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, BackendStartFailure> {
         if command.command.is_empty() {
-            return Err("backend command is empty".to_owned());
+            return Err(BackendStartFailure::EmptyCommand);
         }
 
         let mut child = Command::new(&command.command)
             .args(&command.args)
+            .current_dir(current_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("failed to start `{}`: {error}", command.command))?;
+            .map_err(BackendStartFailure::Spawn)?;
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| format!("{name} stdin was not piped"))?;
+            .ok_or(BackendStartFailure::MissingStdio("stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| format!("{name} stdout was not piped"))?;
+            .ok_or(BackendStartFailure::MissingStdio("stdout"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| format!("{name} stderr was not piped"))?;
+            .ok_or(BackendStartFailure::MissingStdio("stderr"))?;
         spawn_backend_stderr_task(kind, name.to_owned(), stderr, event_tx.clone(), log_file);
 
         let mut stdin = stdin;
@@ -3134,7 +3216,7 @@ impl AsyncBackend {
             write_request_async(&mut stdin, initialize_id, "initialize", initialize_params).await
         {
             terminate_child(&mut child).await;
-            return Err(error);
+            return Err(BackendStartFailure::InitializeWrite(error));
         }
         let initialize_response =
             match read_initialize_response(name, &mut stdout, initialize_id, kind, &event_tx).await
@@ -3142,7 +3224,7 @@ impl AsyncBackend {
                 Ok(response) => response,
                 Err(error) => {
                     terminate_child(&mut child).await;
-                    return Err(error);
+                    return Err(BackendStartFailure::InitializeResponse(error));
                 }
             };
         let capabilities = initialize_response
@@ -3226,8 +3308,14 @@ async fn read_initialize_response(
     event_tx: &mpsc::UnboundedSender<GatewayEvent>,
 ) -> Result<Value, String> {
     loop {
-        let message = read_message_async(stdout)
-            .await?
+        let message = tokio::time::timeout(BACKEND_INITIALIZE_TIMEOUT, read_message_async(stdout))
+            .await
+            .map_err(|_| {
+                format!(
+                    "{name} did not respond to initialize within {} seconds",
+                    BACKEND_INITIALIZE_TIMEOUT.as_secs()
+                )
+            })??
             .ok_or_else(|| format!("{name} exited before responding to initialize"))?;
         if message.id.as_ref() == Some(&json!(initialize_id)) {
             if let Some(error) = message.raw.get("error") {
@@ -3359,6 +3447,92 @@ fn backend_command_label(command: &BackendCommand) -> String {
         .chain(command.args.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn backend_start_diagnostic(
+    kind: BackendKind,
+    label: &str,
+    command: &BackendCommand,
+    workspace: &WorkspaceConfig,
+    error: &BackendStartFailure,
+) -> String {
+    let mut lines = vec![
+        format!("api-ls could not start the {label} backend."),
+        format!("Configured command: `{}`.", backend_command_label(command)),
+        format!("Workspace root: `{}`.", workspace.root.display()),
+    ];
+
+    if let Some(path) = &workspace.config_path {
+        lines.push(format!("Config file: `{}`.", path.display()));
+    } else {
+        lines.push("Config file: none; api-ls is using its defaults.".to_owned());
+    }
+
+    match error {
+        BackendStartFailure::EmptyCommand => {
+            lines.push(format!(
+                "`{}`.command is empty. Remove that override to use `{}`, or set it to an executable path.",
+                kind.config_key(),
+                kind.default_command()
+            ));
+        }
+        BackendStartFailure::Spawn(spawn_error) => {
+            lines.push(format!(
+                "Process start error: {}.",
+                backend_spawn_error_message(kind, command, spawn_error)
+            ));
+        }
+        BackendStartFailure::MissingStdio(stream) => {
+            lines.push(format!(
+                "The process started, but api-ls could not attach to {stream}."
+            ));
+        }
+        BackendStartFailure::InitializeWrite(write_error) => {
+            lines.push(format!(
+                "The process started, but api-ls could not send the LSP initialize request: {write_error}."
+            ));
+        }
+        BackendStartFailure::InitializeResponse(response_error) => {
+            lines.push(format!(
+                "The process started, but it did not complete the LSP initialize handshake: {response_error}."
+            ));
+        }
+    }
+
+    lines.extend(backend_install_help(kind));
+    lines.join("\n")
+}
+
+fn backend_spawn_error_message(
+    kind: BackendKind,
+    command: &BackendCommand,
+    error: &std::io::Error,
+) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => format!("`{}` was not found on PATH", command.command),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "`{}` exists but is not executable or cannot be launched: {error}",
+            command.command
+        ),
+        _ => format!(
+            "failed to launch `{}` for {}: {error}",
+            command.command,
+            kind.display_name()
+        ),
+    }
+}
+
+fn backend_install_help(kind: BackendKind) -> Vec<String> {
+    match kind {
+        BackendKind::Rust => vec![
+            "Install rust-analyzer with `rustup component add rust-analyzer`, then make sure `rust-analyzer` is on PATH.".to_owned(),
+            "If rust-analyzer lives somewhere else, set `rustAnalyzer.command` in `.api-ls.json` to its absolute path.".to_owned(),
+        ],
+        BackendKind::TypeScript => vec![
+            "Install the TypeScript backend with `npm install -D typescript typescript-language-server` or install `typescript-language-server` globally.".to_owned(),
+            "For a project-local install, set `typescript.command` in `.api-ls.json` to `./node_modules/.bin/typescript-language-server` and keep `typescript.args` as `[\"--stdio\"]`.".to_owned(),
+        ],
+    }
 }
 
 fn initialize_workspace(params: &Value) -> Result<WorkspaceConfig, String> {
@@ -5290,12 +5464,36 @@ mod tests {
         let output = initialize_output(&root);
 
         assert!(output.contains("\"id\":\"init\""));
-        assert!(output.contains("requires the rust-analyzer backend"));
+        assert!(output.contains("could not start the rust-analyzer backend"));
+        assert!(output.contains("`rustAnalyzer`.command is empty"));
         assert!(
-            output.contains("configured command: &lt;empty command&gt;")
-                || output.contains("configured command: <empty command>")
+            output.contains("Configured command: `&lt;empty command&gt;`")
+                || output.contains("Configured command: `<empty command>`")
         );
-        assert!(output.contains("update `.api-ls.json`"));
+        assert!(output.contains("rustup component add rust-analyzer"));
+    }
+
+    #[test]
+    fn missing_rust_backend_executable_suggests_install() {
+        let root = test_root("missing-rust-backend-executable");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        fs::write(
+            root.join(".api-ls.json"),
+            json!({
+                "rustAnalyzer": { "command": "definitely-missing-rust-analyzer-for-api-ls" },
+                "typescript": { "command": "python3", "args": ["-c", MOCK_BACKEND] }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let output = initialize_output(&root);
+
+        assert!(output.contains("definitely-missing-rust-analyzer-for-api-ls"));
+        assert!(output.contains("was not found on PATH"));
+        assert!(output.contains("rustup component add rust-analyzer"));
+        assert!(output.contains("rustAnalyzer.command"));
     }
 
     #[test]
@@ -5322,12 +5520,42 @@ mod tests {
         let output = initialize_output(&root);
 
         assert!(output.contains("\"id\":\"init\""));
-        assert!(output.contains("requires the TypeScript/Effect backend"));
+        assert!(output.contains("could not start the TypeScript/Effect backend"));
+        assert!(output.contains("`typescript`.command is empty"));
         assert!(
-            output.contains("configured command: &lt;empty command&gt;")
-                || output.contains("configured command: <empty command>")
+            output.contains("Configured command: `&lt;empty command&gt;`")
+                || output.contains("Configured command: `<empty command>`")
         );
-        assert!(output.contains("update `.api-ls.json`"));
+        assert!(output.contains("npm install -D typescript typescript-language-server"));
+    }
+
+    #[test]
+    fn missing_typescript_backend_executable_suggests_install() {
+        let root = test_root("missing-typescript-backend-executable");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_minimal_generated_package(&root);
+        let backend = root.join("mock_backend.py");
+        fs::write(&backend, MOCK_BACKEND).expect("write backend");
+        fs::write(
+            root.join(".api-ls.json"),
+            json!({
+                "rustAnalyzer": {
+                    "command": "python3",
+                    "args": [backend.to_string_lossy()]
+                },
+                "typescript": { "command": "definitely-missing-typescript-language-server-for-api-ls" }
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        let output = initialize_output(&root);
+
+        assert!(output.contains("definitely-missing-typescript-language-server-for-api-ls"));
+        assert!(output.contains("was not found on PATH"));
+        assert!(output.contains("npm install -D typescript typescript-language-server"));
+        assert!(output.contains("typescript.command"));
     }
 
     #[test]
