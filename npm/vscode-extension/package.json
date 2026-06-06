@@ -57,10 +57,10 @@
     "vscode-languageclient": "^10.0.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.91.0",
+    "@types/vscode": "^1.120.0",
     "@vscode/vsce": "^3.9.2",
-    "esbuild": "^0.25.0",
-    "vite": "7.2.7"
+    "esbuild": "^0.28.0",
+    "vite": "8.0.16"
   },
   "contributes": {
     "commands": [

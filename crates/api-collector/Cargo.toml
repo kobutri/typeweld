@@ -21,11 +21,11 @@ api-build = { path = "../api-build" }
 api-core = { path = "../api-core" }
 api-gen-effect-v4 = { path = "../api-gen-effect-v4" }
 api-ir = { path = "../api-ir" }
-cargo_metadata = "0.19"
+cargo_metadata = "0.23"
 clap = { version = "4.5", features = ["derive"] }
 deno_core = { version = "0.403.0", optional = true }
 dialoguer = "0.11"
-notify-debouncer-full = "0.7"
+notify-debouncer-full = "0.8.0-rc.2"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
