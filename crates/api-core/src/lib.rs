@@ -672,6 +672,11 @@ pub fn join_route_paths(prefix: &str, path: &str) -> String {
 }
 
 /// Compose the explicit root API module exported by a crate.
+///
+/// This macro remains for legacy compatibility. New Axum projects should prefer
+/// `api_axum::ApiRouter` with `#[api_macros::api_router]` and
+/// `.endpoint(handler)` so runtime routes and exported contract metadata share
+/// one tree.
 #[macro_export]
 macro_rules! api_module {
     (name = $name:literal, endpoints = [$($endpoint:ident),* $(,)?]) => {{

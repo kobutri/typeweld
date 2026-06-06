@@ -28,8 +28,8 @@ or `npm --prefix npm run test:lsp-wrapper`.
 ## 1. Define Rust API types
 
 ```rust
-use api_core::{Json, Path};
-use api_macros::{api, ApiError, ApiType};
+use api_axum::{ApiRouter, Json, Path};
+use api_macros::{api, api_router, ApiError, ApiType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, ApiType)]
@@ -50,21 +50,18 @@ pub enum GetUserError {
 pub async fn get_user(Path(id): Path<i64>) -> Result<Json<User>, GetUserError> {
     todo!("load user {id}")
 }
-```
 
-These `api_core` wrappers are framework-neutral contract markers. In runnable
-Axum handlers, import the matching runtime wrappers from `api_axum` instead.
-
-Export endpoints through an explicit module so collection only includes routes
-you chose to publish:
-
-```rust
-use api_core::api_module;
-
-pub fn api() -> api_core::ApiModule {
-    api_module!(name = "users", endpoints = [get_user])
+#[api_router]
+pub fn routes() -> ApiRouter {
+    ApiRouter::new("users").endpoint(get_user)
 }
 ```
+
+The `ApiRouter` is the export boundary. Only endpoints mounted with
+`.endpoint(handler)` are collected and generated for TypeScript. In runnable
+Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`, `NoContent`,
+and `Sse` from `api_axum`; the `api_core` wrappers remain available for
+framework-neutral contract-only code.
 
 ## 2. Collect the contract
 
@@ -74,7 +71,7 @@ metadata:
 ```toml
 [package.metadata.rust_ts]
 ts_package = "@workspace/server-api"
-api_root = "server::api"
+api_root = "server::routes"
 features = []
 ```
 
@@ -83,6 +80,11 @@ cargo run -p api-collector --bin api -- collect \
   --package server \
   --out target/api-contract/server-api.json
 ```
+
+Legacy roots built with `api_module!` still compile and can remain on
+`api_root = "server::api"` during migration. New Axum code should prefer
+`#[api_router]` plus `.endpoint(get_user)` so the runtime router and exported
+contract stay in one tree.
 
 ## 3. Generate the hidden TypeScript package
 

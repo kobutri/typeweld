@@ -1075,7 +1075,10 @@ workspace = true
 "#,
         rust_package = toml_string(&project.rust_package),
         ts_package = toml_string(&project.ts_package),
-        api_root = toml_string(&format!("{}::api", cargo_crate_name(&project.rust_package))),
+        api_root = toml_string(&format!(
+            "{}::routes",
+            cargo_crate_name(&project.rust_package)
+        )),
         api_axum_path = crate_dir("api-axum"),
         api_collector_path = crate_dir("api-collector"),
         api_core_path = crate_dir("api-core"),
@@ -1264,10 +1267,9 @@ fn render_new_server_lib(project: &NewProject) -> String {
     net::SocketAddr,
 }};
 
-use api_axum::{{router, Json, Path}};
+use api_axum::{{ApiRouter, Json, Path}};
 use api_collector::{{collect_contract, CollectorInput}};
-use api_core::{{api_module, ir::ApiContract, ApiModule, ApiType}};
-use axum::{{response::Response, Router}};
+use api_core::ir::ApiContract;
 use serde::{{Deserialize, Serialize}};
 
 const TS_PACKAGE_NAME: &str = {ts_package};
@@ -1310,27 +1312,17 @@ pub async fn serve(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }}
 
-pub fn api() -> ApiModule {{
-    api_module!(name = {api_module}, endpoints = [greet])
+#[api_macros::api_router]
+pub fn routes() -> ApiRouter {{
+    ApiRouter::new({api_module}).endpoint(greet)
 }}
 
 pub fn contract() -> ApiContract {{
-    collect_contract(CollectorInput {{
-        package_name: TS_PACKAGE_NAME.to_owned(),
-        root_module: api(),
-        types: Vec::new(),
-        errors: Vec::new(),
-    }})
+    collect_contract(CollectorInput::from_root(TS_PACKAGE_NAME, routes()))
 }}
 
-pub fn app() -> Router {{
-    router(api())
-        .route(__api_endpoint_greet(), greet_response)
-        .into_router()
-}}
-
-async fn greet_response(name: Path<String>) -> Response {{
-    api_axum::success_or_error(greet(name).await)
+pub fn app() -> axum::Router {{
+    routes().into_router()
 }}
 "#,
         ts_package = rust_string(&project.ts_package),
@@ -3262,12 +3254,16 @@ mod tests {
         assert!(!server_manifest.contains("[lib]"));
         assert!(server_manifest.contains("[package.metadata.rust_ts]"));
         assert!(server_manifest.contains("ts_package = \"@workspace/sample-api\""));
-        assert!(server_manifest.contains("api_root = \"sample_api_server::api\""));
+        assert!(server_manifest.contains("api_root = \"sample_api_server::routes\""));
         assert!(server_manifest.contains("clap ="));
 
         let server_lib =
             fs::read_to_string(root.join("server/src/lib.rs")).expect("read server lib");
-        assert!(server_lib.contains("pub fn api() -> ApiModule"));
+        assert!(server_lib.contains("#[api_macros::api_router]"));
+        assert!(server_lib.contains("pub fn routes() -> ApiRouter"));
+        assert!(server_lib.contains("ApiRouter::new(\"greetings\").endpoint(greet)"));
+        assert!(!server_lib.contains("greet_response"));
+        assert!(!server_lib.contains("__api_endpoint_greet"));
         assert!(server_lib.contains("pub fn contract() -> ApiContract"));
 
         let server_main =

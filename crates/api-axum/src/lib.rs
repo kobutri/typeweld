@@ -255,6 +255,11 @@ where
 }
 
 #[must_use]
+/// Build an Axum API router from a legacy `ApiModule`.
+///
+/// Prefer `ApiRouter::new(name)` with `#[api_macros::api_router]` and
+/// `.endpoint(handler)` for new Axum code. This helper remains for existing
+/// `api_module!` roots and manual route migration.
 pub fn router(module: ApiModule) -> ApiRouter {
     ApiRouter::from_module(module)
 }

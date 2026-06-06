@@ -1084,6 +1084,8 @@ Acceptance:
 
 ### Phase 8: Migration And Cleanup
 
+Status: Done.
+
 Files:
 
 - `examples/e2e-axum-effect/server/src/lib.rs`
@@ -1093,11 +1095,11 @@ Files:
 
 Steps:
 
-1. Migrate examples to `#[api_router]` and `.endpoint(handler)`.
-2. Update `docs/getting-started.md`.
-3. Update `docs/axum-example.md`.
-4. Mark `api_module!` and manual `.route(__api_endpoint_..., ...)` as legacy.
-5. Keep compatibility tests for one release cycle.
+1. [x] Migrate examples to `#[api_router]` and `.endpoint(handler)`.
+2. [x] Update `docs/getting-started.md`.
+3. [x] Update `docs/axum-example.md`.
+4. [x] Mark `api_module!` and manual `.route(__api_endpoint_..., ...)` as legacy.
+5. [x] Keep compatibility tests for one release cycle.
 
 Acceptance:
 

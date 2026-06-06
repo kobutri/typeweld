@@ -107,6 +107,10 @@ async fn create_user(request: Body<CreateUserRequest>) -> Result<Json<User>, Use
 
 /// The root API module is intentionally explicit.
 ///
+/// This contract-only example keeps the legacy `api_module!` root as
+/// compatibility coverage. New Axum applications should prefer
+/// `#[api_router]` with `ApiRouter::new(...).endpoint(handler)`.
+///
 /// Only endpoints listed here are exported to TypeScript and tracked by unused
 /// endpoint analysis. This avoids surprising "everything public is an API"
 /// behavior in larger workspaces.
