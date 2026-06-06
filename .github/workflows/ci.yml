@@ -6,31 +6,151 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  validate:
+  rust-fmt:
+    name: Rust fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-        working-directory: npm
+          components: rustfmt
       - run: |
           cargo fmt --all
           git diff --exit-code -- . ':(exclude)crates/api-test-fixtures/src/lib.rs'
+
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo test --workspace
-      - run: ./examples/monorepo-basic/verify.sh
-      - run: ./examples/e2e-axum-effect/verify.sh
-      - run: npm test
+
+  examples:
+    name: Example (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: monorepo-basic
+            script: ./examples/monorepo-basic/verify.sh
+          - name: e2e-axum-effect
+            script: ./examples/e2e-axum-effect/verify.sh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
         working-directory: npm
-      - run: cargo build -p api-ls --bin api-ls --release
-      - run: cargo build -p api-collector --bin api --release
+      - run: ${{ matrix.script }}
+
+  npm-test:
+    name: npm tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
+      - name: Run npm checks
+        run: |
+          npm run typecheck:workspaces
+          npm run test:runtime
+          npm run test:lsp-wrapper
+          npm run test:vscode
+        working-directory: npm
+
+  package-vsix:
+    name: Package VSIX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
+      - run: cargo build --release -p api-ls -p api-collector --bins
       - run: npm run prepare:server --workspace rust-ts-integration -- --binary "$GITHUB_WORKSPACE/target/release/api-ls" --api-binary "$GITHUB_WORKSPACE/target/release/api" --platform-dir linux-x64
         working-directory: npm
       - run: npm run package:vsix --workspace rust-ts-integration -- --target linux-x64 --out out/rust-ts-integration-ci-linux-x64.vsix
         working-directory: npm
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    needs:
+      - rust-fmt
+      - rust-clippy
+      - rust-test
+      - examples
+      - npm-test
+      - package-vsix
+    if: always()
+    steps:
+      - name: Check job results
+        run: |
+          failures=0
+
+          check_result() {
+            job="$1"
+            result="$2"
+            echo "$job: $result"
+            if [ "$result" != "success" ]; then
+              failures=1
+            fi
+          }
+
+          check_result rust-fmt '${{ needs.rust-fmt.result }}'
+          check_result rust-clippy '${{ needs.rust-clippy.result }}'
+          check_result rust-test '${{ needs.rust-test.result }}'
+          check_result examples '${{ needs.examples.result }}'
+          check_result npm-test '${{ needs.npm-test.result }}'
+          check_result package-vsix '${{ needs.package-vsix.result }}'
+
+          exit "$failures"
