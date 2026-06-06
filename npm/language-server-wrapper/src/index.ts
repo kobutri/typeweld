@@ -176,10 +176,10 @@ if (isMainModule(wrapperFile, process.argv[1])) {
 }
 
 function candidateBinaries(options: CandidateOptions): readonly Candidate[] {
-  const packageRoot = findPackageRoot(dirname(options.wrapperFile))
+  const packageRoots = findPackageRoots(dirname(options.wrapperFile))
   const candidates: Candidate[] = []
 
-  if (packageRoot !== undefined) {
+  for (const packageRoot of packageRoots) {
     candidates.push(
       {
         source: "packaged binary",
@@ -227,8 +227,7 @@ function cargoTargetDirs(options: CandidateOptions): readonly string[] {
     roots.push(join(root, "target"))
   }
 
-  const packageRoot = findPackageRoot(dirname(options.wrapperFile))
-  if (packageRoot !== undefined) {
+  for (const packageRoot of findPackageRoots(dirname(options.wrapperFile))) {
     for (const root of workspaceRoots(packageRoot)) {
       roots.push(join(root, "target"))
     }
@@ -292,13 +291,18 @@ function readPathEnv(env: NodeJS.ProcessEnv): string | undefined {
 }
 
 function findPackageRoot(start: string): string | undefined {
+  return findPackageRoots(start)[0]
+}
+
+function findPackageRoots(start: string): readonly string[] {
+  const roots: string[] = []
   for (const directory of parentDirs(resolve(start))) {
     if (existsSync(join(directory, "package.json"))) {
-      return directory
+      roots.push(directory)
     }
   }
 
-  return undefined
+  return roots
 }
 
 function parentDirs(start: string): readonly string[] {

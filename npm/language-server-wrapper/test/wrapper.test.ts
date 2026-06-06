@@ -51,6 +51,45 @@ it("resolves a packaged gateway binary before workspace and PATH candidates", ()
   }
 })
 
+it("resolves the extension root binary when the wrapper lives under a nested module package", () => {
+  const temp = createTempDir()
+  try {
+    const fakeExtensionRoot = join(temp, "extension")
+    const fakeServerRoot = join(fakeExtensionRoot, "server")
+    const fakeWrapper = join(fakeServerRoot, "index.js")
+    const fakeGateway = join(
+      fakeExtensionRoot,
+      "bin",
+      `${process.platform}-${process.arch}`,
+      binaryName,
+    )
+    const fakePathGateway = join(temp, "path-bin", binaryName)
+
+    mkdirSync(dirname(fakeWrapper), { recursive: true })
+    mkdirSync(dirname(fakeGateway), { recursive: true })
+    mkdirSync(dirname(fakePathGateway), { recursive: true })
+    writeFileSync(join(fakeExtensionRoot, "package.json"), "{}")
+    writeFileSync(join(fakeServerRoot, "package.json"), JSON.stringify({ type: "module" }))
+    writeExecutable(fakeWrapper, "process.exit(0)\n")
+    writeExecutable(fakeGateway, "process.exit(0)\n")
+    writeExecutable(fakePathGateway, "process.exit(0)\n")
+
+    const resolved = wrapperModule.resolveApiLsBinary({
+      cwd: temp,
+      env: {
+        ...cleanEnv(),
+        PATH: [dirname(fakePathGateway), dirname(process.execPath)].join(delimiter),
+      },
+      invocationFile: fakeWrapper,
+      wrapperFile: fakeWrapper,
+    })
+
+    expect(resolved).toBe(fakeGateway)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 it("resolves a local cargo build gateway from the current workspace", () => {
   const temp = createTempDir()
   try {

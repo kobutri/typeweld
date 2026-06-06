@@ -14,6 +14,13 @@ import {
 
 const apiLsOpenGeneratedFileCommand = "api-ls.openGeneratedPackageFile"
 const languageClientId = "rustTsIntegration.apiLs"
+const privateTypeScriptCommandPrefix = "_typescript."
+const reservedTypeScriptCommands = new Set(["typescript.tsserverRequest"])
+const directNavigationMethods = new Set([
+  "textDocument/definition",
+  "textDocument/hover",
+  "textDocument/references",
+])
 const supportedLanguages = [
   "rust",
   "typescript",
@@ -28,6 +35,12 @@ type ClientEntry = {
   client: LanguageClient
   disposables: vscode.Disposable[]
 }
+
+type ApiDocumentSelector = Array<{
+  scheme: "file"
+  language: string
+  pattern: string
+}>
 
 const clients = new Map<string, ClientEntry>()
 let extensionContext: vscode.ExtensionContext | undefined
@@ -123,6 +136,7 @@ async function startClient(
     serverOptions(context, folder),
     clientOptions(folder, watcher),
   )
+  sanitizeInitializeFeatures(client)
   const stateListener = client.onDidChangeState((event) => {
     if (event.newState === State.Running) {
       log(`api-ls started for ${folder.name}`)
@@ -138,6 +152,7 @@ async function startClient(
   clients.set(folderKey(folder), entry)
   try {
     await client.start()
+    entry.disposables.push(...registerDirectNavigationProviders(client, folder))
   } catch (error) {
     clients.delete(folderKey(folder))
     disposeAll(entry.disposables)
@@ -148,15 +163,178 @@ async function startClient(
   }
 }
 
+function registerDirectNavigationProviders(
+  client: LanguageClient,
+  folder: vscode.WorkspaceFolder,
+): vscode.Disposable[] {
+  const selector = documentSelector(folder)
+
+  const disposables = [
+    vscode.languages.registerHoverProvider(selector, {
+      provideHover: async (document, position, token) => {
+        try {
+          const result = await client.sendRequest(
+            "textDocument/hover",
+            textDocumentPositionParams(document, position),
+          )
+          if (token.isCancellationRequested) {
+            return undefined
+          }
+          return lspHover(result)
+        } catch (error) {
+          log(`api-ls direct hover failed: ${formatError(error)}`)
+          return undefined
+        }
+      },
+    }),
+    vscode.languages.registerDefinitionProvider(selector, {
+      provideDefinition: async (document, position, token) => {
+        try {
+          const result = await client.sendRequest(
+            "textDocument/definition",
+            textDocumentPositionParams(document, position),
+          )
+          if (token.isCancellationRequested) {
+            return undefined
+          }
+          return lspLocations(result)
+        } catch (error) {
+          log(`api-ls direct definition failed: ${formatError(error)}`)
+          return undefined
+        }
+      },
+    }),
+    vscode.languages.registerReferenceProvider(selector, {
+      provideReferences: async (document, position, context, token) => {
+        try {
+          const result = await client.sendRequest(
+            "textDocument/references",
+            {
+              ...textDocumentPositionParams(document, position),
+              context: {
+                includeDeclaration: context.includeDeclaration,
+              },
+            },
+          )
+          if (token.isCancellationRequested) {
+            return undefined
+          }
+          return lspLocations(result)
+        } catch (error) {
+          log(`api-ls direct references failed: ${formatError(error)}`)
+          return undefined
+        }
+      },
+    }),
+  ]
+  log(`Registered direct api-ls navigation providers for ${folder.name}.`)
+  return disposables
+}
+
+function textDocumentPositionParams(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+): {
+  textDocument: { uri: string }
+  position: { line: number; character: number }
+} {
+  return {
+    textDocument: {
+      uri: document.uri.toString(),
+    },
+    position: {
+      line: position.line,
+      character: position.character,
+    },
+  }
+}
+
+function lspLocations(result: unknown): vscode.Location[] | undefined {
+  if (Array.isArray(result)) {
+    return result.flatMap((location) => {
+      const converted = lspLocation(location)
+      return converted === undefined ? [] : [converted]
+    })
+  }
+
+  const converted = lspLocation(result)
+  return converted === undefined ? undefined : [converted]
+}
+
+function lspLocation(value: unknown): vscode.Location | undefined {
+  if (!isRecord(value) || typeof value.uri !== "string" || !isRecord(value.range)) {
+    return undefined
+  }
+  const range = lspRange(value.range)
+  if (range === undefined) {
+    return undefined
+  }
+
+  return new vscode.Location(vscode.Uri.parse(value.uri), range)
+}
+
+function lspHover(result: unknown): vscode.Hover | undefined {
+  if (!isRecord(result)) {
+    return undefined
+  }
+  const contents = lspHoverContents(result.contents)
+  if (contents.length === 0) {
+    return undefined
+  }
+
+  const range = isRecord(result.range) ? lspRange(result.range) : undefined
+  return new vscode.Hover(contents, range)
+}
+
+function lspHoverContents(contents: unknown): vscode.MarkdownString[] {
+  if (typeof contents === "string") {
+    return [new vscode.MarkdownString(contents)]
+  }
+  if (Array.isArray(contents)) {
+    return contents.flatMap(lspHoverContents)
+  }
+  if (isRecord(contents)) {
+    if (typeof contents.value === "string") {
+      if (typeof contents.language === "string") {
+        return [
+          new vscode.MarkdownString(
+            ["```" + contents.language, contents.value, "```"].join("\n"),
+          ),
+        ]
+      }
+      return [new vscode.MarkdownString(contents.value)]
+    }
+  }
+
+  return []
+}
+
+function lspRange(value: Record<string, unknown>): vscode.Range | undefined {
+  if (!isRecord(value.start) || !isRecord(value.end)) {
+    return undefined
+  }
+  const start = lspPosition(value.start)
+  const end = lspPosition(value.end)
+  if (start === undefined || end === undefined) {
+    return undefined
+  }
+
+  return new vscode.Range(start, end)
+}
+
+function lspPosition(value: Record<string, unknown>): vscode.Position | undefined {
+  if (typeof value.line !== "number" || typeof value.character !== "number") {
+    return undefined
+  }
+  return new vscode.Position(value.line, value.character)
+}
+
 function clientOptions(
   folder: vscode.WorkspaceFolder,
   watcher: vscode.FileSystemWatcher,
 ): LanguageClientOptions {
   return {
-    documentSelector: supportedLanguages.map((language) => ({
-      language,
-      pattern: workspaceGlob(folder),
-    })),
+    documentSelector: documentSelector(folder),
     initializationFailedHandler: (error) => {
       log(`api-ls initialization failed for ${folder.name}: ${formatError(error)}`)
       return false
@@ -169,6 +347,19 @@ function clientOptions(
         }
         return result
       },
+      handleRegisterCapability: async (params, next) => {
+        const sanitized = sanitizeRegisterCapabilityParams(params)
+        if (sanitized.registrations.length === 0) {
+          return
+        }
+        const callNext = next as unknown as (
+          params: typeof sanitized,
+        ) => Promise<void | Error>
+        const result = await callNext(sanitized)
+        if (result instanceof Error) {
+          throw result
+        }
+      },
     },
     outputChannel: outputChannel!,
     revealOutputChannelOn: RevealOutputChannelOn.Never,
@@ -177,6 +368,124 @@ function clientOptions(
     },
     workspaceFolder: folder,
   }
+}
+
+function documentSelector(folder: vscode.WorkspaceFolder): ApiDocumentSelector {
+  return supportedLanguages.map((language) => ({
+    scheme: "file",
+    language,
+    pattern: workspaceGlob(folder),
+  }))
+}
+
+type LanguageClientRuntime = {
+  initializeFeatures?: (connection: unknown) => void
+  _capabilities?: unknown
+}
+
+function sanitizeInitializeFeatures(client: LanguageClient): void {
+  const mutableClient = client as unknown as LanguageClientRuntime
+  const originalInitializeFeatures = mutableClient.initializeFeatures
+  if (typeof originalInitializeFeatures !== "function") {
+    log("Unable to patch api-ls command capabilities before feature initialization.")
+    return
+  }
+
+  mutableClient.initializeFeatures = function initializeFeaturesWithSanitizedCommands(
+    this: LanguageClientRuntime,
+    connection: unknown,
+  ): void {
+    sanitizeApiLsClientCapabilities(this._capabilities)
+    return originalInitializeFeatures.call(this, connection)
+  }
+}
+
+function sanitizeApiLsClientCapabilities(capabilities: unknown): void {
+  if (!isRecord(capabilities)) {
+    return
+  }
+
+  sanitizeExecuteCommandProvider(capabilities)
+  delete capabilities.definitionProvider
+  delete capabilities.hoverProvider
+  delete capabilities.referencesProvider
+}
+
+function sanitizeRegisterCapabilityParams<T extends { registrations: unknown[] }>(
+  params: T,
+): T {
+  return {
+    ...params,
+    registrations: params.registrations
+      .map(sanitizeRegistration)
+      .filter((registration): registration is NonNullable<typeof registration> => {
+        return registration !== undefined
+      }),
+  }
+}
+
+function sanitizeRegistration(registration: unknown): unknown | undefined {
+  if (!isRecord(registration)) {
+    return registration
+  }
+  if (
+    typeof registration.method === "string" &&
+    directNavigationMethods.has(registration.method)
+  ) {
+    return undefined
+  }
+  if (registration.method !== "workspace/executeCommand") {
+    return registration
+  }
+
+  const registerOptions = isRecord(registration.registerOptions)
+    ? { ...registration.registerOptions }
+    : {}
+  const commands = Array.isArray(registerOptions.commands)
+    ? registerOptions.commands.filter((command) => {
+        return typeof command !== "string" || !isReservedTypeScriptCommand(command)
+      })
+    : undefined
+
+  if (commands === undefined) {
+    return registration
+  }
+  if (commands.length === 0) {
+    return undefined
+  }
+
+  return {
+    ...registration,
+    registerOptions: {
+      ...registerOptions,
+      commands,
+    },
+  }
+}
+
+function sanitizeExecuteCommandProvider(capabilities: unknown): void {
+  if (!isRecord(capabilities)) {
+    return
+  }
+  const provider = capabilities.executeCommandProvider
+  if (!isRecord(provider) || !Array.isArray(provider.commands)) {
+    return
+  }
+
+  provider.commands = provider.commands.filter((command) => {
+    return typeof command !== "string" || !isReservedTypeScriptCommand(command)
+  })
+}
+
+function isReservedTypeScriptCommand(command: string): boolean {
+  return (
+    command.startsWith(privateTypeScriptCommandPrefix) ||
+    reservedTypeScriptCommands.has(command)
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object"
 }
 
 function serverOptions(

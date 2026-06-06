@@ -24,6 +24,7 @@ use tokio::{
 const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
 const OPEN_GENERATED_FILE_COMMAND: &str = "api-ls.openGeneratedPackageFile";
 const PRIVATE_TYPESCRIPT_COMMAND_PREFIX: &str = "_typescript.";
+const RESERVED_TYPESCRIPT_COMMANDS: [&str; 1] = ["typescript.tsserverRequest"];
 
 /// `api-ls` configuration loaded from the workspace root.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -565,7 +566,9 @@ impl AsyncLspServer {
             if let Some(kind) = self.route_backend("textDocument/references", &params) {
                 backend_queries.push((kind, params.clone()));
             }
-            if is_rust_message("textDocument/references", &params) {
+            if is_rust_message("textDocument/references", &params)
+                && !has_non_generated_typescript_location(&locations, &workspace)
+            {
                 if let Some(query) = TextPositionQuery::from_lsp_params(&params) {
                     if let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? {
                         backend_queries.extend(
@@ -778,10 +781,24 @@ impl AsyncLspServer {
     fn forward_backend_request_to_client(
         &mut self,
         kind: BackendKind,
-        _method: &str,
+        method: &str,
         backend_id: &Value,
         mut raw: Value,
     ) -> Result<(), String> {
+        if kind == BackendKind::TypeScript
+            && method == "client/registerCapability"
+            && !remove_reserved_typescript_dynamic_registrations(&mut raw)
+        {
+            let Some(backend) = self.backend(kind) else {
+                return Ok(());
+            };
+            return backend.send_raw(json!({
+                "jsonrpc": "2.0",
+                "id": backend_id,
+                "result": null,
+            }));
+        }
+
         let key = BackendRequestKey::new(kind, backend_id);
         let client_id = Value::String(format!(
             "api-ls:{}:{}",
@@ -1143,7 +1160,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
             return Ok(None);
         };
         Ok(graph.definition(&query, workspace))
@@ -1159,7 +1176,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = SymbolGraph::load_enriched(&workspace)? else {
             return Ok(None);
         };
         let Some(locations) = graph.references(&query, &workspace) else {
@@ -1176,7 +1193,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
             return Ok(None);
         };
         Ok(graph.hover(&query, workspace))
@@ -1364,6 +1381,36 @@ impl SymbolGraph {
         serde_json::from_str(&contents)
             .map(Some)
             .map_err(|error| format!("failed to parse symbol graph `{}`: {error}", path.display()))
+    }
+
+    fn load_enriched(workspace: &WorkspaceConfig) -> Result<Option<Self>, String> {
+        let Some(mut graph) = Self::load(&workspace.symbol_graph)? else {
+            return Ok(None);
+        };
+        if let Some(index) = EffectUsageIndex::load(&workspace.usage_index)? {
+            if !index.is_stale_for(&graph) {
+                graph.add_usage_locations(&index);
+            }
+        }
+        Ok(Some(graph))
+    }
+
+    fn add_usage_locations(&mut self, index: &EffectUsageIndex) {
+        for symbol in &mut self.symbols {
+            if symbol.kind == "endpoint" {
+                symbol.metadata.usage_count = Some(index.strong_usage_count(&symbol.id));
+            }
+            for usage in index.locations_for_symbol(&symbol.id) {
+                let location = usage.to_graph_location();
+                if !symbol
+                    .typescript
+                    .iter()
+                    .any(|existing| existing.same_location(&location))
+                {
+                    symbol.typescript.push(location);
+                }
+            }
+        }
     }
 
     fn contains_contract_hash(&self, contract_hash: &str) -> bool {
@@ -1850,6 +1897,12 @@ struct EffectUsageIndex {
     contract_hash: String,
     #[serde(default)]
     endpoints: Vec<EndpointUsageSummary>,
+    #[serde(default)]
+    usages: Vec<UsageLocation>,
+    #[serde(default)]
+    error_usages: Vec<UsageLocation>,
+    #[serde(default)]
+    field_usages: Vec<UsageLocation>,
 }
 
 impl EffectUsageIndex {
@@ -1874,6 +1927,17 @@ impl EffectUsageIndex {
             .find(|endpoint| endpoint.endpoint_id == endpoint_id)
             .map_or(0, |endpoint| endpoint.strong)
     }
+
+    fn locations_for_symbol<'a>(
+        &'a self,
+        symbol_id: &'a str,
+    ) -> impl Iterator<Item = &'a UsageLocation> {
+        self.usages
+            .iter()
+            .chain(self.error_usages.iter())
+            .chain(self.field_usages.iter())
+            .filter(move |usage| usage.symbol_id() == symbol_id)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1881,6 +1945,61 @@ struct EndpointUsageSummary {
     endpoint_id: String,
     #[serde(default)]
     strong: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UsageLocation {
+    endpoint_id: Option<String>,
+    symbol_id: Option<String>,
+    field_id: Option<String>,
+    file: PathBuf,
+    source: UsageSourceRange,
+}
+
+impl UsageLocation {
+    fn symbol_id(&self) -> &str {
+        self.endpoint_id
+            .as_deref()
+            .or(self.symbol_id.as_deref())
+            .or(self.field_id.as_deref())
+            .unwrap_or("")
+    }
+
+    fn to_graph_location(&self) -> GraphLocation {
+        let range = self.source.to_graph_range();
+        GraphLocation {
+            uri: None,
+            file: Some(self.file.clone()),
+            range,
+            name_range: Some(range),
+            full_range: Some(range),
+            generated: false,
+            renamable: Some(false),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct UsageSourceRange {
+    start_line: u32,
+    start_column: u32,
+    end_line: u32,
+    end_column: u32,
+}
+
+impl UsageSourceRange {
+    fn to_graph_range(self) -> GraphRange {
+        GraphRange {
+            start: GraphPosition {
+                line: self.start_line.saturating_sub(1),
+                character: self.start_column.saturating_sub(1),
+            },
+            end: GraphPosition {
+                line: self.end_line.saturating_sub(1),
+                character: self.end_column.saturating_sub(1),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1900,6 +2019,10 @@ impl GraphLocation {
     fn matches(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
         self.resolved_uri(workspace)
             .is_some_and(|uri| same_uri(&uri, &query.uri) && self.range.contains(query.position))
+    }
+
+    fn same_location(&self, other: &Self) -> bool {
+        self.uri == other.uri && self.file == other.file && self.range == other.range
     }
 
     fn is_generated_match(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
@@ -1965,7 +2088,7 @@ impl GraphLocation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct GraphRange {
     start: GraphPosition,
     end: GraphPosition,
@@ -2694,7 +2817,7 @@ fn initialize_result(
     semantic_tokens: Option<&MergedSemanticTokens>,
 ) -> Value {
     let mut capabilities = merge_capabilities(rust_capabilities, typescript_capabilities);
-    remove_private_typescript_commands(&mut capabilities);
+    remove_reserved_typescript_commands(&mut capabilities);
     if let Some(semantic_tokens) = semantic_tokens {
         capabilities["semanticTokensProvider"] = semantic_tokens.provider.clone();
     }
@@ -2788,7 +2911,7 @@ fn add_execute_command(capabilities: &mut Value, command: &str) {
     }
 }
 
-fn remove_private_typescript_commands(capabilities: &mut Value) {
+fn remove_reserved_typescript_commands(capabilities: &mut Value) {
     let Some(commands) = capabilities
         .get_mut("executeCommandProvider")
         .and_then(|provider| provider.get_mut("commands"))
@@ -2800,8 +2923,44 @@ fn remove_private_typescript_commands(capabilities: &mut Value) {
     commands.retain(|command| {
         command
             .as_str()
-            .is_none_or(|command| !command.starts_with(PRIVATE_TYPESCRIPT_COMMAND_PREFIX))
+            .is_none_or(|command| !is_reserved_typescript_command(command))
     });
+}
+
+fn is_reserved_typescript_command(command: &str) -> bool {
+    command.starts_with(PRIVATE_TYPESCRIPT_COMMAND_PREFIX)
+        || RESERVED_TYPESCRIPT_COMMANDS.contains(&command)
+}
+
+fn remove_reserved_typescript_dynamic_registrations(raw: &mut Value) -> bool {
+    let Some(registrations) = raw
+        .get_mut("params")
+        .and_then(|params| params.get_mut("registrations"))
+        .and_then(Value::as_array_mut)
+    else {
+        return true;
+    };
+
+    registrations.retain_mut(|registration| {
+        if registration.get("method").and_then(Value::as_str) != Some("workspace/executeCommand") {
+            return true;
+        }
+        let Some(commands) = registration
+            .get_mut("registerOptions")
+            .and_then(|options| options.get_mut("commands"))
+            .and_then(Value::as_array_mut)
+        else {
+            return true;
+        };
+        commands.retain(|command| {
+            command
+                .as_str()
+                .is_none_or(|command| !is_reserved_typescript_command(command))
+        });
+        !commands.is_empty()
+    });
+
+    !registrations.is_empty()
 }
 
 fn workspace_symbol_sort_key(value: &Value) -> String {
@@ -3204,6 +3363,19 @@ fn dedupe_locations(locations: Vec<Value>, workspace: &WorkspaceConfig) -> Value
     }
 
     Value::Array(deduped)
+}
+
+fn has_non_generated_typescript_location(locations: &[Value], workspace: &WorkspaceConfig) -> bool {
+    locations.iter().any(|location| {
+        let Some(uri) = location.get("uri").and_then(Value::as_str) else {
+            return false;
+        };
+        is_typescript_uri(uri) && !is_generated_package_uri(uri, workspace)
+    })
+}
+
+fn is_generated_package_uri(uri: &str, workspace: &WorkspaceConfig) -> bool {
+    file_uri_to_path(uri).is_some_and(|path| path.starts_with(&workspace.generated_cache_dir))
 }
 
 fn diagnostic_start(diagnostic: &Value) -> GraphPosition {
@@ -4607,7 +4779,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_does_not_advertise_private_typescript_commands() {
+    fn initialize_does_not_advertise_reserved_typescript_commands() {
         let result = initialize_result(
             &json!({
                 "executeCommandProvider": {
@@ -4619,6 +4791,7 @@ mod tests {
                     "commands": [
                         "_typescript.configurePlugin",
                         "_typescript.applyRefactoring",
+                        "typescript.tsserverRequest",
                         "typescript.publicCommand"
                     ]
                 }
@@ -4635,6 +4808,9 @@ mod tests {
         assert!(!commands
             .iter()
             .any(|command| command.as_str() == Some("_typescript.applyRefactoring")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.as_str() == Some("typescript.tsserverRequest")));
         assert!(commands
             .iter()
             .any(|command| command.as_str() == Some("rust-analyzer.applySourceChange")));
@@ -4644,6 +4820,55 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| command.as_str() == Some(OPEN_GENERATED_FILE_COMMAND)));
+    }
+
+    #[test]
+    fn dynamic_registration_does_not_forward_reserved_typescript_commands() {
+        let mut raw = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [
+                    {
+                        "id": "typescript-commands",
+                        "method": "workspace/executeCommand",
+                        "registerOptions": {
+                            "commands": [
+                                "_typescript.configurePlugin",
+                                "typescript.tsserverRequest",
+                                "typescript.publicCommand"
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_reserved_typescript_dynamic_registrations(&mut raw));
+        assert_eq!(
+            raw["params"]["registrations"][0]["registerOptions"]["commands"],
+            json!(["typescript.publicCommand"])
+        );
+
+        let mut only_reserved = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "client/registerCapability",
+            "params": {
+                "registrations": [{
+                    "id": "typescript-commands",
+                    "method": "workspace/executeCommand",
+                    "registerOptions": {
+                        "commands": ["typescript.tsserverRequest"]
+                    }
+                }]
+            }
+        });
+
+        assert!(!remove_reserved_typescript_dynamic_registrations(
+            &mut only_reserved
+        ));
     }
 
     #[test]
@@ -4957,6 +5182,108 @@ mod tests {
         assert!(output.contains(&rust_uri));
         assert!(output.contains("\"line\":10"));
         assert!(!output.contains("\"id\":2,\"error\""));
+    }
+
+    #[test]
+    fn redirects_usage_index_typescript_definition_to_rust_source_when_graph_lags() {
+        let root = test_root("cross-definition-usage-index");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("target/api-contract/graph")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "schemaVersion": 1,
+                "contractHash": "test-contract",
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [{
+                        "uri": generated_uri,
+                        "generated": true,
+                        "range": {
+                            "start": { "line": 4, "character": 15 },
+                            "end": { "line": 4, "character": 22 }
+                        }
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+        fs::write(
+            root.join("target/api-contract/graph/effect-usage-index.json"),
+            json!({
+                "schema_version": 2,
+                "contract_hash": "test-contract",
+                "package_name": "@workspace/server-api",
+                "endpoints": [
+                    {
+                        "endpoint_id": "endpoint:get_user",
+                        "accessor_path": ["users", "getUser"],
+                        "strong": 1,
+                        "weak": 0,
+                        "invalid": 0,
+                        "unknown": 0
+                    }
+                ],
+                "usages": [{
+                    "endpoint_id": "endpoint:get_user",
+                    "accessor_path": ["users", "getUser"],
+                    "file": "client/use-api.ts",
+                    "source": {
+                        "file": "client/use-api.ts",
+                        "start_line": 2,
+                        "start_column": 39,
+                        "end_line": 2,
+                        "end_column": 46
+                    },
+                    "strength": "Strong",
+                    "reason": "endpoint Effect is yielded",
+                    "diagnostics": []
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write usage index");
+
+        let input = [
+            initialize_request(&root),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": usage_uri },
+                    "position": { "line": 1, "character": 40 }
+                }
+            })),
+            shutdown_request(3),
+            exit_notification(),
+        ]
+        .join("");
+        let messages = run_output_messages(input);
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("definition response");
+
+        assert_eq!(response["result"]["uri"], rust_uri);
+        assert_eq!(response["result"]["range"]["start"]["line"], json!(10));
     }
 
     #[test]
