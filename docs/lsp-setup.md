@@ -24,6 +24,11 @@ Create `.api-ls.json` at the workspace root when defaults are not enough:
     "command": "typescript-language-server",
     "args": ["--stdio"]
   },
+  "apiWatch": {
+    "enabled": true,
+    "command": "api",
+    "args": ["watch", "--manifest-path", "Cargo.toml", "--target-dir", "target"]
+  },
   "effectLanguageServicePlugin": "@effect/language-service",
   "generatedCacheDir": "target/api-contract/effect-v4/packages",
   "symbolGraph": "target/api-contract/rust-ts-symbols.json",
@@ -38,6 +43,13 @@ the configured Rust backend as `rustAnalyzer.command` plus
 `rustAnalyzer.args`, and starts the TypeScript/Effect backend as
 `typescript.command` plus `typescript.args`. The default TypeScript command is
 `typescript-language-server --stdio`.
+
+`apiWatch` controls the generated-package refresh process owned by `api-ls`.
+When enabled, `api-ls` starts the configured long-running watch command during
+initialization, waits for its initial generation to create the cache, and keeps
+the same process alive while the editor session is active. In packaged VS Code
+installs, `api-ls` can also discover an `api` binary bundled next to itself when
+`apiWatch.command` is empty.
 
 ## Editor command
 
@@ -129,20 +141,19 @@ setting names differ by editor, but the desired final state is:
 - The Rust Analyzer and TypeScript/Effect backend processes are children of
   `api-ls`, not separate editor-managed servers.
 
-## Generated package reads
+## Generated package refresh
 
-The gateway serves generated package files from the configured cache directory.
-TypeScript should also know the generated `paths` entries, usually via:
+The gateway serves generated package files from the configured cache directory
+and keeps them refreshed through `apiWatch`. TypeScript should also know the
+generated `paths` entries, usually by extending or copying:
 
 ```sh
-cargo run -p api-collector --bin api -- gen \
-  --contract target/api-contract/server-api.json \
-  --target-dir target
+target/api-contract/effect-v4/tsconfig.paths.json
 ```
 
-Make sure the generated cache directory in `.api-ls.json` matches the `gen`
-target directory. A TypeScript app should extend or copy the generated
-`tsconfig.paths.json`, for example:
+Make sure the generated cache directory in `.api-ls.json` matches the
+`apiWatch` target directory. A TypeScript app should extend or copy the
+generated `tsconfig.paths.json`, for example:
 
 ```json
 {
@@ -150,8 +161,9 @@ target directory. A TypeScript app should extend or copy the generated
 }
 ```
 
-`cargo run -p api-collector --bin api -- check` also regenerates the package,
-typechecks it, and updates usage data for editor diagnostics.
+`cargo run -p api-collector --bin api -- check` still provides the stricter CI
+path: it regenerates the package, typechecks it, and updates usage data for
+editor diagnostics.
 
 ## Diagnostics
 
@@ -169,8 +181,9 @@ Common startup diagnostics:
   `rustAnalyzer.command`.
 - Missing TypeScript/Effect backend: install `typescript-language-server` for
   the workspace or set `typescript.command`.
-- Missing generated cache: run `api gen` or `api check` before starting the
-  editor, and verify `generatedCacheDir`.
+- Missing generated cache: verify `apiWatch.command`, `apiWatch.args`, and
+  `generatedCacheDir`. You can also run `api watch` or `api check` manually to
+  inspect the underlying collection error.
 
 Set `logFile` in `.api-ls.json` to capture backend stderr under `target/` while
 debugging startup failures.

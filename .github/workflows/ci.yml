@@ -29,7 +29,8 @@ jobs:
       - run: npm test
         working-directory: npm
       - run: cargo build -p api-ls --bin api-ls --release
-      - run: npm run prepare:server --workspace rust-ts-integration -- --binary "$GITHUB_WORKSPACE/target/release/api-ls" --platform-dir linux-x64
+      - run: cargo build -p api-collector --bin api --release
+      - run: npm run prepare:server --workspace rust-ts-integration -- --binary "$GITHUB_WORKSPACE/target/release/api-ls" --api-binary "$GITHUB_WORKSPACE/target/release/api" --platform-dir linux-x64
         working-directory: npm
       - run: npm run package:vsix --workspace rust-ts-integration -- --target linux-x64 --out out/rust-ts-integration-ci-linux-x64.vsix
         working-directory: npm

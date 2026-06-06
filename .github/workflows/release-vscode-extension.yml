@@ -90,6 +90,7 @@ jobs:
         run: |
           npm run prepare:server --workspace rust-ts-integration -- \
             --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.binary-name }}" \
+            --api-binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.cli-binary-name }}" \
             --platform-dir "${{ matrix.vscode-target }}"
         working-directory: npm
       - name: Package CLI release asset

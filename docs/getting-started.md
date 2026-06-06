@@ -92,6 +92,15 @@ cargo run -p api-collector --bin api -- gen \
   --target-dir target
 ```
 
+During local development, use `api watch` to keep the hidden package and symbol
+graph refreshed as Rust source changes:
+
+```sh
+cargo run -p api-collector --bin api -- watch \
+  --package server \
+  --target-dir target
+```
+
 The package is written below
 `target/api-contract/effect-v4/packages/_workspace_server-api`. Keep it hidden
 and generated. Do not commit it.
@@ -135,4 +144,6 @@ cargo run -p api-collector --bin api -- check-usages \
   --ts-dir app/src
 ```
 
-Use `api doctor` when setup is missing or a workspace cannot be discovered.
+Use `api doctor` when setup is missing or a workspace cannot be discovered. If
+you use `api-ls`, configure `apiWatch` in `.api-ls.json` so the editor starts
+and owns the same watcher for you.

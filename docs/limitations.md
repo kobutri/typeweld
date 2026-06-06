@@ -7,8 +7,6 @@ This repository is still an MVP implementation.
 - The TypeScript usage scanner is intentionally conservative and line-oriented.
   It recognizes common strong Effect patterns, but it is not a full TypeScript
   compiler pass.
-- `api watch` currently performs one regeneration pass. Use an external file
-  watcher around `api gen` when continuous regeneration is needed.
 - Generated Effect code targets the current Effect v4 beta surface used by this
   repository.
 - Cross-language rename depends on the symbol graph. Missing or stale graph

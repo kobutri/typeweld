@@ -30,6 +30,7 @@ const OPEN_GENERATED_FILE_COMMAND: &str = "api-ls.openGeneratedPackageFile";
 pub struct ApiLsConfig {
     pub rust_analyzer: BackendCommand,
     pub typescript: BackendCommand,
+    pub api_watch: ApiWatchConfig,
     pub effect_language_service_plugin: Option<String>,
     pub generated_cache_dir: PathBuf,
     pub symbol_graph: PathBuf,
@@ -49,6 +50,7 @@ impl Default for ApiLsConfig {
                 command: "typescript-language-server".to_owned(),
                 args: vec!["--stdio".to_owned()],
             },
+            api_watch: ApiWatchConfig::default(),
             effect_language_service_plugin: None,
             generated_cache_dir: PathBuf::from("target/api-contract/effect-v4/packages"),
             symbol_graph: PathBuf::from("target/api-contract/rust-ts-symbols.json"),
@@ -75,6 +77,25 @@ pub enum UsageLintLevel {
 pub struct BackendCommand {
     pub command: String,
     pub args: Vec<String>,
+}
+
+/// `api watch` process managed by the language-server gateway.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ApiWatchConfig {
+    pub enabled: bool,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+impl Default for ApiWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            command: String::new(),
+            args: vec!["watch".to_owned()],
+        }
+    }
 }
 
 /// Resolved workspace and cache paths used by the gateway.
@@ -145,6 +166,7 @@ struct AsyncLspServer {
     event_rx: mpsc::UnboundedReceiver<GatewayEvent>,
     output_tx: mpsc::UnboundedSender<Value>,
     workspace: Option<WorkspaceConfig>,
+    api_watch: Option<ApiWatchProcess>,
     rust_analyzer: Option<AsyncBackend>,
     typescript: Option<AsyncBackend>,
     pending_requests: HashMap<BackendRequestKey, PendingRequest>,
@@ -172,6 +194,7 @@ impl AsyncLspServer {
             event_rx,
             output_tx,
             workspace: None,
+            api_watch: None,
             rust_analyzer: None,
             typescript: None,
             pending_requests: HashMap::new(),
@@ -278,8 +301,14 @@ impl AsyncLspServer {
                                 return Ok(());
                             }
                         };
-                        let generated_tsconfig = match ensure_generated_package_cache(&workspace) {
-                            Ok(path) => path,
+                        let (generated_tsconfig, api_watch) = match prepare_generated_package_cache(
+                            &workspace,
+                            self.event_tx.clone(),
+                            log_file.clone(),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
                             Err(error) => {
                                 rust_backend.stop().await;
                                 self.write_error(id, -32_602, error)?;
@@ -297,7 +326,7 @@ impl AsyncLspServer {
                             &workspace.config.typescript,
                             typescript_params,
                             self.event_tx.clone(),
-                            log_file,
+                            log_file.clone(),
                         )
                         .await
                         {
@@ -318,6 +347,7 @@ impl AsyncLspServer {
                             semantic_tokens.as_ref(),
                         );
                         self.workspace = Some(workspace);
+                        self.api_watch = api_watch;
                         self.semantic_tokens = semantic_tokens;
                         self.rust_analyzer = Some(rust_backend);
                         self.typescript = Some(typescript_backend);
@@ -966,6 +996,9 @@ impl AsyncLspServer {
     }
 
     async fn stop_backends(&mut self) {
+        if let Some(api_watch) = self.api_watch.take() {
+            api_watch.stop().await;
+        }
         if let Some(backend) = self.rust_analyzer.take() {
             backend.stop().await;
         }
@@ -1971,6 +2004,215 @@ impl TextPositionQuery {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         })
+    }
+}
+
+struct ApiWatchProcess {
+    child: Child,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedApiWatchCommand {
+    command: String,
+    args: Vec<String>,
+}
+
+impl ApiWatchProcess {
+    async fn start(
+        workspace: &WorkspaceConfig,
+        event_tx: mpsc::UnboundedSender<GatewayEvent>,
+        log_file: Option<PathBuf>,
+    ) -> Result<Option<Self>, String> {
+        let Some(command) = resolve_api_watch_command(workspace)? else {
+            return Ok(None);
+        };
+        let args = command.args.clone();
+        let mut child = Command::new(&command.command)
+            .args(&args)
+            .current_dir(&workspace.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "apiWatch failed to start `{}`: {error}",
+                    api_watch_command_label(&command, &args)
+                )
+            })?;
+
+        if let Some(stdout) = child.stdout.take() {
+            spawn_api_watch_log_task("stdout", stdout, event_tx.clone(), log_file.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_api_watch_log_task("stderr", stderr, event_tx, log_file);
+        }
+
+        Ok(Some(Self { child }))
+    }
+
+    async fn stop(mut self) {
+        self.wait_or_kill(Duration::from_millis(500)).await;
+    }
+
+    async fn wait_or_kill(&mut self, timeout: Duration) {
+        if tokio::time::timeout(timeout, self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.start_kill();
+            let _ = self.child.wait().await;
+        }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, String> {
+        self.child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect apiWatch process: {error}"))
+    }
+}
+
+async fn prepare_generated_package_cache(
+    workspace: &WorkspaceConfig,
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    log_file: Option<PathBuf>,
+) -> Result<(PathBuf, Option<ApiWatchProcess>), String> {
+    let api_watch = match ApiWatchProcess::start(workspace, event_tx, log_file.clone()).await {
+        Ok(process) => process,
+        Err(error) => {
+            if workspace.generated_cache_dir.is_dir() {
+                log_api_watch_message(
+                    log_file,
+                    &format!("apiWatch failed to start; using existing generated cache: {error}"),
+                )
+                .await;
+                None
+            } else {
+                return Err(error);
+            }
+        }
+    };
+
+    if let Some(mut api_watch) = api_watch {
+        let tsconfig = wait_for_generated_package_cache(workspace, &mut api_watch).await?;
+        Ok((tsconfig, Some(api_watch)))
+    } else {
+        ensure_generated_package_cache(workspace).map(|path| (path, None))
+    }
+}
+
+async fn wait_for_generated_package_cache(
+    workspace: &WorkspaceConfig,
+    api_watch: &mut ApiWatchProcess,
+) -> Result<PathBuf, String> {
+    let started = std::time::Instant::now();
+    let timeout = Duration::from_secs(120);
+    let interval = Duration::from_millis(250);
+
+    loop {
+        if let Ok(path) = ensure_generated_package_cache(workspace) {
+            return Ok(path);
+        }
+
+        if let Some(status) = api_watch.try_wait()? {
+            return Err(format!(
+                "apiWatch exited before generating `{}` with {status}",
+                workspace.generated_cache_dir.display()
+            ));
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "timed out waiting for apiWatch to generate `{}`",
+                workspace.generated_cache_dir.display()
+            ));
+        }
+
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn resolve_api_watch_command(
+    workspace: &WorkspaceConfig,
+) -> Result<Option<ResolvedApiWatchCommand>, String> {
+    if !workspace.config.api_watch.enabled {
+        return Ok(None);
+    }
+    if !workspace.config.api_watch.command.trim().is_empty() {
+        return Ok(Some(ResolvedApiWatchCommand {
+            command: workspace.config.api_watch.command.clone(),
+            args: workspace.config.api_watch.args.clone(),
+        }));
+    }
+
+    Ok(sibling_api_binary().map(|command| ResolvedApiWatchCommand {
+        command,
+        args: workspace.config.api_watch.args.clone(),
+    }))
+}
+
+fn sibling_api_binary() -> Option<String> {
+    let executable = env::current_exe().ok()?;
+    let sibling = executable.parent()?.join(platform_api_binary_name());
+    sibling
+        .is_file()
+        .then(|| sibling.to_string_lossy().into_owned())
+}
+
+fn platform_api_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "api.exe"
+    } else {
+        "api"
+    }
+}
+
+fn api_watch_command_label(command: &ResolvedApiWatchCommand, args: &[String]) -> String {
+    std::iter::once(command.command.as_str())
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn spawn_api_watch_log_task<R>(
+    stream_name: &'static str,
+    stream: R,
+    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    log_file: Option<PathBuf>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = AsyncBufReader::new(stream).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let message = format!("apiWatch {stream_name}: {line}");
+                    if let Some(path) = &log_file {
+                        if let Err(error) = append_log_line(path, &message).await {
+                            let _ = event_tx.send(GatewayEvent::BackendLog(format!(
+                                "apiWatch log write failed: {error}"
+                            )));
+                        }
+                    } else if event_tx.send(GatewayEvent::BackendLog(message)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = event_tx.send(GatewayEvent::BackendLog(format!(
+                        "apiWatch {stream_name} read failed: {error}"
+                    )));
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn log_api_watch_message(log_file: Option<PathBuf>, message: &str) {
+    if let Some(path) = log_file {
+        let _ = append_log_line(&path, message).await;
     }
 }
 
@@ -3899,6 +4141,8 @@ mod tests {
             config.config.typescript.command,
             "typescript-language-server"
         );
+        assert!(config.config.api_watch.enabled);
+        assert_eq!(config.config.api_watch.args, vec!["watch".to_owned()]);
     }
 
     #[test]

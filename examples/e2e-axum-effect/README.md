@@ -81,6 +81,17 @@ a separate Rust Analyzer or TypeScript language server for the same files.
     "command": "typescript-language-server",
     "args": ["--stdio"]
   },
+  "apiWatch": {
+    "enabled": true,
+    "command": "api",
+    "args": [
+      "watch",
+      "--package",
+      "e2e-axum-effect-server",
+      "--target-dir",
+      "target"
+    ]
+  },
   "generatedCacheDir": "target/api-contract/effect-v4/packages",
   "symbolGraph": "target/api-contract/rust-ts-symbols.json",
   "usageIndex": "target/api-contract/graph/effect-usage-index.json",
@@ -89,7 +100,9 @@ a separate Rust Analyzer or TypeScript language server for the same files.
 }
 ```
 
-Generate the package and symbol graph before opening the editor:
+With `apiWatch` configured, the language server refreshes the package and
+symbol graph when the editor starts and after Rust source changes. The same
+generation path can be checked manually with:
 
 ```sh
 cargo run -q -p api-collector --bin api -- check \

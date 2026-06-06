@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     process::ExitCode,
+    sync::mpsc,
+    time::Duration,
 };
 
 use api_build::{check_usage_lints, UsageLintConfig, UsageLintLevel};
@@ -16,6 +18,9 @@ use api_gen_effect_v4::{render_generated_package, render_symbol_graph, Generated
 use api_ir::{ApiContract, Field, SourceRange, SourceSpan, TypeShape};
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Input};
+use notify_debouncer_full::{
+    new_debouncer, notify::RecursiveMode, DebounceEventResult, DebouncedEvent,
+};
 use syn::spanned::Spanned;
 
 #[derive(Debug, Parser)]
@@ -34,8 +39,8 @@ enum ApiCommand {
     Collect(CollectOptions),
     /// Generate a hidden Effect TypeScript package from a contract.
     Gen(GenOptions),
-    /// Regenerate once using the watch command shape.
-    Watch(ContractTargetOptions),
+    /// Continuously collect Rust API contracts and generate TypeScript packages.
+    Watch(WatchOptions),
     /// Run collection, generation, typechecking, and usage checks.
     Check(CheckOptions),
     /// Scan TypeScript sources for generated Effect API usage.
@@ -158,16 +163,10 @@ fn gen_workspace_command(workspace_contract: &Path, target_dir: &Path) -> Result
     Ok(())
 }
 
-fn watch_command(mut options: ContractTargetOptions) -> Result<(), String> {
-    options.once = true;
-    let contract = read_contract(&options.contract)?;
-    let package = render_generated_package(&contract, &options.target_dir);
-    write_generated_package(&package)?;
-    println!(
-        "watch regenerated {} once; rerun this command after contract changes",
-        package.package_dir.display()
-    );
-    Ok(())
+fn watch_command(mut options: WatchOptions) -> Result<(), String> {
+    options.normalize();
+    run_watch_generation(&options)?;
+    watch_loop(&options)
 }
 
 fn check_command(options: CheckOptions) -> Result<(), String> {
@@ -956,7 +955,7 @@ fn write_new_project(project: &NewProject) -> Result<(), String> {
         render_new_root_package_json(project),
     )?;
     write_project_file(project, ".gitignore", render_new_gitignore())?;
-    write_project_file(project, ".api-ls.json", render_new_api_ls_json())?;
+    write_project_file(project, ".api-ls.json", render_new_api_ls_json(project))?;
     write_project_file(project, "README.md", render_new_readme(project))?;
     write_project_file(
         project,
@@ -1154,25 +1153,49 @@ fn render_new_app_package_json(project: &NewProject) -> String {
     )
 }
 
-fn render_new_api_ls_json() -> String {
-    r#"{
-  "rustAnalyzer": {
+fn render_new_api_ls_json(project: &NewProject) -> String {
+    let api_manifest = normalize_path(&project.repo_root.join("crates/api-collector/Cargo.toml"));
+    format!(
+        r#"{{
+  "rustAnalyzer": {{
     "command": "rust-analyzer",
     "args": []
-  },
-  "typescript": {
+  }},
+  "typescript": {{
     "command": "npm",
     "args": ["exec", "--", "typescript-language-server", "--stdio"]
-  },
+  }},
+  "apiWatch": {{
+    "enabled": true,
+    "command": "cargo",
+    "args": [
+      "run",
+      "-q",
+      "--manifest-path",
+      {api_manifest},
+      "--bin",
+      "api",
+      "--",
+      "watch",
+      "--manifest-path",
+      "Cargo.toml",
+      "--target-dir",
+      "target",
+      "--package",
+      {rust_package}
+    ]
+  }},
   "effectLanguageServicePlugin": null,
   "generatedCacheDir": "target/api-contract/effect-v4/packages",
   "symbolGraph": "target/api-contract/rust-ts-symbols.json",
   "usageIndex": "target/api-contract/graph/effect-usage-index.json",
   "unusedEndpointLints": "warn",
   "logFile": "target/api-ls.log"
-}
-"#
-    .to_owned()
+}}
+"#,
+        api_manifest = json_string(&api_manifest),
+        rust_package = json_string(&project.rust_package),
+    )
 }
 
 fn render_new_gitignore() -> String {
@@ -2505,16 +2528,186 @@ struct GenOptions {
 }
 
 #[derive(Debug, Args)]
-struct ContractTargetOptions {
-    /// Contract JSON to generate from.
+#[allow(clippy::struct_excessive_bools)]
+struct WatchOptions {
+    /// Check an already collected contract instead of collecting from Cargo metadata.
     #[arg(long)]
-    contract: PathBuf,
-    /// Directory for generated package and graph output.
+    contract: Option<PathBuf>,
+    /// Directory for generated contract, package, graph, and watch output.
     #[arg(long, alias = "out-dir", default_value = "target")]
     target_dir: PathBuf,
-    /// Accepted for compatibility; the current watch command regenerates once.
+    /// Cargo manifest to inspect.
+    #[arg(long, default_value = "Cargo.toml")]
+    manifest_path: PathBuf,
+    /// Cargo package to collect.
+    #[arg(long = "package", short = 'p')]
+    cargo_package: Option<String>,
+    /// Override the generated TypeScript package name.
+    #[arg(long = "package-name")]
+    package_name: Option<String>,
+    /// Override the Rust API root function path.
+    #[arg(long = "api-root")]
+    api_root: Option<String>,
+    /// Cargo features to enable. May be repeated or space/comma separated.
+    #[arg(long, num_args = 1..)]
+    features: Vec<String>,
+    /// Enable all Cargo features.
+    #[arg(long = "all-features")]
+    all_features: bool,
+    /// Disable default Cargo features for the collected package.
+    #[arg(long = "no-default-features")]
+    no_default_features: bool,
+    /// Collect all API-enabled workspace packages.
     #[arg(long)]
-    once: bool,
+    workspace: bool,
+    /// Debounce filesystem events before regenerating.
+    #[arg(long = "debounce-ms", default_value_t = 250)]
+    debounce_ms: u64,
+}
+
+impl WatchOptions {
+    fn normalize(&mut self) {
+        normalize_features(&mut self.features);
+    }
+
+    fn check_options(&self) -> CheckOptions {
+        CheckOptions {
+            contract: self.contract.clone(),
+            target_dir: self.target_dir.clone(),
+            manifest_path: self.manifest_path.clone(),
+            cargo_package: self.cargo_package.clone(),
+            package_name: self.package_name.clone(),
+            api_root: self.api_root.clone(),
+            features: self.features.clone(),
+            all_features: self.all_features,
+            no_default_features: self.no_default_features,
+            workspace: self.workspace,
+            ts_files: Vec::new(),
+            ts_dirs: Vec::new(),
+            unused_endpoint_lints: UsageLintLevel::Off,
+            deny_unused_endpoints: false,
+            warn_unused_endpoints: false,
+            allow_unused_endpoints: true,
+            cargo_check: false,
+        }
+    }
+}
+
+fn run_watch_generation(options: &WatchOptions) -> Result<(), String> {
+    let check_options = options.check_options();
+    let checked_contracts = check_collect_contracts(&check_options)?;
+    let packages = check_generate_contracts(&checked_contracts, &check_options.target_dir)?;
+    println!(
+        "watch generated {} package(s) into {}",
+        packages.len(),
+        check_options.target_dir.display()
+    );
+    Ok(())
+}
+
+fn watch_loop(options: &WatchOptions) -> Result<(), String> {
+    let root = watch_root(&options)?;
+    let (tx, rx) = mpsc::channel::<DebounceEventResult>();
+    let mut debouncer = new_debouncer(Duration::from_millis(options.debounce_ms), None, tx)
+        .map_err(|error| format!("failed to create file watcher: {error}"))?;
+    debouncer
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|error| format!("failed to watch `{}`: {error}", root.display()))?;
+
+    println!(
+        "watching {} for API contract changes (debounce {}ms)",
+        root.display(),
+        options.debounce_ms
+    );
+
+    for result in rx {
+        let events = match result {
+            Ok(events) => events,
+            Err(errors) => {
+                for error in errors {
+                    eprintln!("watch error: {error}");
+                }
+                continue;
+            }
+        };
+
+        if !watch_events_relevant(&options, &root, &events) {
+            continue;
+        }
+
+        match run_watch_generation(&options) {
+            Ok(()) => {}
+            Err(error) => eprintln!("watch regeneration failed: {error}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn watch_root(options: &WatchOptions) -> Result<PathBuf, String> {
+    if let Some(contract) = &options.contract {
+        let contract = absolutize_from_current_dir(contract)?;
+        return Ok(contract
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf));
+    }
+
+    let metadata = load_cargo_metadata(&options.manifest_path)?;
+    Ok(metadata.workspace_root.into_std_path_buf())
+}
+
+fn watch_events_relevant(options: &WatchOptions, root: &Path, events: &[DebouncedEvent]) -> bool {
+    events.iter().any(|event| {
+        event.need_rescan()
+            || event
+                .event
+                .paths
+                .iter()
+                .any(|path| watch_path_relevant(options, root, path))
+    })
+}
+
+fn watch_path_relevant(options: &WatchOptions, root: &Path, path: &Path) -> bool {
+    let path = absolutize_watch_event_path(root, path);
+    if watch_path_is_ignored(options, &path) {
+        return false;
+    }
+
+    if let Some(contract) = &options.contract {
+        return absolutize_from_current_dir(contract)
+            .is_ok_and(|contract| path == contract || path.starts_with(contract));
+    }
+
+    if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml") {
+        return true;
+    }
+
+    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+fn watch_path_is_ignored(options: &WatchOptions, path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(name.as_ref(), ".git" | "node_modules")
+    }) || absolutize_from_current_dir(&options.target_dir)
+        .is_ok_and(|target_dir| path.starts_with(target_dir))
+}
+
+fn absolutize_watch_event_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn absolutize_from_current_dir(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| format!("failed to read current dir: {error}"))
 }
 
 fn read_contract(path: &Path) -> Result<ApiContract, String> {
@@ -3010,6 +3203,9 @@ mod tests {
 
         let lsp = fs::read_to_string(root.join(".api-ls.json")).expect("read lsp config");
         assert!(lsp.contains("typescript-language-server"));
+        assert!(lsp.contains("\"apiWatch\""));
+        assert!(lsp.contains("\"--package\""));
+        assert!(lsp.contains("\"sample-api-server\""));
         assert!(lsp.contains("\"effectLanguageServicePlugin\": null"));
         assert!(lsp.contains("target/api-contract/rust-ts-symbols.json"));
 
@@ -3039,6 +3235,20 @@ mod tests {
             target_dir.display().to_string(),
         ])
         .expect("generate package");
+        run_watch_generation(&WatchOptions {
+            contract: Some(contract_path.clone()),
+            target_dir: target_dir.clone(),
+            manifest_path: PathBuf::from("Cargo.toml"),
+            cargo_package: None,
+            package_name: None,
+            api_root: None,
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            workspace: false,
+            debounce_ms: 250,
+        })
+        .expect("watch initial generation writes package");
         run_with_args(vec![
             "check".to_owned(),
             "--contract".to_owned(),

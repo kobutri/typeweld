@@ -6,9 +6,9 @@ then attaches them to the GitHub Release after the release is published.
 ## What CI Builds
 
 Regular CI runs the existing Rust and npm test suites, then does a Linux VSIX
-smoke package. The smoke package builds `api-ls` in release mode, copies the
-binary into the extension under `bin/linux-x64/api-ls`, copies the npm launcher
-into `server/index.js`, and runs `vsce package`.
+smoke package. The smoke package builds `api-ls` and the `api` CLI in release
+mode, copies both binaries into the extension under `bin/linux-x64/`, copies the
+npm launcher into `server/index.js`, and runs `vsce package`.
 
 ## Release Assets
 
@@ -20,9 +20,9 @@ The workflow builds these VSIX assets:
 - `rust-ts-integration-<version>-darwin-arm64.vsix`
 - `rust-ts-integration-<version>-win32-x64.vsix`
 
-Each VSIX includes the compiled extension bundle plus the matching `api-ls`
-binary. The extension manifest version is stamped from the release tag during
-the workflow, so use tags like `v0.1.0`.
+Each VSIX includes the compiled extension bundle plus the matching `api-ls` and
+`api` binaries. The extension manifest version is stamped from the release tag
+during the workflow, so use tags like `v0.1.0`.
 
 The same workflow also builds and uploads the `api` CLI:
 
