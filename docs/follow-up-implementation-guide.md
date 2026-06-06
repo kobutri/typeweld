@@ -529,7 +529,7 @@ Acceptance criteria:
 
 ## Track E: semantic TypeScript and Effect usage indexing
 
-### E1. Replace line scanning with semantic TypeScript references
+### E1. Replace line scanning with semantic TypeScript references [done]
 
 Goal: detect real endpoint references.
 

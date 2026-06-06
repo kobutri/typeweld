@@ -7,7 +7,7 @@ use std::{
 };
 
 use api_collector::{
-    collect_empty_contract, discover_workspace, scan_effect_usages, write_contract_json,
+    collect_empty_contract, discover_workspace, try_scan_effect_usages, write_contract_json,
     write_effect_usage_index, EffectUsageIndex, EndpointUsage, TypeScriptSourceFile,
 };
 use api_gen_effect_v4::{render_generated_package, render_symbol_graph, GeneratedPackage};
@@ -189,7 +189,7 @@ fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String
 
     let contract = read_contract(&contract_path)?;
     let sources = read_ts_sources(&ts_files)?;
-    let index = scan_effect_usages(&contract, &sources);
+    let index = try_scan_effect_usages(&contract, &sources)?;
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(

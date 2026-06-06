@@ -2,7 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::Path,
+    process::{Command, Stdio},
 };
 
 use api_core::ApiModule;
@@ -37,7 +39,7 @@ pub struct WorkspaceDiscovery {
 }
 
 /// TypeScript source file scanned for generated Effect endpoint usages.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TypeScriptSourceFile {
     pub path: String,
     pub contents: String,
@@ -208,7 +210,14 @@ pub fn scan_effect_usages(
     contract: &ApiContract,
     files: &[TypeScriptSourceFile],
 ) -> EffectUsageIndex {
-    scan_effect_usages_with_diagnostics(contract, files, &[])
+    try_scan_effect_usages(contract, files).expect("semantic TypeScript usage scan failed")
+}
+
+pub fn try_scan_effect_usages(
+    contract: &ApiContract,
+    files: &[TypeScriptSourceFile],
+) -> Result<EffectUsageIndex, String> {
+    try_scan_effect_usages_with_diagnostics(contract, files, &[])
 }
 
 #[must_use]
@@ -217,20 +226,51 @@ pub fn scan_effect_usages_with_diagnostics(
     files: &[TypeScriptSourceFile],
     diagnostics: &[EffectUsageDiagnostic],
 ) -> EffectUsageIndex {
+    try_scan_effect_usages_with_diagnostics(contract, files, diagnostics)
+        .expect("semantic TypeScript usage scan failed")
+}
+
+pub fn try_scan_effect_usages_with_diagnostics(
+    contract: &ApiContract,
+    files: &[TypeScriptSourceFile],
+    diagnostics: &[EffectUsageDiagnostic],
+) -> Result<EffectUsageIndex, String> {
     let endpoint_accessors = contract
         .endpoints
         .iter()
         .map(EndpointAccessor::from_endpoint)
         .collect::<Vec<_>>();
     let mut usages = Vec::new();
+    let semantic_references = semantic_endpoint_references(contract, files, &endpoint_accessors)?;
+
+    for reference in semantic_references {
+        let Some(file) = files.iter().find(|file| file.path == reference.file) else {
+            continue;
+        };
+        let line = line_at(file, reference.source.start_line).unwrap_or_default();
+        let column = reference.source.start_column.saturating_sub(1) as usize;
+        let width = reference
+            .source
+            .end_column
+            .saturating_sub(reference.source.start_column) as usize;
+        let (strength, reason) = classify_usage(line, column, width);
+        let diagnostics = diagnostics_for_usage(diagnostics, &reference.file, &reference.source);
+        usages.push(EndpointUsage {
+            endpoint_id: reference.endpoint_id,
+            accessor_path: reference.accessor_path,
+            file: reference.file,
+            source: reference.source,
+            strength,
+            reason,
+            diagnostics,
+        });
+    }
 
     for file in files {
-        usages.extend(scan_file_for_endpoint_usages(
-            file,
-            &endpoint_accessors,
-            diagnostics,
-        ));
+        let import_aliases = import_aliases(file);
+        add_import_only_usages(file, &endpoint_accessors, &import_aliases, &mut usages);
     }
+
     usages.sort_by(|left, right| {
         left.endpoint_id
             .cmp(&right.endpoint_id)
@@ -266,11 +306,11 @@ pub fn scan_effect_usages_with_diagnostics(
         .collect::<Vec<_>>();
     endpoints.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
 
-    EffectUsageIndex {
+    Ok(EffectUsageIndex {
         package_name: contract.package_name.clone(),
         endpoints,
         usages,
-    }
+    })
 }
 
 pub fn effect_usage_index_to_json(index: &EffectUsageIndex) -> serde_json::Result<String> {
@@ -335,7 +375,6 @@ struct EndpointAccessor {
     endpoint_id: SymbolId,
     accessor_path: Vec<String>,
     namespace: String,
-    function_name: String,
 }
 
 impl EndpointAccessor {
@@ -347,50 +386,108 @@ impl EndpointAccessor {
             endpoint_id: endpoint.id.clone(),
             accessor_path: vec![namespace.clone(), function_name.clone()],
             namespace,
-            function_name,
         }
     }
 }
 
-fn scan_file_for_endpoint_usages(
-    file: &TypeScriptSourceFile,
+#[derive(Serialize)]
+struct SemanticScannerInput<'a> {
+    package_name: &'a str,
+    endpoints: Vec<SemanticScannerEndpoint<'a>>,
+    files: &'a [TypeScriptSourceFile],
+}
+
+#[derive(Serialize)]
+struct SemanticScannerEndpoint<'a> {
+    endpoint_id: &'a SymbolId,
+    accessor_path: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct SemanticScannerOutput {
+    references: Vec<SemanticEndpointReference>,
+}
+
+#[derive(Deserialize)]
+struct SemanticEndpointReference {
+    endpoint_id: SymbolId,
+    accessor_path: Vec<String>,
+    file: String,
+    source: SourceRange,
+}
+
+fn semantic_endpoint_references(
+    contract: &ApiContract,
+    files: &[TypeScriptSourceFile],
     accessors: &[EndpointAccessor],
-    diagnostics: &[EffectUsageDiagnostic],
-) -> Vec<EndpointUsage> {
-    let import_aliases = import_aliases(file);
-    let mut usages = Vec::new();
-
-    for (line_index, line) in file.contents.lines().enumerate() {
-        let line_number = u32::try_from(line_index + 1).unwrap_or(u32::MAX);
-
-        for accessor in accessors {
-            let mut qualifiers = BTreeSet::from([accessor.namespace.as_str()]);
-            if let Some(aliases) = import_aliases.get(&accessor.namespace) {
-                qualifiers.extend(aliases.iter().map(String::as_str));
-            }
-
-            for qualifier in qualifiers {
-                let needle = format!("{qualifier}.{}", accessor.function_name);
-                for column in match_indices(line, &needle) {
-                    let source = usage_source_range(&file.path, line_number, column, needle.len());
-                    let (strength, reason) = classify_usage(line, column, needle.len());
-                    let diagnostics = diagnostics_for_usage(diagnostics, &file.path, &source);
-                    usages.push(EndpointUsage {
-                        endpoint_id: accessor.endpoint_id.clone(),
-                        accessor_path: accessor.accessor_path.clone(),
-                        file: file.path.clone(),
-                        source,
-                        strength,
-                        reason,
-                        diagnostics,
-                    });
-                }
-            }
-        }
+) -> Result<Vec<SemanticEndpointReference>, String> {
+    if files.is_empty() {
+        return Ok(Vec::new());
     }
 
-    add_import_only_usages(file, accessors, &import_aliases, &mut usages);
-    usages
+    let input = SemanticScannerInput {
+        package_name: &contract.package_name,
+        endpoints: accessors
+            .iter()
+            .map(|accessor| SemanticScannerEndpoint {
+                endpoint_id: &accessor.endpoint_id,
+                accessor_path: &accessor.accessor_path,
+            })
+            .collect(),
+        files,
+    };
+    let input = serde_json::to_vec(&input)
+        .map_err(|error| format!("failed to serialize semantic TypeScript usage input: {error}"))?;
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = repo_root
+        .join("crates")
+        .join("api-collector")
+        .join("scripts")
+        .join("semantic_usage_scanner.mjs");
+    let npm_dir = repo_root.join("npm");
+    let mut child = Command::new("node")
+        .arg(&script)
+        .current_dir(&npm_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "failed to start semantic TypeScript usage scanner `{}`: {error}",
+                script.display()
+            )
+        })?;
+
+    child
+        .stdin
+        .as_mut()
+        .expect("semantic scanner stdin is piped")
+        .write_all(&input)
+        .map_err(|error| format!("failed to write semantic TypeScript usage input: {error}"))?;
+
+    let output = child.wait_with_output().map_err(|error| {
+        format!("failed to wait for semantic TypeScript usage scanner: {error}")
+    })?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "semantic TypeScript usage scanner failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let output: SemanticScannerOutput =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!(
+                "failed to parse semantic TypeScript usage scanner output: {error}\nstdout:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })?;
+    Ok(output.references)
 }
 
 fn classify_usage(line: &str, column: usize, width: usize) -> (UsageStrength, String) {
@@ -449,6 +546,11 @@ fn classify_usage(line: &str, column: usize, width: usize) -> (UsageStrength, St
     )
 }
 
+fn line_at(file: &TypeScriptSourceFile, line: u32) -> Option<&str> {
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    file.contents.lines().nth(index)
+}
+
 fn add_import_only_usages(
     file: &TypeScriptSourceFile,
     accessors: &[EndpointAccessor],
@@ -497,6 +599,9 @@ fn import_aliases(file: &TypeScriptSourceFile) -> BTreeMap<String, Vec<String>> 
         if !trimmed.starts_with("import ") || !trimmed.contains(" from ") {
             continue;
         }
+        if trimmed.starts_with("import type ") {
+            continue;
+        }
         let Some(start) = trimmed.find('{') else {
             continue;
         };
@@ -524,27 +629,6 @@ fn import_aliases(file: &TypeScriptSourceFile) -> BTreeMap<String, Vec<String>> 
     }
 
     aliases
-}
-
-fn match_indices(line: &str, needle: &str) -> Vec<usize> {
-    let mut indices = Vec::new();
-    let mut offset = 0;
-
-    while let Some(index) = line[offset..].find(needle) {
-        let index = offset + index;
-        let before = index
-            .checked_sub(1)
-            .and_then(|index| line.as_bytes().get(index));
-        let after = line.as_bytes().get(index + needle.len());
-        if before.is_none_or(|byte| !is_identifier_byte(*byte))
-            && after.is_none_or(|byte| !is_identifier_byte(*byte))
-        {
-            indices.push(index);
-        }
-        offset = index + needle.len();
-    }
-
-    indices
 }
 
 fn diagnostics_for_usage(
@@ -601,10 +685,6 @@ fn is_identifier(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
-}
-
-const fn is_identifier_byte(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]
@@ -790,6 +870,118 @@ const program = apiUsers.getUser({ id }).pipe(Effect.retry({ times: 1 }))
             usage.accessor_path == ["users", "listUsers"]
                 && usage.reason.contains("imported without a strong")
         }));
+    }
+
+    #[test]
+    fn effect_usage_scanner_resolves_semantic_aliases_and_reexports() {
+        let get_user = Endpoint::new(HttpMethod::Get, "/users/{id}")
+            .named(["server", "users", "get_user"])
+            .ts_path(["users", "getUser"]);
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![get_user.into_ir()],
+            ..ApiContract::default()
+        };
+
+        let index = scan_effect_usages(
+            &contract,
+            &[
+                TypeScriptSourceFile {
+                    path: "client/api.ts".to_owned(),
+                    contents: r#"
+export { users as apiUsers } from "@workspace/server-api"
+"#
+                    .to_owned(),
+                },
+                TypeScriptSourceFile {
+                    path: "client/use-api.ts".to_owned(),
+                    contents: r#"
+import { apiUsers } from "./api.js"
+import { users as directUsers } from "@workspace/server-api"
+
+const unrelated = { getUser: () => "not an endpoint" }
+const { getUser } = apiUsers
+const wrapped = directUsers.getUser
+
+export const program = Effect.gen(function* () {
+  yield* getUser({ id: "1" })
+  return wrapped({ id: "2" })
+})
+
+unrelated.getUser()
+"#
+                    .to_owned(),
+                },
+            ],
+        );
+
+        let summary = index
+            .endpoints
+            .iter()
+            .find(|summary| summary.accessor_path == ["users", "getUser"])
+            .expect("get user summary");
+
+        assert_eq!(summary.strong, 2);
+        assert_eq!(summary.weak, 1);
+        assert_eq!(summary.invalid, 0);
+        assert_eq!(summary.unknown, 0);
+        assert_eq!(index.usages.len(), 3);
+        assert!(index
+            .usages
+            .iter()
+            .any(|usage| usage.file == "client/use-api.ts"
+                && usage.source.start_line == 10
+                && usage.strength == UsageStrength::Strong));
+        assert!(index
+            .usages
+            .iter()
+            .any(|usage| usage.file == "client/use-api.ts"
+                && usage.source.start_line == 11
+                && usage.strength == UsageStrength::Strong));
+        assert!(!index
+            .usages
+            .iter()
+            .any(|usage| usage.source.start_line == 14));
+    }
+
+    #[test]
+    fn effect_usage_scanner_ignores_type_only_and_unrelated_property_names() {
+        let get_user = Endpoint::new(HttpMethod::Get, "/users/{id}")
+            .named(["server", "users", "get_user"])
+            .ts_path(["users", "getUser"]);
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![get_user.into_ir()],
+            ..ApiContract::default()
+        };
+
+        let index = scan_effect_usages(
+            &contract,
+            &[TypeScriptSourceFile {
+                path: "client/use-api.ts".to_owned(),
+                contents: r#"
+import type { users } from "@workspace/server-api"
+
+type Getter = typeof users.getUser
+const unrelated = { getUser: () => "not an endpoint" }
+
+unrelated.getUser()
+"#
+                .to_owned(),
+            }],
+        );
+
+        let summary = index
+            .endpoints
+            .iter()
+            .find(|summary| summary.accessor_path == ["users", "getUser"])
+            .expect("get user summary");
+
+        assert_eq!(summary.strong, 0);
+        assert_eq!(summary.weak, 0);
+        assert_eq!(summary.invalid, 0);
+        assert_eq!(summary.unknown, 0);
+        assert!(index.usages.is_empty());
     }
 
     #[test]
