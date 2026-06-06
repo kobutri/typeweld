@@ -2,7 +2,7 @@ import { Effect, Schema, Stream } from "./compat.js"
 
 export type HttpMethod = "DELETE" | "GET" | "PATCH" | "POST" | "PUT"
 
-export type RequestValue = string | number | boolean | null | undefined
+export type RequestValue = string | number | bigint | boolean | null | undefined
 
 export interface FetchClientConfig {
   readonly baseUrl: string
@@ -477,8 +477,11 @@ const encodeBody = (body: unknown): BodyInit | undefined => {
   if (typeof body === "string" || body instanceof FormData || body instanceof Blob) {
     return body
   }
-  return JSON.stringify(body)
+  return JSON.stringify(body, encodeJsonValue)
 }
+
+const encodeJsonValue = (_key: string, value: unknown): unknown =>
+  typeof value === "bigint" ? value.toString() : value
 
 const makeTimeoutSignal = (
   timeoutMs: number | undefined,

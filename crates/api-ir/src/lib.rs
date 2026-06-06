@@ -384,8 +384,19 @@ pub enum TypeShape {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Primitive {
     Bool,
+    I8,
+    U8,
+    I16,
+    U16,
     I32,
+    U32,
     I64,
+    U64,
+    I128,
+    U128,
+    Usize,
+    Isize,
+    F32,
     F64,
     String,
 }

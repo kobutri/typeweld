@@ -433,7 +433,7 @@ Acceptance criteria:
 
 Upgrade checklist: [`docs/effect-beta-upgrade-checklist.md`](effect-beta-upgrade-checklist.md).
 
-### D1. Fix primitive and integer wire mappings
+### D1. Fix primitive and integer wire mappings [done]
 
 Goal: avoid unsafe JavaScript numbers.
 

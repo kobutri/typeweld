@@ -708,8 +708,19 @@ macro_rules! primitive_api_type {
 }
 
 primitive_api_type!(bool, "bool", Primitive::Bool);
+primitive_api_type!(i8, "i8", Primitive::I8);
+primitive_api_type!(u8, "u8", Primitive::U8);
+primitive_api_type!(i16, "i16", Primitive::I16);
+primitive_api_type!(u16, "u16", Primitive::U16);
 primitive_api_type!(i32, "i32", Primitive::I32);
+primitive_api_type!(u32, "u32", Primitive::U32);
 primitive_api_type!(i64, "i64", Primitive::I64);
+primitive_api_type!(u64, "u64", Primitive::U64);
+primitive_api_type!(i128, "i128", Primitive::I128);
+primitive_api_type!(u128, "u128", Primitive::U128);
+primitive_api_type!(usize, "usize", Primitive::Usize);
+primitive_api_type!(isize, "isize", Primitive::Isize);
+primitive_api_type!(f32, "f32", Primitive::F32);
 primitive_api_type!(f64, "f64", Primitive::F64);
 primitive_api_type!(String, "String", Primitive::String);
 
@@ -723,7 +734,9 @@ pub enum IntegerEncodingPolicy {
 #[must_use]
 pub const fn integer_policy_for(rust_name: &str) -> IntegerEncodingPolicy {
     match rust_name.as_bytes() {
-        b"i64" | b"u64" | b"usize" | b"isize" => IntegerEncodingPolicy::StringEncoded,
+        b"i64" | b"u64" | b"i128" | b"u128" | b"usize" | b"isize" => {
+            IntegerEncodingPolicy::StringEncoded
+        }
         _ => IntegerEncodingPolicy::SafeNumber,
     }
 }
@@ -1130,6 +1143,15 @@ mod tests {
             integer_policy_for("i64"),
             IntegerEncodingPolicy::StringEncoded
         );
+        assert_eq!(
+            integer_policy_for("i128"),
+            IntegerEncodingPolicy::StringEncoded
+        );
+        assert_eq!(
+            integer_policy_for("usize"),
+            IntegerEncodingPolicy::StringEncoded
+        );
         assert_eq!(integer_policy_for("i32"), IntegerEncodingPolicy::SafeNumber);
+        assert_eq!(integer_policy_for("u32"), IntegerEncodingPolicy::SafeNumber);
     }
 }

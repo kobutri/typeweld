@@ -142,8 +142,7 @@ Defaults:
 | `String` | `string` | `string` |
 | `bool` | `boolean` | `boolean` |
 | `i8`, `i16`, `i32`, `u8`, `u16`, `u32` | `number` | `number` |
-| `usize`, `isize` | `number` | `number` |
-| `i64`, `u64`, `i128`, `u128` | `string` | branded string |
+| `i64`, `u64`, `i128`, `u128`, `usize`, `isize` | `string` | `bigint` |
 | `uuid::Uuid` | `string` | branded string |
 | `chrono::DateTime<Utc>` | `string` | branded ISO string initially |
 | `rust_decimal::Decimal` | `string` | branded decimal string initially |

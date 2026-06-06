@@ -15,6 +15,38 @@ use serde::Serialize;
 pub const EFFECT_VERSION: &str = "4.0.0-beta.78";
 const EFFECT_COMPAT_IMPORT: &str = "@rust-ts-integration/effect-runtime/compat";
 
+/// Rendering policy for generated Effect v4 packages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectRenderOptions {
+    pub unsafe_integer_encoding: UnsafeIntegerEncoding,
+}
+
+impl EffectRenderOptions {
+    #[must_use]
+    pub const fn with_unsafe_integer_encoding(
+        mut self,
+        unsafe_integer_encoding: UnsafeIntegerEncoding,
+    ) -> Self {
+        self.unsafe_integer_encoding = unsafe_integer_encoding;
+        self
+    }
+}
+
+impl Default for EffectRenderOptions {
+    fn default() -> Self {
+        Self {
+            unsafe_integer_encoding: UnsafeIntegerEncoding::StringEncoded,
+        }
+    }
+}
+
+/// Encoding policy for Rust integer widths that cannot round-trip safely as JavaScript numbers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsafeIntegerEncoding {
+    StringEncoded,
+    Number,
+}
+
 #[must_use]
 pub fn render_package_banner(contract: &ApiContract) -> String {
     format!("// Generated API package for {}\n", contract.package_name)
@@ -23,25 +55,55 @@ pub fn render_package_banner(contract: &ApiContract) -> String {
 /// Renders generated Effect Schema declarations for every exported API type.
 #[must_use]
 pub fn render_schemas(contract: &ApiContract) -> String {
-    render_tracked_schemas(contract).file.contents
+    render_schemas_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders generated Effect Schema declarations with explicit rendering options.
+#[must_use]
+pub fn render_schemas_with_options(
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) -> String {
+    render_tracked_schemas(contract, options).file.contents
 }
 
 /// Renders schema-backed domain and generated client errors.
 #[must_use]
 pub fn render_errors(contract: &ApiContract) -> String {
-    render_tracked_errors(contract).file.contents
+    render_errors_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders schema-backed domain and generated client errors with explicit rendering options.
+#[must_use]
+pub fn render_errors_with_options(contract: &ApiContract, options: &EffectRenderOptions) -> String {
+    render_tracked_errors(contract, options).file.contents
 }
 
 /// Renders generated endpoint accessors and route metadata.
 #[must_use]
 pub fn render_endpoints(contract: &ApiContract) -> String {
-    render_tracked_endpoints(contract).file.contents
+    render_endpoints_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders generated endpoint accessors and route metadata with explicit rendering options.
+#[must_use]
+pub fn render_endpoints_with_options(
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) -> String {
+    render_tracked_endpoints(contract, options).file.contents
 }
 
 /// Renders the generated Effect service tag, service interface, and layer helpers.
 #[must_use]
 pub fn render_layer(contract: &ApiContract) -> String {
-    render_tracked_layer(contract).file.contents
+    render_layer_with_options(contract, &EffectRenderOptions::default())
+}
+
+/// Renders the generated Effect service tag, service interface, and layer helpers with explicit options.
+#[must_use]
+pub fn render_layer_with_options(contract: &ApiContract, options: &EffectRenderOptions) -> String {
+    render_tracked_layer(contract, options).file.contents
 }
 
 /// In-memory representation of the hidden generated TypeScript package.
@@ -162,11 +224,21 @@ fn write_effect_compat_import(writer: &mut TrackedWriter, imports: &str) {
 /// Builds the generated package files and resolver metadata without writing them.
 #[must_use]
 pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> GeneratedPackage {
+    render_generated_package_with_options(contract, target_dir, &EffectRenderOptions::default())
+}
+
+/// Builds the generated package files and resolver metadata with explicit rendering options.
+#[must_use]
+pub fn render_generated_package_with_options(
+    contract: &ApiContract,
+    target_dir: &Path,
+    options: &EffectRenderOptions,
+) -> GeneratedPackage {
     let package_dir = generated_package_dir(target_dir, &contract.package_name);
-    let schemas = render_tracked_schemas(contract);
-    let errors = render_tracked_errors(contract);
-    let endpoints = render_tracked_endpoints(contract);
-    let layer = render_tracked_layer(contract);
+    let schemas = render_tracked_schemas(contract, options);
+    let errors = render_tracked_errors(contract, options);
+    let endpoints = render_tracked_endpoints(contract, options);
+    let layer = render_tracked_layer(contract, options);
     let mut marks = Vec::new();
     marks.extend(schemas.marks.clone());
     marks.extend(errors.marks.clone());
@@ -217,7 +289,17 @@ pub fn render_generated_package(contract: &ApiContract, target_dir: &Path) -> Ge
 /// Renders the cross-language symbol graph consumed by `api-ls` and build lints.
 #[must_use]
 pub fn render_symbol_graph(contract: &ApiContract, package: &GeneratedPackage) -> String {
-    let graph = SymbolGraph::from_generated_package(contract, package);
+    render_symbol_graph_with_options(contract, package, &EffectRenderOptions::default())
+}
+
+/// Renders the cross-language symbol graph with explicit rendering options.
+#[must_use]
+pub fn render_symbol_graph_with_options(
+    contract: &ApiContract,
+    package: &GeneratedPackage,
+    options: &EffectRenderOptions,
+) -> String {
+    let graph = SymbolGraph::from_generated_package(contract, package, options);
     serde_json::to_string_pretty(&graph).expect("symbol graph serialization should not fail")
 }
 
@@ -228,11 +310,15 @@ struct SymbolGraph {
 }
 
 impl SymbolGraph {
-    fn from_generated_package(contract: &ApiContract, package: &GeneratedPackage) -> Self {
+    fn from_generated_package(
+        contract: &ApiContract,
+        package: &GeneratedPackage,
+        options: &EffectRenderOptions,
+    ) -> Self {
         let mut symbols = Vec::new();
 
         for endpoint in &contract.endpoints {
-            symbols.push(endpoint_symbol(contract, package, endpoint));
+            symbols.push(endpoint_symbol(contract, package, endpoint, options));
             for field in endpoint.request.path_params.iter() {
                 symbols.push(field_symbol(
                     "routeParam",
@@ -354,6 +440,7 @@ fn endpoint_symbol(
     contract: &ApiContract,
     package: &GeneratedPackage,
     endpoint: &Endpoint,
+    options: &EffectRenderOptions,
 ) -> LinkedSymbol {
     let function_name = endpoint_function_name(endpoint);
     LinkedSymbol {
@@ -364,7 +451,7 @@ fn endpoint_symbol(
         metadata: SymbolMetadata {
             method: Some(endpoint.method.as_str().to_owned()),
             route: Some(endpoint.route.0.clone()),
-            effect_signature: Some(render_endpoint_return_type(endpoint, "ServerApi")),
+            effect_signature: Some(render_endpoint_return_type(endpoint, "ServerApi", options)),
             errors: endpoint
                 .errors
                 .iter()
@@ -728,7 +815,7 @@ pub fn render_tsconfig_paths(paths: &TsconfigPaths) -> String {
     )
 }
 
-fn render_tracked_schemas(contract: &ApiContract) -> TrackedFile {
+fn render_tracked_schemas(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
     let mut writer = TrackedWriter::new("schemas.ts");
     writer.push(&render_package_banner(contract));
     write_effect_compat_import(&mut writer, "Schema");
@@ -742,18 +829,22 @@ fn render_tracked_schemas(contract: &ApiContract) -> TrackedFile {
     });
 
     for type_def in types {
-        write_tracked_type_def(&mut writer, type_def);
+        write_tracked_type_def(&mut writer, type_def, options);
         writer.push("\n");
     }
 
     writer.into_tracked_file()
 }
 
-fn write_tracked_type_def(writer: &mut TrackedWriter, type_def: &TypeDef) {
+fn write_tracked_type_def(
+    writer: &mut TrackedWriter,
+    type_def: &TypeDef,
+    options: &EffectRenderOptions,
+) {
     writer.push("export const ");
     writer.mark(&type_def.id, "type", &type_def.ts_name);
     writer.push(" = ");
-    write_tracked_type_shape(writer, &type_def.shape, type_def, 0);
+    write_tracked_type_shape(writer, &type_def.shape, type_def, 0, options);
     writer.push("\nexport type ");
     writer.mark(&type_def.id, "type", &type_def.ts_name);
     writer.push(" = Schema.Schema.Type<typeof ");
@@ -774,21 +865,29 @@ fn write_tracked_type_shape(
     shape: &TypeShape,
     owner: &TypeDef,
     indent: usize,
+    options: &EffectRenderOptions,
 ) {
     match shape {
-        TypeShape::Struct(shape) => write_tracked_struct(writer, shape, indent),
-        TypeShape::Enum(shape) => write_tracked_enum(writer, shape, indent),
+        TypeShape::Struct(shape) => write_tracked_struct(writer, shape, indent, options),
+        TypeShape::Enum(shape) => write_tracked_enum(writer, shape, indent, options),
         TypeShape::Primitive(_)
         | TypeShape::Newtype(_)
         | TypeShape::Tuple(_)
         | TypeShape::List(_)
         | TypeShape::Map { .. }
         | TypeShape::Option(_)
-        | TypeShape::External(_) => writer.push(&render_type_shape(shape, owner)),
+        | TypeShape::External(_) => {
+            writer.push(&render_type_shape_with_options(shape, owner, options))
+        }
     }
 }
 
-fn write_tracked_struct(writer: &mut TrackedWriter, shape: &StructShape, indent: usize) {
+fn write_tracked_struct(
+    writer: &mut TrackedWriter,
+    shape: &StructShape,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
     if shape.fields.is_empty() {
         writer.push("Schema.Struct({})");
         return;
@@ -799,14 +898,19 @@ fn write_tracked_struct(writer: &mut TrackedWriter, shape: &StructShape, indent:
         writer.push(&render_indent(indent + 2));
         writer.mark(&field.id, "field", &field.ts_name);
         writer.push(": ");
-        writer.push(&render_field_schema(field));
+        writer.push(&render_field_schema(field, options));
         writer.push(",\n");
     }
     writer.push(&render_indent(indent));
     writer.push("})");
 }
 
-fn write_tracked_enum(writer: &mut TrackedWriter, shape: &EnumShape, indent: usize) {
+fn write_tracked_enum(
+    writer: &mut TrackedWriter,
+    shape: &EnumShape,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
     if shape.variants.is_empty() {
         writer.push("Schema.Never");
         return;
@@ -817,12 +921,17 @@ fn write_tracked_enum(writer: &mut TrackedWriter, shape: &EnumShape, indent: usi
         if index > 0 {
             writer.push(", ");
         }
-        write_tracked_enum_variant(writer, variant, indent);
+        write_tracked_enum_variant(writer, variant, indent, options);
     }
     writer.push("])");
 }
 
-fn write_tracked_enum_variant(writer: &mut TrackedWriter, variant: &EnumVariant, indent: usize) {
+fn write_tracked_enum_variant(
+    writer: &mut TrackedWriter,
+    variant: &EnumVariant,
+    indent: usize,
+    options: &EffectRenderOptions,
+) {
     if variant.fields.is_empty() {
         writer.push("Schema.Struct({ _tag: Schema.Literal(\"");
         writer.mark(&variant.id, "enumVariant", &variant.wire_name);
@@ -839,14 +948,14 @@ fn write_tracked_enum_variant(writer: &mut TrackedWriter, variant: &EnumVariant,
         writer.push(&render_indent(indent + 2));
         writer.mark(&field.id, "field", &field.ts_name);
         writer.push(": ");
-        writer.push(&render_field_schema(field));
+        writer.push(&render_field_schema(field, options));
         writer.push(",\n");
     }
     writer.push(&render_indent(indent));
     writer.push("})");
 }
 
-fn render_tracked_endpoints(contract: &ApiContract) -> TrackedFile {
+fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
     let mut writer = TrackedWriter::new("endpoints.ts");
     writer.push(&render_package_banner(contract));
     if contract_has_stream_endpoints(contract) {
@@ -901,7 +1010,7 @@ fn render_tracked_endpoints(contract: &ApiContract) -> TrackedFile {
             namespace = Some(current_namespace);
         }
 
-        write_tracked_endpoint(&mut writer, endpoint);
+        write_tracked_endpoint(&mut writer, endpoint, options);
     }
 
     if namespace.is_some() {
@@ -911,12 +1020,16 @@ fn render_tracked_endpoints(contract: &ApiContract) -> TrackedFile {
     writer.into_tracked_file()
 }
 
-fn write_tracked_endpoint(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+fn write_tracked_endpoint(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
     let function_name = endpoint_function_name(endpoint);
     let args_name = endpoint_args_name(endpoint);
     let namespace = endpoint_namespace(endpoint);
 
-    write_tracked_endpoint_args(writer, endpoint);
+    write_tracked_endpoint_args(writer, endpoint, options);
     writer.push("\n  export const ");
     writer.mark(&endpoint.id, "endpoint", &format!("{function_name}Route"));
     writer.push(" = {\n    method: ");
@@ -930,7 +1043,7 @@ fn write_tracked_endpoint(writer: &mut TrackedWriter, endpoint: &Endpoint) {
     writer.push(" = (\n    args: ");
     writer.push(&args_name);
     writer.push("\n  ): ");
-    writer.push(&render_endpoint_return_type(endpoint, "ServerApi"));
+    writer.push(&render_endpoint_return_type(endpoint, "ServerApi", options));
     writer.push(" =>\n    ServerApi.use((api) => api.");
     writer.push(&namespace);
     writer.push(".");
@@ -938,7 +1051,11 @@ fn write_tracked_endpoint(writer: &mut TrackedWriter, endpoint: &Endpoint) {
     writer.push("(args))\n\n");
 }
 
-fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+fn write_tracked_endpoint_args(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
     let args_name = endpoint_args_name(endpoint);
     let mut has_fields = false;
     writer.push("  export interface ");
@@ -963,7 +1080,7 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
             writer.push("?");
         }
         writer.push(": ");
-        writer.push(&render_endpoint_arg_field_type(field));
+        writer.push(&render_endpoint_arg_field_type(field, options));
         writer.push(";\n");
     }
     for field in &endpoint.request.query_params {
@@ -977,13 +1094,13 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
             writer.push("?");
         }
         writer.push(": ");
-        writer.push(&render_endpoint_arg_field_type(field));
+        writer.push(&render_endpoint_arg_field_type(field, options));
         writer.push(";\n");
     }
     if let Some(body) = &endpoint.request.body {
         has_fields = true;
         writer.push("    readonly body: ");
-        writer.push(&render_ts_type_ref(body));
+        writer.push(&render_ts_type_ref(body, options));
         writer.push(";\n");
     }
     if !has_fields {
@@ -993,7 +1110,7 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
     writer.push("  }\n");
 }
 
-fn render_tracked_errors(contract: &ApiContract) -> TrackedFile {
+fn render_tracked_errors(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
     let mut writer = TrackedWriter::new("errors.ts");
     writer.push(&render_package_banner(contract));
     write_effect_compat_import(&mut writer, "Schema");
@@ -1022,15 +1139,19 @@ fn render_tracked_errors(contract: &ApiContract) -> TrackedFile {
 
     for error in errors {
         writer.push("\n");
-        write_tracked_error_def(&mut writer, error);
+        write_tracked_error_def(&mut writer, error, options);
     }
 
     writer.into_tracked_file()
 }
 
-fn write_tracked_error_def(writer: &mut TrackedWriter, error: &ErrorDef) {
+fn write_tracked_error_def(
+    writer: &mut TrackedWriter,
+    error: &ErrorDef,
+    options: &EffectRenderOptions,
+) {
     for variant in &error.variants {
-        write_tracked_error_variant(writer, error, variant);
+        write_tracked_error_variant(writer, error, variant, options);
         writer.push("\n");
     }
 
@@ -1065,11 +1186,12 @@ fn write_tracked_error_variant(
     writer: &mut TrackedWriter,
     error: &ErrorDef,
     variant: &ErrorVariant,
+    options: &EffectRenderOptions,
 ) {
     let fields = variant
         .fields
         .iter()
-        .map(|field| (field, render_field_schema(field)))
+        .map(|field| (field, render_field_schema(field, options)))
         .collect::<Vec<_>>();
     let class_name = error_variant_class_name(error, variant);
     writer.push("export class ");
@@ -1188,14 +1310,17 @@ fn write_tracked_error_symbol_metadata(writer: &mut TrackedWriter, error: &Error
     writer.push("} as const\n");
 }
 
-fn render_tracked_layer(contract: &ApiContract) -> TrackedFile {
+fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
     let mut writer = TrackedWriter::new("layer.ts");
     writer.push(&render_package_banner(contract));
+    let mut effect_imports = vec!["Context", "Layer", "Effect"];
     if contract_has_stream_endpoints(contract) {
-        write_effect_compat_import(&mut writer, "Context, Layer, Effect, Stream");
-    } else {
-        write_effect_compat_import(&mut writer, "Context, Layer, Effect");
+        effect_imports.push("Stream");
     }
+    if contract_has_primitive_success(contract) {
+        effect_imports.push("Schema");
+    }
+    write_effect_compat_import(&mut writer, &effect_imports.join(", "));
     let runtime_client_imports = collect_runtime_client_imports(contract);
     if !runtime_client_imports.is_empty() {
         writer.push("import { ");
@@ -1271,11 +1396,11 @@ fn render_tracked_layer(contract: &ApiContract) -> TrackedFile {
     ));
 
     writer.push("export namespace ServerApi {\n");
-    write_tracked_service_interface(&mut writer, contract);
+    write_tracked_service_interface(&mut writer, contract, options);
     writer.push("\n");
     writer.push("  export const layer = (config: ServerApiConfig): Layer.Layer<ServerApi> => {\n");
     writer.push("    const service: Service = {\n");
-    write_tracked_fetch_service(&mut writer, contract);
+    write_tracked_fetch_service(&mut writer, contract, options);
     writer.push("    }\n");
     writer.push("    return Layer.succeed(ServerApi, ServerApi.of(service))\n");
     writer.push("  }\n\n");
@@ -1286,7 +1411,11 @@ fn render_tracked_layer(contract: &ApiContract) -> TrackedFile {
     writer.into_tracked_file()
 }
 
-fn write_tracked_service_interface(writer: &mut TrackedWriter, contract: &ApiContract) {
+fn write_tracked_service_interface(
+    writer: &mut TrackedWriter,
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) {
     writer.push("  export interface Service {\n");
     let grouped = group_endpoints_by_namespace(contract);
 
@@ -1302,7 +1431,7 @@ fn write_tracked_service_interface(writer: &mut TrackedWriter, contract: &ApiCon
             writer.push(".");
             writer.push(&endpoint_args_name(endpoint));
             writer.push(") => ");
-            writer.push(&render_endpoint_return_type(endpoint, "never"));
+            writer.push(&render_endpoint_return_type(endpoint, "never", options));
             writer.push("\n");
         }
         writer.push("    }\n");
@@ -1311,7 +1440,11 @@ fn write_tracked_service_interface(writer: &mut TrackedWriter, contract: &ApiCon
     writer.push("  }\n");
 }
 
-fn write_tracked_fetch_service(writer: &mut TrackedWriter, contract: &ApiContract) {
+fn write_tracked_fetch_service(
+    writer: &mut TrackedWriter,
+    contract: &ApiContract,
+    options: &EffectRenderOptions,
+) {
     let grouped = group_endpoints_by_namespace(contract);
 
     for (namespace, endpoints) in grouped {
@@ -1319,20 +1452,24 @@ fn write_tracked_fetch_service(writer: &mut TrackedWriter, contract: &ApiContrac
         writer.push(&namespace);
         writer.push(": {\n");
         for endpoint in endpoints {
-            write_tracked_fetch_service_method(writer, endpoint);
+            write_tracked_fetch_service_method(writer, endpoint, options);
         }
         writer.push("      },\n");
     }
 }
 
-fn write_tracked_fetch_service_method(writer: &mut TrackedWriter, endpoint: &Endpoint) {
+fn write_tracked_fetch_service_method(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
     let function_name = endpoint_function_name(endpoint);
     let namespace = endpoint_namespace(endpoint);
     let args_name = endpoint_args_name(endpoint);
     let helper = render_runtime_client_helper(endpoint);
-    let success_decoder = render_success_decoder(&endpoint.response, helper);
+    let success_decoder = render_success_decoder(&endpoint.response, helper, options);
     let error_decoder = render_domain_error_decoder(endpoint, helper);
-    let success = render_response_type(&endpoint.response);
+    let success = render_response_type(&endpoint.response, options);
     let domain_error = render_endpoint_domain_error_type(endpoint);
 
     writer.push("        ");
@@ -1365,8 +1502,8 @@ fn write_tracked_fetch_service_method(writer: &mut TrackedWriter, endpoint: &End
     writer.push(",\n        }),\n");
 }
 
-fn render_endpoint_arg_field_type(field: &Field) -> String {
-    let mut field_type = render_ts_type_ref(&field.type_ref);
+fn render_endpoint_arg_field_type(field: &Field, options: &EffectRenderOptions) -> String {
+    let mut field_type = render_ts_type_ref(&field.type_ref, options);
     if matches!(
         field.optionality,
         Optionality::Nullable | Optionality::OptionalNullable
@@ -1409,6 +1546,18 @@ fn contract_has_stream_endpoints(contract: &ApiContract) -> bool {
         .endpoints
         .iter()
         .any(|endpoint| matches!(endpoint.response, ResponseShape::Stream(_)))
+}
+
+fn contract_has_primitive_success(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| match &endpoint.response {
+            ResponseShape::Empty => false,
+            ResponseShape::Json(type_ref)
+            | ResponseShape::Created(type_ref)
+            | ResponseShape::Stream(type_ref) => primitive_from_type_ref(type_ref).is_some(),
+        })
 }
 
 fn collect_service_schema_imports(contract: &ApiContract) -> BTreeSet<String> {
@@ -1502,17 +1651,21 @@ fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<S
     imports
 }
 
-fn render_response_type(response: &ResponseShape) -> String {
+fn render_response_type(response: &ResponseShape, options: &EffectRenderOptions) -> String {
     match response {
         ResponseShape::Empty => "void".to_owned(),
         ResponseShape::Json(type_ref)
         | ResponseShape::Created(type_ref)
-        | ResponseShape::Stream(type_ref) => render_ts_type_ref(type_ref),
+        | ResponseShape::Stream(type_ref) => render_ts_type_ref(type_ref, options),
     }
 }
 
-fn render_endpoint_return_type(endpoint: &Endpoint, requirements: &str) -> String {
-    let success = render_response_type(&endpoint.response);
+fn render_endpoint_return_type(
+    endpoint: &Endpoint,
+    requirements: &str,
+    options: &EffectRenderOptions,
+) -> String {
+    let success = render_response_type(&endpoint.response, options);
     let error = render_endpoint_error_type(endpoint);
 
     match &endpoint.response {
@@ -1548,11 +1701,17 @@ fn render_endpoint_domain_error_type(endpoint: &Endpoint) -> String {
     }
 }
 
-fn render_ts_type_ref(type_ref: &TypeRef) -> String {
+fn render_ts_type_ref(type_ref: &TypeRef, options: &EffectRenderOptions) -> String {
     match primitive_from_type_ref(type_ref) {
         Some(Primitive::Bool) => "boolean".to_owned(),
-        Some(Primitive::I32 | Primitive::I64 | Primitive::F64) => "number".to_owned(),
         Some(Primitive::String) => "string".to_owned(),
+        Some(primitive) if primitive_is_unsafe_integer(primitive) => {
+            match options.unsafe_integer_encoding {
+                UnsafeIntegerEncoding::StringEncoded => "bigint".to_owned(),
+                UnsafeIntegerEncoding::Number => "number".to_owned(),
+            }
+        }
+        Some(_) => "number".to_owned(),
         None => type_ref.name.clone(),
     }
 }
@@ -1601,13 +1760,20 @@ fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
     }
 }
 
-fn render_success_decoder(response: &ResponseShape, helper: &str) -> String {
+fn render_success_decoder(
+    response: &ResponseShape,
+    helper: &str,
+    options: &EffectRenderOptions,
+) -> String {
     match response {
         ResponseShape::Empty => "() => Effect.void",
         ResponseShape::Json(type_ref)
         | ResponseShape::Created(type_ref)
         | ResponseShape::Stream(type_ref) => {
-            return format!("(input) => {helper}.decode(input, {})", type_ref.name);
+            return format!(
+                "(input) => {helper}.decode(input, {})",
+                render_type_ref(type_ref, options)
+            );
         }
     }
     .to_owned()
@@ -1814,36 +1980,45 @@ fn error_variant_class_name(error: &ErrorDef, variant: &ErrorVariant) -> String 
     format!("{prefix}{}", variant.rust_name)
 }
 
+#[cfg(test)]
 fn render_type_shape(shape: &TypeShape, owner: &TypeDef) -> String {
+    render_type_shape_with_options(shape, owner, &EffectRenderOptions::default())
+}
+
+fn render_type_shape_with_options(
+    shape: &TypeShape,
+    owner: &TypeDef,
+    options: &EffectRenderOptions,
+) -> String {
     match shape {
-        TypeShape::Primitive(primitive) => render_primitive(*primitive).to_owned(),
-        TypeShape::Struct(shape) => render_struct(shape, 0),
-        TypeShape::Enum(shape) => render_enum(shape, 0),
+        TypeShape::Primitive(primitive) => render_primitive(*primitive, options).to_owned(),
+        TypeShape::Struct(shape) => render_struct(shape, 0, options),
+        TypeShape::Enum(shape) => render_enum(shape, 0, options),
         TypeShape::Newtype(inner) => format!(
             "{inner}.pipe(Schema.brand(\"{brand}\"))",
-            inner = render_type_ref(inner),
+            inner = render_type_ref(inner, options),
             brand = owner.rust_path.join("::")
         ),
         TypeShape::Tuple(items) => {
             let items = items
                 .iter()
-                .map(render_type_ref)
+                .map(|item| render_type_ref(item, options))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("Schema.Tuple([{items}])")
         }
-        TypeShape::List(item) => format!("Schema.Array({})", render_type_ref(item)),
+        TypeShape::List(item) => format!("Schema.Array({})", render_type_ref(item, options)),
         TypeShape::Map { key, value } => format!(
             "Schema.Record({}, {})",
-            render_type_ref(key),
-            render_type_ref(value)
+            render_type_ref(key, options),
+            render_type_ref(value, options)
         ),
-        TypeShape::Option(item) => format!("Schema.NullOr({})", render_type_ref(item)),
+        TypeShape::Option(item) => format!("Schema.NullOr({})", render_type_ref(item, options)),
         TypeShape::External(external) => render_external(external),
     }
 }
 
-fn render_struct(shape: &StructShape, indent: usize) -> String {
+fn render_struct(shape: &StructShape, indent: usize, options: &EffectRenderOptions) -> String {
     if shape.fields.is_empty() {
         return "Schema.Struct({})".to_owned();
     }
@@ -1853,7 +2028,7 @@ fn render_struct(shape: &StructShape, indent: usize) -> String {
         output.push_str(&render_indent(indent + 2));
         output.push_str(&field.ts_name);
         output.push_str(": ");
-        output.push_str(&render_field_schema(field));
+        output.push_str(&render_field_schema(field, options));
         output.push_str(",\n");
     }
     output.push_str(&render_indent(indent));
@@ -1861,7 +2036,7 @@ fn render_struct(shape: &StructShape, indent: usize) -> String {
     output
 }
 
-fn render_enum(shape: &EnumShape, indent: usize) -> String {
+fn render_enum(shape: &EnumShape, indent: usize, options: &EffectRenderOptions) -> String {
     if shape.variants.is_empty() {
         return "Schema.Never".to_owned();
     }
@@ -1869,19 +2044,23 @@ fn render_enum(shape: &EnumShape, indent: usize) -> String {
     let variants = shape
         .variants
         .iter()
-        .map(|variant| render_enum_variant(variant, indent))
+        .map(|variant| render_enum_variant(variant, indent, options))
         .collect::<Vec<_>>();
 
     format!("Schema.Union([{}])", variants.join(", "))
 }
 
-fn render_enum_variant(variant: &EnumVariant, indent: usize) -> String {
+fn render_enum_variant(
+    variant: &EnumVariant,
+    indent: usize,
+    options: &EffectRenderOptions,
+) -> String {
     let mut fields = vec![format!("_tag: Schema.Literal(\"{}\")", variant.wire_name)];
     fields.extend(
         variant
             .fields
             .iter()
-            .map(|field| format!("{}: {}", field.ts_name, render_field_schema(field))),
+            .map(|field| format!("{}: {}", field.ts_name, render_field_schema(field, options))),
     );
 
     if fields.len() == 1 {
@@ -1899,8 +2078,8 @@ fn render_enum_variant(variant: &EnumVariant, indent: usize) -> String {
     output
 }
 
-fn render_field_schema(field: &Field) -> String {
-    let schema = render_type_ref(&field.type_ref);
+fn render_field_schema(field: &Field, options: &EffectRenderOptions) -> String {
+    let schema = render_type_ref(&field.type_ref, options);
     match field.optionality {
         Optionality::Required => schema,
         Optionality::Optional => format!("Schema.optionalKey({schema})"),
@@ -1909,30 +2088,59 @@ fn render_field_schema(field: &Field) -> String {
     }
 }
 
-fn render_type_ref(type_ref: &TypeRef) -> String {
+fn render_type_ref(type_ref: &TypeRef, options: &EffectRenderOptions) -> String {
     match primitive_from_type_ref(type_ref) {
-        Some(primitive) => render_primitive(primitive).to_owned(),
+        Some(primitive) => render_primitive(primitive, options).to_owned(),
         None => type_ref.name.clone(),
     }
 }
 
-const fn render_primitive(primitive: Primitive) -> &'static str {
+fn render_primitive(primitive: Primitive, options: &EffectRenderOptions) -> &'static str {
     match primitive {
         Primitive::Bool => "Schema.Boolean",
-        Primitive::I32 | Primitive::I64 | Primitive::F64 => "Schema.Number",
         Primitive::String => "Schema.String",
+        primitive if primitive_is_unsafe_integer(primitive) => {
+            match options.unsafe_integer_encoding {
+                UnsafeIntegerEncoding::StringEncoded => "Schema.BigIntFromString",
+                UnsafeIntegerEncoding::Number => "Schema.Number",
+            }
+        }
+        _ => "Schema.Number",
     }
 }
 
 fn primitive_from_type_ref(type_ref: &TypeRef) -> Option<Primitive> {
     match type_ref.name.as_str() {
         "bool" | "Bool" | "boolean" => Some(Primitive::Bool),
+        "i8" | "I8" => Some(Primitive::I8),
+        "u8" | "U8" => Some(Primitive::U8),
+        "i16" | "I16" => Some(Primitive::I16),
+        "u16" | "U16" => Some(Primitive::U16),
         "i32" | "I32" => Some(Primitive::I32),
+        "u32" | "U32" => Some(Primitive::U32),
         "i64" | "I64" => Some(Primitive::I64),
+        "u64" | "U64" => Some(Primitive::U64),
+        "i128" | "I128" => Some(Primitive::I128),
+        "u128" | "U128" => Some(Primitive::U128),
+        "usize" | "Usize" => Some(Primitive::Usize),
+        "isize" | "Isize" => Some(Primitive::Isize),
+        "f32" | "F32" => Some(Primitive::F32),
         "f64" | "F64" | "number" => Some(Primitive::F64),
         "String" | "string" => Some(Primitive::String),
         _ => None,
     }
+}
+
+const fn primitive_is_unsafe_integer(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::I64
+            | Primitive::U64
+            | Primitive::I128
+            | Primitive::U128
+            | Primitive::Usize
+            | Primitive::Isize
+    )
 }
 
 fn render_external(external: &ExternalType) -> String {
@@ -2202,6 +2410,98 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             render_type_shape(&owner.shape, &owner),
             "Schema.NullOr(User)"
         );
+    }
+
+    #[test]
+    fn renders_integer_wire_mappings_and_unsafe_number_opt_in() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            types: vec![TypeDef {
+                id: symbol("type", &["Counters"]),
+                rust_path: vec!["server".to_owned(), "Counters".to_owned()],
+                rust_name: "Counters".to_owned(),
+                ts_name: "Counters".to_owned(),
+                shape: TypeShape::Struct(StructShape {
+                    fields: vec![
+                        field(
+                            "safe_i32",
+                            "safeI32",
+                            type_ref("i32"),
+                            Optionality::Required,
+                        ),
+                        field(
+                            "safe_u32",
+                            "safeU32",
+                            type_ref("u32"),
+                            Optionality::Required,
+                        ),
+                        field("float", "float", type_ref("f64"), Optionality::Required),
+                        field("id_i64", "idI64", type_ref("i64"), Optionality::Required),
+                        field("id_u64", "idU64", type_ref("u64"), Optionality::Required),
+                        field("id_i128", "idI128", type_ref("i128"), Optionality::Required),
+                        field("id_u128", "idU128", type_ref("u128"), Optionality::Required),
+                        field("index", "index", type_ref("usize"), Optionality::Required),
+                        field("offset", "offset", type_ref("isize"), Optionality::Required),
+                    ],
+                }),
+                source: source(),
+            }],
+            endpoints: vec![Endpoint {
+                id: symbol("endpoint", &["users", "get_count"]),
+                rust_path: vec![
+                    "server".to_owned(),
+                    "users".to_owned(),
+                    "get_count".to_owned(),
+                ],
+                rust_name: "get_count".to_owned(),
+                ts_path: vec!["users".to_owned(), "getCount".to_owned()],
+                route: RoutePattern("/counts/{id}".to_owned()),
+                method: HttpMethod::Get,
+                transport: Transport::UnaryHttp,
+                request: RequestShape {
+                    path_params: vec![field("id", "id", type_ref("i64"), Optionality::Required)],
+                    query_params: Vec::new(),
+                    body: None,
+                },
+                response: ResponseShape::Json(type_ref("i64")),
+                errors: Vec::new(),
+                source: source(),
+                allow_unused: false,
+            }],
+            ..ApiContract::default()
+        };
+
+        let schemas = render_schemas(&contract);
+        assert!(schemas.contains("safeI32: Schema.Number"));
+        assert!(schemas.contains("safeU32: Schema.Number"));
+        assert!(schemas.contains("float: Schema.Number"));
+        assert!(schemas.contains("idI64: Schema.BigIntFromString"));
+        assert!(schemas.contains("idU64: Schema.BigIntFromString"));
+        assert!(schemas.contains("idI128: Schema.BigIntFromString"));
+        assert!(schemas.contains("idU128: Schema.BigIntFromString"));
+        assert!(schemas.contains("index: Schema.BigIntFromString"));
+        assert!(schemas.contains("offset: Schema.BigIntFromString"));
+
+        let endpoints = render_endpoints(&contract);
+        assert!(endpoints.contains("readonly id: bigint;"));
+        assert!(endpoints.contains("): Effect.Effect<bigint, ApiClientError, ServerApi> =>"));
+
+        let layer = render_layer(&contract);
+        assert!(layer.contains(
+            "import { Context, Layer, Effect, Schema } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
+        assert!(layer.contains(
+            "decodeSuccess: (input) => makeUnaryHttpClient.decode(input, Schema.BigIntFromString)"
+        ));
+
+        let unsafe_number_options = EffectRenderOptions::default()
+            .with_unsafe_integer_encoding(UnsafeIntegerEncoding::Number);
+        let unsafe_schemas = render_schemas_with_options(&contract, &unsafe_number_options);
+        assert!(unsafe_schemas.contains("idI64: Schema.Number"));
+        assert!(!unsafe_schemas.contains("Schema.BigIntFromString"));
+        let unsafe_endpoints = render_endpoints_with_options(&contract, &unsafe_number_options);
+        assert!(unsafe_endpoints.contains("readonly id: number;"));
+        assert!(unsafe_endpoints.contains("): Effect.Effect<number, ApiClientError, ServerApi> =>"));
     }
 
     #[test]
@@ -2789,7 +3089,7 @@ export namespace users {
     ServerApi.use((api) => api.users.createUser(args))
 
   export interface GetUserArgs {
-    readonly id: number;
+    readonly id: bigint;
   }
 
   export const getUserRoute = {
