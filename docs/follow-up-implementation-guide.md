@@ -918,7 +918,7 @@ Acceptance criteria:
 - Golden tests fail on unintended generator changes.
 - Intentional generator changes require explicit golden updates.
 
-### J3. Add LSP integration tests
+### J3. Add LSP integration tests [done]
 
 Goal: prove editor-facing behavior without manual testing.
 
