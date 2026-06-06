@@ -53,6 +53,19 @@ pub struct EffectUsageDiagnostic {
     pub source: SourceRange,
 }
 
+/// Configurable diagnostic-code handling for Effect-aware usage classification.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EffectUsageDiagnosticCodeRules {
+    pub invalid: BTreeSet<String>,
+    pub unknown: BTreeSet<String>,
+}
+
+/// Options for semantic TypeScript/Effect usage scanning.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EffectUsageScanConfig {
+    pub diagnostic_codes: EffectUsageDiagnosticCodeRules,
+}
+
 /// Usage strength used by unused endpoint lints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum UsageStrength {
@@ -235,26 +248,39 @@ pub fn try_scan_effect_usages_with_diagnostics(
     files: &[TypeScriptSourceFile],
     diagnostics: &[EffectUsageDiagnostic],
 ) -> Result<EffectUsageIndex, String> {
+    try_scan_effect_usages_with_config(
+        contract,
+        files,
+        diagnostics,
+        &EffectUsageScanConfig::default(),
+    )
+}
+
+pub fn try_scan_effect_usages_with_config(
+    contract: &ApiContract,
+    files: &[TypeScriptSourceFile],
+    diagnostics: &[EffectUsageDiagnostic],
+    config: &EffectUsageScanConfig,
+) -> Result<EffectUsageIndex, String> {
     let endpoint_accessors = contract
         .endpoints
         .iter()
         .map(EndpointAccessor::from_endpoint)
         .collect::<Vec<_>>();
     let mut usages = Vec::new();
-    let semantic_references = semantic_endpoint_references(contract, files, &endpoint_accessors)?;
+    let semantic_output = semantic_endpoint_references(contract, files, &endpoint_accessors)?;
+    let mut all_diagnostics = semantic_output.diagnostics;
+    all_diagnostics.extend(diagnostics.iter().cloned());
 
-    for reference in semantic_references {
-        let Some(file) = files.iter().find(|file| file.path == reference.file) else {
-            continue;
-        };
-        let line = line_at(file, reference.source.start_line).unwrap_or_default();
-        let column = reference.source.start_column.saturating_sub(1) as usize;
-        let width = reference
-            .source
-            .end_column
-            .saturating_sub(reference.source.start_column) as usize;
-        let (strength, reason) = classify_usage(line, column, width);
-        let diagnostics = diagnostics_for_usage(diagnostics, &reference.file, &reference.source);
+    for reference in semantic_output.references {
+        let diagnostics =
+            diagnostics_for_usage(&all_diagnostics, &reference.file, &reference.source);
+        let (strength, reason) = diagnostic_classification_override(
+            reference.strength,
+            reference.reason,
+            &diagnostics,
+            &config.diagnostic_codes,
+        );
         usages.push(EndpointUsage {
             endpoint_id: reference.endpoint_id,
             accessor_path: reference.accessor_path,
@@ -375,6 +401,7 @@ struct EndpointAccessor {
     endpoint_id: SymbolId,
     accessor_path: Vec<String>,
     namespace: String,
+    transport: api_ir::Transport,
 }
 
 impl EndpointAccessor {
@@ -386,6 +413,7 @@ impl EndpointAccessor {
             endpoint_id: endpoint.id.clone(),
             accessor_path: vec![namespace.clone(), function_name.clone()],
             namespace,
+            transport: endpoint.transport,
         }
     }
 }
@@ -401,11 +429,13 @@ struct SemanticScannerInput<'a> {
 struct SemanticScannerEndpoint<'a> {
     endpoint_id: &'a SymbolId,
     accessor_path: &'a [String],
+    transport: api_ir::Transport,
 }
 
 #[derive(Deserialize)]
 struct SemanticScannerOutput {
     references: Vec<SemanticEndpointReference>,
+    diagnostics: Vec<EffectUsageDiagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -414,15 +444,20 @@ struct SemanticEndpointReference {
     accessor_path: Vec<String>,
     file: String,
     source: SourceRange,
+    strength: UsageStrength,
+    reason: String,
 }
 
 fn semantic_endpoint_references(
     contract: &ApiContract,
     files: &[TypeScriptSourceFile],
     accessors: &[EndpointAccessor],
-) -> Result<Vec<SemanticEndpointReference>, String> {
+) -> Result<SemanticScannerOutput, String> {
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SemanticScannerOutput {
+            references: Vec::new(),
+            diagnostics: Vec::new(),
+        });
     }
 
     let input = SemanticScannerInput {
@@ -432,6 +467,7 @@ fn semantic_endpoint_references(
             .map(|accessor| SemanticScannerEndpoint {
                 endpoint_id: &accessor.endpoint_id,
                 accessor_path: &accessor.accessor_path,
+                transport: accessor.transport,
             })
             .collect(),
         files,
@@ -487,68 +523,7 @@ fn semantic_endpoint_references(
                 String::from_utf8_lossy(&output.stdout)
             )
         })?;
-    Ok(output.references)
-}
-
-fn classify_usage(line: &str, column: usize, width: usize) -> (UsageStrength, String) {
-    let after_reference = line.get(column + width..).unwrap_or_default().trim_start();
-    let before_reference = line.get(..column).unwrap_or_default();
-    let called = after_reference.starts_with('(');
-    let after_call = after_reference
-        .find(')')
-        .and_then(|end| after_reference.get(end + 1..))
-        .unwrap_or_default();
-    let trimmed_before = before_reference.trim_start();
-
-    if !called {
-        return (
-            UsageStrength::Weak,
-            "endpoint accessor is referenced without being invoked".to_owned(),
-        );
-    }
-    if before_reference.contains("yield*") {
-        return (
-            UsageStrength::Strong,
-            "endpoint Effect is yielded".to_owned(),
-        );
-    }
-    if trimmed_before.starts_with("return") {
-        return (
-            UsageStrength::Strong,
-            "endpoint Effect is returned".to_owned(),
-        );
-    }
-    if after_call.trim_start().starts_with(".pipe(") {
-        return (
-            UsageStrength::Strong,
-            "endpoint Effect is composed with pipe".to_owned(),
-        );
-    }
-    if before_reference.contains("Layer.effect(")
-        || before_reference.contains("Effect.all(")
-        || before_reference.contains("Stream.fromEffect(")
-    {
-        return (
-            UsageStrength::Strong,
-            "endpoint Effect is passed to an Effect combinator".to_owned(),
-        );
-    }
-    if line[..column].contains("void ") {
-        return (
-            UsageStrength::Invalid,
-            "endpoint Effect is explicitly discarded".to_owned(),
-        );
-    }
-
-    (
-        UsageStrength::Weak,
-        "endpoint Effect is invoked without being yielded, returned, or composed".to_owned(),
-    )
-}
-
-fn line_at(file: &TypeScriptSourceFile, line: u32) -> Option<&str> {
-    let index = usize::try_from(line.checked_sub(1)?).ok()?;
-    file.contents.lines().nth(index)
+    Ok(output)
 }
 
 fn add_import_only_usages(
@@ -629,6 +604,55 @@ fn import_aliases(file: &TypeScriptSourceFile) -> BTreeMap<String, Vec<String>> 
     }
 
     aliases
+}
+
+fn diagnostic_classification_override(
+    strength: UsageStrength,
+    reason: String,
+    diagnostics: &[EffectUsageDiagnostic],
+    rules: &EffectUsageDiagnosticCodeRules,
+) -> (UsageStrength, String) {
+    if let Some(diagnostic) = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_matches(diagnostic, &rules.invalid))
+    {
+        return (
+            UsageStrength::Invalid,
+            diagnostic_override_reason("invalid", diagnostic),
+        );
+    }
+
+    if let Some(diagnostic) = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_matches(diagnostic, &rules.unknown))
+    {
+        return (
+            UsageStrength::Unknown,
+            diagnostic_override_reason("unknown", diagnostic),
+        );
+    }
+
+    (strength, reason)
+}
+
+fn diagnostic_code_matches(diagnostic: &EffectUsageDiagnostic, codes: &BTreeSet<String>) -> bool {
+    diagnostic
+        .code
+        .as_ref()
+        .is_some_and(|code| codes.contains(code))
+}
+
+fn diagnostic_override_reason(classification: &str, diagnostic: &EffectUsageDiagnostic) -> String {
+    match &diagnostic.code {
+        Some(code) => format!(
+            "Effect diagnostic {code} marks endpoint usage {classification}: {}",
+            diagnostic.message
+        ),
+        None => format!(
+            "Effect diagnostic marks endpoint usage {classification}: {}",
+            diagnostic.message
+        ),
+    }
 }
 
 fn diagnostics_for_usage(
@@ -844,6 +868,7 @@ export const program = Effect.gen(function* () {
             &[TypeScriptSourceFile {
                 path: "client/use-api.ts".to_owned(),
                 contents: r#"
+import { Effect } from "effect"
 import { users as apiUsers } from "@workspace/server-api"
 
 const program = apiUsers.getUser({ id }).pipe(Effect.retry({ times: 1 }))
@@ -869,6 +894,64 @@ const program = apiUsers.getUser({ id }).pipe(Effect.retry({ times: 1 }))
         assert!(index.usages.iter().any(|usage| {
             usage.accessor_path == ["users", "listUsers"]
                 && usage.reason.contains("imported without a strong")
+        }));
+    }
+
+    #[test]
+    fn effect_usage_scanner_classifies_returned_and_composed_effects_semantically() {
+        let get_user = Endpoint::new(HttpMethod::Get, "/users/{id}")
+            .named(["server", "users", "get_user"])
+            .ts_path(["users", "getUser"]);
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![get_user.into_ir()],
+            ..ApiContract::default()
+        };
+
+        let index = scan_effect_usages(
+            &contract,
+            &[TypeScriptSourceFile {
+                path: "client/use-api.ts".to_owned(),
+                contents: r#"
+import { Effect, Layer, Stream } from "effect"
+import { users } from "@workspace/server-api"
+
+declare const Service: any
+declare const UnknownCombinator: { use: (input: unknown) => unknown }
+
+export const returned = () => users.getUser({ id: "1" })
+export const piped = users.getUser({ id: "2" }).pipe(Effect.retry({ times: 1 }))
+export const all = Effect.all([users.getUser({ id: "3" })])
+export const layer = Layer.effect(Service, users.getUser({ id: "4" }))
+export const stream = Stream.fromEffect(users.getUser({ id: "5" }))
+
+UnknownCombinator.use(users.getUser({ id: "6" }))
+"#
+                .to_owned(),
+            }],
+        );
+
+        let summary = index
+            .endpoints
+            .iter()
+            .find(|summary| summary.accessor_path == ["users", "getUser"])
+            .expect("get user summary");
+
+        assert_eq!(summary.strong, 5);
+        assert_eq!(summary.weak, 1);
+        assert_eq!(summary.invalid, 0);
+        assert_eq!(summary.unknown, 0);
+        assert!(index.usages.iter().any(|usage| {
+            usage.strength == UsageStrength::Strong && usage.reason.contains("returned")
+        }));
+        assert!(index.usages.iter().any(|usage| {
+            usage.strength == UsageStrength::Strong && usage.reason.contains("pipe")
+        }));
+        assert!(index.usages.iter().any(|usage| {
+            usage.strength == UsageStrength::Weak
+                && usage
+                    .reason
+                    .contains("without being yielded, returned, or composed")
         }));
     }
 
@@ -982,6 +1065,91 @@ unrelated.getUser()
         assert_eq!(summary.invalid, 0);
         assert_eq!(summary.unknown, 0);
         assert!(index.usages.is_empty());
+    }
+
+    #[test]
+    fn effect_usage_scanner_attaches_typescript_backend_diagnostics() {
+        let get_user = Endpoint::new(HttpMethod::Get, "/users/{id}")
+            .named(["server", "users", "get_user"])
+            .ts_path(["users", "getUser"]);
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![get_user.into_ir()],
+            ..ApiContract::default()
+        };
+
+        let index = scan_effect_usages(
+            &contract,
+            &[TypeScriptSourceFile {
+                path: "client/use-api.ts".to_owned(),
+                contents: r#"
+import { Effect } from "effect"
+import { users } from "@workspace/server-api"
+
+export const program = Effect.gen(function* () {
+  yield* users.getUser
+})
+"#
+                .to_owned(),
+            }],
+        );
+
+        let usage = index.usages.first().expect("usage");
+
+        assert_eq!(usage.strength, UsageStrength::Weak);
+        assert!(!usage.diagnostics.is_empty());
+        assert!(usage
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.is_some()));
+    }
+
+    #[test]
+    fn effect_usage_scanner_applies_configured_diagnostic_codes() {
+        let get_user = Endpoint::new(HttpMethod::Get, "/users/{id}")
+            .named(["server", "users", "get_user"])
+            .ts_path(["users", "getUser"]);
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![get_user.into_ir()],
+            ..ApiContract::default()
+        };
+        let diagnostics = vec![EffectUsageDiagnostic {
+            code: Some("effect/no-floating".to_owned()),
+            message: "floating Effect is not live".to_owned(),
+            source: usage_source_range("client/use-api.ts", 3, 2, 30),
+        }];
+        let config = EffectUsageScanConfig {
+            diagnostic_codes: EffectUsageDiagnosticCodeRules {
+                invalid: std::collections::BTreeSet::from(["effect/no-floating".to_owned()]),
+                unknown: std::collections::BTreeSet::new(),
+            },
+        };
+
+        let index = try_scan_effect_usages_with_config(
+            &contract,
+            &[TypeScriptSourceFile {
+                path: "client/use-api.ts".to_owned(),
+                contents: "import { users } from \"@workspace/server-api\"\n\nusers.getUser({ id: \"1\" })\n"
+                    .to_owned(),
+            }],
+            &diagnostics,
+            &config,
+        )
+        .expect("scan usages");
+        let summary = index
+            .endpoints
+            .iter()
+            .find(|summary| summary.accessor_path == ["users", "getUser"])
+            .expect("get user summary");
+        let usage = index.usages.first().expect("usage");
+
+        assert_eq!(summary.strong, 0);
+        assert_eq!(summary.weak, 0);
+        assert_eq!(summary.invalid, 1);
+        assert_eq!(usage.strength, UsageStrength::Invalid);
+        assert!(usage.reason.contains("effect/no-floating"));
+        assert_eq!(usage.diagnostics.len(), 1);
     }
 
     #[test]

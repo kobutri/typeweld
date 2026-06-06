@@ -546,7 +546,7 @@ Acceptance criteria:
 - Type-only references do not count as runtime usage.
 - Same property name on unrelated values does not count.
 
-### E2. Integrate the repository-configured Effect-aware diagnostics
+### E2. Integrate the repository-configured Effect-aware diagnostics [done]
 
 Goal: classify live Effect usage, not text occurrences.
 

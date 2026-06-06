@@ -62,6 +62,7 @@ if (generatedSource === undefined) {
 
 const endpointTargets = collectEndpointTargets(generatedSource, input.endpoints)
 const aliasTargets = collectLocalAliases()
+const endpointValueAliases = collectEndpointValueAliases()
 const references = []
 
 for (const source of program.getSourceFiles()) {
@@ -73,11 +74,17 @@ for (const source of program.getSourceFiles()) {
       return
     }
 
-    const target = endpointForIdentifier(node, aliasTargets, endpointTargets.bySymbol)
+    const accessorTarget = endpointForIdentifier(node, aliasTargets, endpointTargets.bySymbol)
+    const valueTarget = endpointValueForIdentifier(node)
+    const target = accessorTarget ?? valueTarget
     if (target === undefined) {
       return
     }
 
+    const classification =
+      accessorTarget !== undefined
+        ? classifyEndpointAccessorReference(node)
+        : classifyEndpointValueReference(node)
     const start = source.getLineAndCharacterOfPosition(node.getStart(source))
     const end = source.getLineAndCharacterOfPosition(node.getEnd())
     references.push({
@@ -91,6 +98,8 @@ for (const source of program.getSourceFiles()) {
         end_line: end.line + 1,
         end_column: end.character + 1,
       },
+      strength: classification.strength,
+      reason: classification.reason,
     })
   })
 }
@@ -102,7 +111,7 @@ references.sort((left, right) =>
   left.source.start_column - right.source.start_column
 )
 
-process.stdout.write(JSON.stringify({ references }))
+process.stdout.write(JSON.stringify({ references, diagnostics: collectProgramDiagnostics() }))
 
 function renderGeneratedModule(packageName, endpoints) {
   const namespaces = new Map()
@@ -122,12 +131,24 @@ function renderGeneratedModule(packageName, endpoints) {
   )) {
     lines.push(`  export namespace ${namespace} {`)
     for (const functionName of [...new Set(functions)].sort()) {
-      lines.push(`    export function ${functionName}(...args: Array<unknown>): unknown`)
+      const endpoint = endpoints.find(
+        (candidate) => candidate.accessor_path.join(".") === `${namespace}.${functionName}`
+      )
+      lines.push(
+        `    export function ${functionName}(...args: Array<unknown>): ${endpointReturnType(endpoint)}`
+      )
     }
     lines.push("  }")
   }
   lines.push("}")
   return lines.join("\n")
+}
+
+function endpointReturnType(endpoint) {
+  if (endpoint?.transport === "ServerSentEvents") {
+    return 'import("effect").Stream.Stream<unknown, unknown, unknown>'
+  }
+  return 'import("effect").Effect.Effect<unknown, unknown, unknown>'
 }
 
 function collectEndpointTargets(source, endpoints) {
@@ -218,6 +239,35 @@ function collectLocalAliases() {
   return aliases
 }
 
+function collectEndpointValueAliases() {
+  const aliases = new Map()
+  for (const source of program.getSourceFiles()) {
+    if (source.fileName === generatedFileName || source.isDeclarationFile) {
+      continue
+    }
+    visit(source, (node) => {
+      if (
+        !ts.isVariableDeclaration(node) ||
+        !ts.isIdentifier(node.name) ||
+        node.initializer === undefined
+      ) {
+        return
+      }
+
+      const target = endpointTargetForCallExpression(node.initializer)
+      if (target === undefined || endpointRuntimeKind(node.initializer) === undefined) {
+        return
+      }
+
+      const symbol = resolveSymbol(checker.getSymbolAtLocation(node.name))
+      if (symbol !== undefined) {
+        aliases.set(symbol, target)
+      }
+    })
+  }
+  return aliases
+}
+
 function endpointForExpression(expression, aliases, targets) {
   if (ts.isPropertyAccessExpression(expression)) {
     const symbol = resolveSymbol(checker.getSymbolAtLocation(expression.name))
@@ -239,6 +289,232 @@ function endpointForIdentifier(identifier, aliases, targetsBySymbol) {
     return undefined
   }
   return aliases.get(symbol) ?? targetsBySymbol.get(symbol)
+}
+
+function endpointValueForIdentifier(identifier) {
+  const symbol = resolveSymbol(checker.getSymbolAtLocation(identifier))
+  return symbol === undefined ? undefined : endpointValueAliases.get(symbol)
+}
+
+function endpointTargetForCallExpression(expression) {
+  if (!ts.isCallExpression(expression)) {
+    return undefined
+  }
+  return endpointForExpression(expression.expression, aliasTargets, endpointTargets)
+}
+
+function classifyEndpointAccessorReference(identifier) {
+  const expression = endpointReferenceExpression(identifier)
+  const call = endpointCallExpression(expression)
+  if (call === undefined) {
+    return {
+      strength: "Weak",
+      reason: "endpoint accessor is referenced without being invoked",
+    }
+  }
+
+  return classifyEndpointResultExpression(call)
+}
+
+function classifyEndpointValueReference(identifier) {
+  return classifyEndpointResultExpression(endpointReferenceExpression(identifier))
+}
+
+function endpointReferenceExpression(identifier) {
+  if (
+    ts.isPropertyAccessExpression(identifier.parent) &&
+    identifier.parent.name === identifier
+  ) {
+    return identifier.parent
+  }
+  return identifier
+}
+
+function endpointCallExpression(expression) {
+  const outer = outerExpression(expression)
+  if (ts.isCallExpression(outer.parent) && outer.parent.expression === outer) {
+    return outer.parent
+  }
+  return undefined
+}
+
+function classifyEndpointResultExpression(expression) {
+  const kind = endpointRuntimeKind(expression)
+  if (kind === undefined) {
+    return {
+      strength: "Unknown",
+      reason: "endpoint invocation could not be verified as an Effect or Stream value",
+    }
+  }
+
+  const outer = outerExpression(expression)
+  const parent = outer.parent
+
+  if (ts.isYieldExpression(parent) && parent.expression === outer) {
+    return kind === "Effect"
+      ? {
+          strength: "Strong",
+          reason: "endpoint Effect is yielded",
+        }
+      : {
+          strength: "Unknown",
+          reason: `endpoint ${kind} is yielded, but only Effect values are live in generators`,
+        }
+  }
+
+  if (ts.isReturnStatement(parent) && parent.expression === outer) {
+    return {
+      strength: "Strong",
+      reason: `endpoint ${kind} is returned`,
+    }
+  }
+
+  if (ts.isArrowFunction(parent) && parent.body === outer) {
+    return {
+      strength: "Strong",
+      reason: `endpoint ${kind} is returned from an arrow function`,
+    }
+  }
+
+  const pipe = enclosingPipeCall(outer)
+  if (pipe !== undefined && endpointRuntimeKind(pipe) !== undefined) {
+    return {
+      strength: "Strong",
+      reason: `endpoint ${kind} is composed with pipe`,
+    }
+  }
+
+  const combinator = enclosingLiveCombinatorCall(outer)
+  if (combinator !== undefined) {
+    return {
+      strength: "Strong",
+      reason: `endpoint ${kind} is passed to ${combinator}`,
+    }
+  }
+
+  if (ts.isVoidExpression(parent) && parent.expression === outer) {
+    return {
+      strength: "Invalid",
+      reason: `endpoint ${kind} is explicitly discarded`,
+    }
+  }
+
+  return {
+    strength: "Weak",
+    reason: `endpoint ${kind} is invoked without being yielded, returned, or composed`,
+  }
+}
+
+function endpointRuntimeKind(expression) {
+  const type = checker.getTypeAtLocation(expression)
+  return runtimeKindForType(type, expression)
+}
+
+function runtimeKindForType(type, node) {
+  const symbolName = type.getSymbol()?.name ?? type.aliasSymbol?.name
+  if (symbolName === "Effect" || symbolName === "Stream" || symbolName === "Layer") {
+    return symbolName
+  }
+
+  const rendered = checker.typeToString(
+    type,
+    node,
+    ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.UseFullyQualifiedType
+  )
+  if (/\bEffect(?:\.Effect)?</.test(rendered)) {
+    return "Effect"
+  }
+  if (/\bStream(?:\.Stream)?</.test(rendered)) {
+    return "Stream"
+  }
+  if (/\bLayer(?:\.Layer)?</.test(rendered)) {
+    return "Layer"
+  }
+  return undefined
+}
+
+function outerExpression(expression) {
+  let node = expression
+  while (ts.isParenthesizedExpression(node.parent) && node.parent.expression === node) {
+    node = node.parent
+  }
+  return node
+}
+
+function enclosingPipeCall(expression) {
+  const parent = expression.parent
+  if (
+    ts.isPropertyAccessExpression(parent) &&
+    parent.expression === expression &&
+    parent.name.text === "pipe" &&
+    ts.isCallExpression(parent.parent) &&
+    parent.parent.expression === parent
+  ) {
+    return parent.parent
+  }
+  return undefined
+}
+
+function enclosingLiveCombinatorCall(expression) {
+  for (let node = expression.parent; node !== undefined; node = node.parent) {
+    if (isFunctionBoundary(node)) {
+      return undefined
+    }
+    if (!ts.isCallExpression(node) || node === expression) {
+      continue
+    }
+    if (!node.arguments.some((argument) => containsNode(argument, expression))) {
+      continue
+    }
+
+    const name = dottedName(node.expression)
+    if (
+      name !== "Effect.all" &&
+      name !== "Layer.effect" &&
+      name !== "Stream.fromEffect"
+    ) {
+      continue
+    }
+
+    if (endpointRuntimeKind(node) !== undefined) {
+      return name
+    }
+  }
+  return undefined
+}
+
+function dottedName(expression) {
+  if (ts.isIdentifier(expression)) {
+    return expression.text
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    const base = dottedName(expression.expression)
+    return base === undefined ? undefined : `${base}.${expression.name.text}`
+  }
+  return undefined
+}
+
+function containsNode(root, needle) {
+  if (root === needle) {
+    return true
+  }
+  let found = false
+  ts.forEachChild(root, (child) => {
+    if (!found && containsNode(child, needle)) {
+      found = true
+    }
+  })
+  return found
+}
+
+function isFunctionBoundary(node) {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  )
 }
 
 function namespaceForExpression(expression, namespaceSymbols) {
@@ -303,6 +579,36 @@ function isTypePosition(node) {
 function visit(node, callback) {
   callback(node)
   ts.forEachChild(node, (child) => visit(child, callback))
+}
+
+function collectProgramDiagnostics() {
+  return [...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics()]
+    .map((diagnostic) => diagnosticToJson(diagnostic))
+    .filter((diagnostic) => diagnostic !== undefined)
+}
+
+function diagnosticToJson(diagnostic) {
+  if (
+    diagnostic.file === undefined ||
+    diagnostic.start === undefined ||
+    diagnostic.length === undefined
+  ) {
+    return undefined
+  }
+
+  const start = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+  const end = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start + diagnostic.length)
+  return {
+    code: String(diagnostic.code),
+    message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+    source: {
+      file: diagnostic.file.fileName,
+      start_line: start.line + 1,
+      start_column: start.character + 1,
+      end_line: end.line + 1,
+      end_column: end.character + 1,
+    },
+  }
 }
 
 function normalizePath(path) {
