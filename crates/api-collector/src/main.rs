@@ -14,10 +14,55 @@ use api_collector::{
 };
 use api_gen_effect_v4::{render_generated_package, render_symbol_graph, GeneratedPackage};
 use api_ir::{ApiContract, Field, SourceRange, SourceSpan, TypeShape};
+use clap::{Args, Parser, Subcommand};
+use dialoguer::{theme::ColorfulTheme, Input};
 use syn::spanned::Spanned;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "api",
+    about = "Collect Rust API contracts and generate Effect TypeScript clients"
+)]
+struct ApiCli {
+    #[command(subcommand)]
+    command: ApiCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ApiCommand {
+    /// Collect a Rust API contract.
+    Collect(CollectOptions),
+    /// Generate a hidden Effect TypeScript package from a contract.
+    Gen(GenOptions),
+    /// Regenerate once using the watch command shape.
+    Watch(ContractTargetOptions),
+    /// Run collection, generation, typechecking, and usage checks.
+    Check(CheckOptions),
+    /// Scan TypeScript sources for generated Effect API usage.
+    #[command(name = "check-usages")]
+    CheckUsages(CheckUsagesOptions),
+    /// Print workspace setup diagnostics.
+    Doctor(DoctorOptions),
+    /// Generate a new minimal Rust + TypeScript project.
+    New(NewProjectOptions),
+}
+
 fn main() -> ExitCode {
-    match run_with_args(env::args().skip(1)) {
+    let cli = match ApiCli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = match error.kind() {
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+                    ExitCode::SUCCESS
+                }
+                _ => ExitCode::FAILURE,
+            };
+            let _ = error.print();
+            return exit_code;
+        }
+    };
+
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -26,30 +71,32 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(test)]
 fn run_with_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let mut args = args.into_iter();
-    let Some(command) = args.next() else {
-        return Err(usage());
-    };
+    let cli = ApiCli::try_parse_from(std::iter::once("api".to_owned()).chain(args))
+        .map_err(|error| error.to_string())?;
+    run(cli)
+}
 
-    match command.as_str() {
-        "collect" => collect_command(args),
-        "gen" => gen_command(args),
-        "watch" => watch_command(args),
-        "check" => check_command(args),
-        "check-usages" => check_usages_command(args),
-        "doctor" => doctor_command(args),
-        "--help" | "-h" | "help" => {
-            println!("{}", usage());
-            Ok(())
+fn run(cli: ApiCli) -> Result<(), String> {
+    match cli.command {
+        ApiCommand::Collect(mut options) => {
+            options.normalize();
+            collect_command(options)
         }
-        _ => Err(format!("unknown api command `{command}`\n\n{}", usage())),
+        ApiCommand::Gen(options) => gen_command(options),
+        ApiCommand::Watch(options) => watch_command(options),
+        ApiCommand::Check(mut options) => {
+            options.normalize();
+            check_command(options)
+        }
+        ApiCommand::CheckUsages(options) => check_usages_command(options),
+        ApiCommand::Doctor(options) => doctor_command(options),
+        ApiCommand::New(options) => new_project_command(options),
     }
 }
 
-fn collect_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let options = CollectOptions::parse(args)?;
-
+fn collect_command(options: CollectOptions) -> Result<(), String> {
     if options.empty {
         let out = options
             .out
@@ -76,13 +123,15 @@ fn collect_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     write_contract_json(&contract, out).map_err(|error| error.to_string())
 }
 
-fn gen_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let args = args.collect::<Vec<_>>();
-    if args.iter().any(|arg| arg == "--workspace-contract") {
-        return gen_workspace_command(args.into_iter());
+fn gen_command(options: GenOptions) -> Result<(), String> {
+    if let Some(workspace_contract) = options.workspace_contract {
+        return gen_workspace_command(&workspace_contract, &options.target_dir);
     }
-    let options = ContractTargetOptions::parse(args.into_iter(), "api gen")?;
-    let contract = read_contract(&options.contract)?;
+
+    let contract_path = options
+        .contract
+        .ok_or_else(|| "api gen requires --contract <path>".to_owned())?;
+    let contract = read_contract(&contract_path)?;
     let package = render_generated_package(&contract, &options.target_dir);
     write_generated_package(&package)?;
     write_symbol_graph_json(
@@ -93,39 +142,23 @@ fn gen_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
-fn gen_workspace_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let mut args = args;
-    let mut workspace_contract = None;
-    let mut target_dir = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--workspace-contract" => workspace_contract = args.next().map(PathBuf::from),
-            "--target-dir" | "--out-dir" => target_dir = args.next().map(PathBuf::from),
-            other => return Err(format!("unknown api gen argument `{other}`")),
-        }
-    }
-
-    let workspace_contract = workspace_contract
-        .ok_or_else(|| "api gen requires --workspace-contract <path>".to_owned())?;
-    let target_dir = target_dir.unwrap_or_else(|| PathBuf::from("target"));
-    let graph = read_workspace_contract_graph(&workspace_contract)?;
+fn gen_workspace_command(workspace_contract: &Path, target_dir: &Path) -> Result<(), String> {
+    let graph = read_workspace_contract_graph(workspace_contract)?;
 
     let mut symbol_graphs = Vec::new();
     for package_info in workspace_generation_order(&graph)? {
         let contract = read_contract(Path::new(&package_info.contract_path))?;
-        let package = render_generated_package(&contract, &target_dir);
+        let package = render_generated_package(&contract, target_dir);
         write_generated_package(&package)?;
         symbol_graphs.push(render_symbol_graph(&contract, &package));
         println!("generated {}", package.package_dir.display());
     }
-    write_workspace_tsconfig_paths(&graph, &target_dir)?;
-    write_symbol_graph_json(&merge_symbol_graphs(&symbol_graphs)?, &target_dir)?;
+    write_workspace_tsconfig_paths(&graph, target_dir)?;
+    write_symbol_graph_json(&merge_symbol_graphs(&symbol_graphs)?, target_dir)?;
     Ok(())
 }
 
-fn watch_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let mut options = ContractTargetOptions::parse(args, "api watch")?;
+fn watch_command(mut options: ContractTargetOptions) -> Result<(), String> {
     options.once = true;
     let contract = read_contract(&options.contract)?;
     let package = render_generated_package(&contract, &options.target_dir);
@@ -137,8 +170,7 @@ fn watch_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
-fn check_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let options = CheckOptions::parse(args)?;
+fn check_command(options: CheckOptions) -> Result<(), String> {
     if options.legacy_stale_check() {
         let contract = options
             .contract
@@ -509,83 +541,81 @@ struct CheckedContract {
     contract: ApiContract,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Args)]
 struct CheckOptions {
+    /// Check an already collected contract instead of collecting from Cargo metadata.
+    #[arg(long)]
     contract: Option<PathBuf>,
+    /// Directory for generated contract, package, graph, and check output.
+    #[arg(long, alias = "out-dir", default_value = "target")]
     target_dir: PathBuf,
+    /// Cargo manifest to inspect.
+    #[arg(long, default_value = "Cargo.toml")]
     manifest_path: PathBuf,
+    /// Cargo package to collect.
+    #[arg(long = "package", short = 'p')]
     cargo_package: Option<String>,
+    /// Override the generated TypeScript package name.
+    #[arg(long = "package-name")]
     package_name: Option<String>,
+    /// Override the Rust API root function path.
+    #[arg(long = "api-root")]
     api_root: Option<String>,
+    /// Cargo features to enable. May be repeated or space/comma separated.
+    #[arg(long, num_args = 1..)]
     features: Vec<String>,
+    /// Enable all Cargo features.
+    #[arg(long = "all-features")]
     all_features: bool,
+    /// Disable default Cargo features for the collected package.
+    #[arg(long = "no-default-features")]
     no_default_features: bool,
+    /// Collect all API-enabled workspace packages.
+    #[arg(long)]
     workspace: bool,
+    /// TypeScript source file to scan for generated API usage.
+    #[arg(long = "ts")]
     ts_files: Vec<PathBuf>,
+    /// TypeScript source directory to scan recursively for generated API usage.
+    #[arg(long = "ts-dir")]
     ts_dirs: Vec<PathBuf>,
+    #[arg(skip = UsageLintLevel::Warn)]
     unused_endpoint_lints: UsageLintLevel,
+    /// Fail when an exported endpoint has no strong Effect usage.
+    #[arg(
+        long = "deny-unused-endpoints",
+        conflicts_with_all = ["warn_unused_endpoints", "allow_unused_endpoints"]
+    )]
+    deny_unused_endpoints: bool,
+    /// Warn when an exported endpoint has no strong Effect usage.
+    #[arg(
+        long = "warn-unused-endpoints",
+        conflicts_with_all = ["deny_unused_endpoints", "allow_unused_endpoints"]
+    )]
+    warn_unused_endpoints: bool,
+    /// Disable unused endpoint checks.
+    #[arg(
+        long = "allow-unused-endpoints",
+        alias = "no-unused-endpoint-lints",
+        conflicts_with_all = ["deny_unused_endpoints", "warn_unused_endpoints"]
+    )]
+    allow_unused_endpoints: bool,
+    /// Run cargo check with generated usage lint environment variables.
+    #[arg(long = "cargo-check")]
     cargo_check: bool,
 }
 
 impl CheckOptions {
-    fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut args = args;
-        let mut options = Self {
-            contract: None,
-            target_dir: PathBuf::from("target"),
-            manifest_path: PathBuf::from("Cargo.toml"),
-            cargo_package: None,
-            package_name: None,
-            api_root: None,
-            features: Vec::new(),
-            all_features: false,
-            no_default_features: false,
-            workspace: false,
-            ts_files: Vec::new(),
-            ts_dirs: Vec::new(),
-            unused_endpoint_lints: UsageLintLevel::Warn,
-            cargo_check: false,
+    fn normalize(&mut self) {
+        normalize_features(&mut self.features);
+        let _warn_unused_endpoint_flag = self.warn_unused_endpoints;
+        self.unused_endpoint_lints = if self.deny_unused_endpoints {
+            UsageLintLevel::Deny
+        } else if self.allow_unused_endpoints {
+            UsageLintLevel::Off
+        } else {
+            UsageLintLevel::Warn
         };
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--contract" => options.contract = args.next().map(PathBuf::from),
-                "--target-dir" | "--out-dir" => {
-                    options.target_dir = required_path(&mut args, "--target-dir")?;
-                }
-                "--manifest-path" => {
-                    options.manifest_path = required_path(&mut args, "--manifest-path")?;
-                }
-                "--package" | "-p" => options.cargo_package = args.next(),
-                "--package-name" => options.package_name = args.next(),
-                "--api-root" => options.api_root = args.next(),
-                "--features" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "--features requires <features>".to_owned())?;
-                    options.features.extend(parse_features(&value));
-                }
-                "--all-features" => options.all_features = true,
-                "--no-default-features" => options.no_default_features = true,
-                "--workspace" => options.workspace = true,
-                "--ts" => options.ts_files.push(required_path(&mut args, "--ts")?),
-                "--ts-dir" => options.ts_dirs.push(required_path(&mut args, "--ts-dir")?),
-                "--deny-unused-endpoints" => {
-                    options.unused_endpoint_lints = UsageLintLevel::Deny;
-                }
-                "--warn-unused-endpoints" => {
-                    options.unused_endpoint_lints = UsageLintLevel::Warn;
-                }
-                "--allow-unused-endpoints" | "--no-unused-endpoint-lints" => {
-                    options.unused_endpoint_lints = UsageLintLevel::Off;
-                }
-                "--cargo-check" => options.cargo_check = true,
-                other => return Err(format!("unknown api check argument `{other}`")),
-            }
-        }
-        options.features.sort();
-        options.features.dedup();
-        Ok(options)
     }
 
     fn legacy_stale_check(&self) -> bool {
@@ -633,37 +663,39 @@ impl CheckOptions {
     }
 }
 
-fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let mut args = args;
-    let mut contract = None;
-    let mut out = None;
-    let mut symbol_graph = None;
-    let mut explicit_symbol_graph = false;
-    let mut ts_files = Vec::new();
-    let mut ts_dirs = Vec::new();
+#[derive(Debug, Args)]
+struct CheckUsagesOptions {
+    /// Contract JSON to scan against.
+    #[arg(long)]
+    contract: PathBuf,
+    /// Output path for the usage index JSON.
+    #[arg(long)]
+    out: PathBuf,
+    /// Symbol graph to enrich with user TypeScript locations.
+    #[arg(long = "symbol-graph")]
+    symbol_graph: Option<PathBuf>,
+    /// TypeScript source file to scan.
+    #[arg(long = "ts")]
+    ts_files: Vec<PathBuf>,
+    /// TypeScript source directory to scan recursively.
+    #[arg(long = "ts-dir")]
+    ts_dirs: Vec<PathBuf>,
+}
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--contract" => contract = args.next().map(PathBuf::from),
-            "--out" => out = args.next().map(PathBuf::from),
-            "--symbol-graph" => {
-                symbol_graph = args.next().map(PathBuf::from);
-                explicit_symbol_graph = true;
-            }
-            "--ts" => ts_files.push(required_path(&mut args, "--ts")?),
-            "--ts-dir" => ts_dirs.push(required_path(&mut args, "--ts-dir")?),
-            other => return Err(format!("unknown api check-usages argument `{other}`")),
-        }
-    }
-
-    let contract_path =
-        contract.ok_or_else(|| "api check-usages requires --contract <path>".to_owned())?;
-    let out = out.ok_or_else(|| "api check-usages requires --out <path>".to_owned())?;
+fn check_usages_command(options: CheckUsagesOptions) -> Result<(), String> {
+    let CheckUsagesOptions {
+        contract,
+        out,
+        symbol_graph,
+        mut ts_files,
+        ts_dirs,
+    } = options;
+    let explicit_symbol_graph = symbol_graph.is_some();
     for dir in ts_dirs {
         collect_ts_files(&dir, &mut ts_files)?;
     }
 
-    let contract = read_contract(&contract_path)?;
+    let contract = read_contract(&contract)?;
     let sources = read_ts_sources(&ts_files)?;
     let index = try_scan_effect_usages(&contract, &sources)?;
     if let Some(parent) = out.parent() {
@@ -694,18 +726,15 @@ fn check_usages_command(args: impl Iterator<Item = String>) -> Result<(), String
     Ok(())
 }
 
-fn doctor_command(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let mut manifest_path = None;
-    let mut args = args;
+#[derive(Debug, Args)]
+struct DoctorOptions {
+    /// Cargo manifest to inspect.
+    #[arg(long, default_value = "Cargo.toml")]
+    manifest_path: PathBuf,
+}
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--manifest-path" => manifest_path = args.next().map(PathBuf::from),
-            other => return Err(format!("unknown api doctor argument `{other}`")),
-        }
-    }
-
-    let manifest_path = manifest_path.unwrap_or_else(|| PathBuf::from("Cargo.toml"));
+fn doctor_command(options: DoctorOptions) -> Result<(), String> {
+    let manifest_path = options.manifest_path;
     let workspace = discover_workspace(&manifest_path).map_err(|error| {
         format!(
             "api doctor could not inspect `{}`: {error}\nhelp: pass --manifest-path <Cargo.toml>",
@@ -719,6 +748,766 @@ fn doctor_command(args: impl Iterator<Item = String>) -> Result<(), String> {
         "setup: run `api collect`, `api gen`, and `api check-usages` before enabling deny lints"
     );
     Ok(())
+}
+
+#[derive(Debug, Args)]
+struct NewProjectOptions {
+    /// Directory to create.
+    #[arg(value_name = "DIR")]
+    dir: Option<PathBuf>,
+    /// Human/project slug used for package defaults.
+    #[arg(long)]
+    name: Option<String>,
+    /// Cargo package name for the generated server.
+    #[arg(long = "rust-package")]
+    rust_package: Option<String>,
+    /// Generated TypeScript API package name.
+    #[arg(long = "ts-package")]
+    ts_package: Option<String>,
+    /// API namespace and route prefix used by generated TypeScript.
+    #[arg(long = "module")]
+    api_module: Option<String>,
+    /// Sample path parameter used by the TypeScript starting point.
+    #[arg(long = "sample-name")]
+    sample_name: Option<String>,
+    /// Default server listen address used in scripts and examples.
+    #[arg(long = "bind")]
+    bind_addr: Option<String>,
+    /// Accept defaults for omitted values without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Allow writing into a non-empty directory.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Clone, Debug)]
+struct NewProject {
+    root_dir: PathBuf,
+    name: String,
+    rust_package: String,
+    crate_name: String,
+    ts_package: String,
+    api_module: String,
+    sample_name: String,
+    bind_addr: String,
+    force: bool,
+    repo_root: PathBuf,
+}
+
+fn new_project_command(options: NewProjectOptions) -> Result<(), String> {
+    let project = resolve_new_project(options)?;
+    write_new_project(&project)?;
+    println!("generated {}", project.root_dir.display());
+    println!(
+        "next: cd {} && npm install && npm run api:check && npm run typecheck",
+        project.root_dir.display()
+    );
+    Ok(())
+}
+
+fn resolve_new_project(options: NewProjectOptions) -> Result<NewProject, String> {
+    let theme = ColorfulTheme::default();
+    let name_default = options
+        .dir
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(sanitize_kebab)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "rust-ts-app".to_owned());
+
+    let name = prompt_string(
+        &theme,
+        options.name,
+        "Project name",
+        &name_default,
+        options.yes,
+    )?;
+    let name = sanitize_kebab(&name);
+    if name.is_empty() {
+        return Err(
+            "api new project name must contain at least one ASCII letter or digit".to_owned(),
+        );
+    }
+
+    let root_dir = match options.dir {
+        Some(dir) => dir,
+        None => PathBuf::from(prompt_string(
+            &theme,
+            None,
+            "Project directory",
+            &name,
+            options.yes,
+        )?),
+    };
+
+    let rust_package_default = format!("{name}-server");
+    let rust_package = prompt_string(
+        &theme,
+        options.rust_package,
+        "Rust package name",
+        &rust_package_default,
+        options.yes,
+    )?;
+    let rust_package = sanitize_kebab(&rust_package);
+    validate_cargo_package_name(&rust_package)?;
+    let crate_name = rust_package.replace('-', "_");
+    if !is_rust_identifier(&crate_name) {
+        return Err(format!(
+            "api new Rust package `{rust_package}` does not produce a valid crate name"
+        ));
+    }
+
+    let ts_package_default = format!("@workspace/{name}-api");
+    let ts_package = prompt_string(
+        &theme,
+        options.ts_package,
+        "TypeScript API package",
+        &ts_package_default,
+        options.yes,
+    )?;
+    validate_ts_package_name(&ts_package)?;
+
+    let api_module = prompt_string(
+        &theme,
+        options.api_module,
+        "API namespace / route prefix",
+        "greetings",
+        options.yes,
+    )?;
+    let api_module = sanitize_snake_identifier(&api_module);
+    if !is_rust_identifier(&api_module) {
+        return Err("api new module name must be a valid Rust identifier".to_owned());
+    }
+
+    let sample_name = prompt_string(
+        &theme,
+        options.sample_name,
+        "Sample request name",
+        "Ada",
+        options.yes,
+    )?;
+
+    let bind_addr = prompt_string(
+        &theme,
+        options.bind_addr,
+        "Server listen address",
+        "127.0.0.1:3000",
+        options.yes,
+    )?;
+    bind_addr
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("api new --bind requires a socket address: {error}"))?;
+
+    Ok(NewProject {
+        root_dir,
+        name,
+        rust_package,
+        crate_name,
+        ts_package,
+        api_module,
+        sample_name,
+        bind_addr,
+        force: options.force,
+        repo_root: repo_root(),
+    })
+}
+
+fn prompt_string(
+    theme: &ColorfulTheme,
+    value: Option<String>,
+    prompt: &str,
+    default: &str,
+    yes: bool,
+) -> Result<String, String> {
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    if yes {
+        return Ok(default.to_owned());
+    }
+    Input::<String>::with_theme(theme)
+        .with_prompt(prompt)
+        .default(default.to_owned())
+        .interact_text()
+        .map_err(|error| format!("failed to read wizard input: {error}"))
+}
+
+fn write_new_project(project: &NewProject) -> Result<(), String> {
+    if project.root_dir.exists() && !project.force && directory_has_entries(&project.root_dir)? {
+        return Err(format!(
+            "api new target directory `{}` is not empty; pass --force to write scaffold files there",
+            project.root_dir.display()
+        ));
+    }
+
+    fs::create_dir_all(&project.root_dir).map_err(|error| {
+        format!(
+            "failed to create project directory `{}`: {error}",
+            project.root_dir.display()
+        )
+    })?;
+
+    write_project_file(project, "Cargo.toml", render_new_root_cargo_toml(project))?;
+    write_project_file(
+        project,
+        "package.json",
+        render_new_root_package_json(project),
+    )?;
+    write_project_file(project, ".gitignore", render_new_gitignore())?;
+    write_project_file(project, ".api-ls.json", render_new_api_ls_json())?;
+    write_project_file(project, "README.md", render_new_readme(project))?;
+    write_project_file(
+        project,
+        "server/Cargo.toml",
+        render_new_server_cargo_toml(project),
+    )?;
+    write_project_file(project, "server/src/lib.rs", render_new_server_lib(project))?;
+    write_project_file(
+        project,
+        "server/src/main.rs",
+        render_new_server_main(project),
+    )?;
+    write_project_file(
+        project,
+        "app/package.json",
+        render_new_app_package_json(project),
+    )?;
+    write_project_file(
+        project,
+        "app/tsconfig.json",
+        render_new_app_tsconfig(project),
+    )?;
+    write_project_file(project, "app/src/client.ts", render_new_app_client(project))
+}
+
+fn directory_has_entries(path: &Path) -> Result<bool, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("failed to read directory `{}`: {error}", path.display()))?;
+    entries
+        .next()
+        .transpose()
+        .map(|entry| entry.is_some())
+        .map_err(|error| format!("failed to read directory `{}`: {error}", path.display()))
+}
+
+fn write_project_file(
+    project: &NewProject,
+    relative: &str,
+    contents: String,
+) -> Result<(), String> {
+    let path = project.root_dir.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create project directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&path, contents)
+        .map_err(|error| format!("failed to write `{}`: {error}", path.display()))
+}
+
+fn render_new_root_cargo_toml(_project: &NewProject) -> String {
+    r#"[workspace]
+members = ["server"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+"#
+    .to_owned()
+}
+
+fn render_new_server_cargo_toml(project: &NewProject) -> String {
+    let crate_dir = |name: &str| {
+        toml_string(
+            &project
+                .repo_root
+                .join("crates")
+                .join(name)
+                .display()
+                .to_string(),
+        )
+    };
+    format!(
+        r#"[package]
+name = {rust_package}
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = {crate_name}
+path = "src/lib.rs"
+
+[[bin]]
+name = {rust_package}
+path = "src/main.rs"
+
+[dependencies]
+api-axum = {{ path = {api_axum_path} }}
+api-collector = {{ path = {api_collector_path} }}
+api-core = {{ path = {api_core_path} }}
+api-macros = {{ path = {api_macros_path} }}
+axum = "0.8"
+serde = {{ version = "1.0", features = ["derive"] }}
+tokio = {{ version = "1.0", features = ["macros", "net", "rt-multi-thread"] }}
+
+[package.metadata.rust_ts]
+ts_package = {ts_package}
+api_root = {api_root}
+features = []
+
+[lints]
+workspace = true
+"#,
+        rust_package = toml_string(&project.rust_package),
+        crate_name = toml_string(&project.crate_name),
+        api_axum_path = crate_dir("api-axum"),
+        api_collector_path = crate_dir("api-collector"),
+        api_core_path = crate_dir("api-core"),
+        api_macros_path = crate_dir("api-macros"),
+        ts_package = toml_string(&project.ts_package),
+        api_root = toml_string(&format!("{}::api", project.crate_name)),
+    )
+}
+
+fn render_new_root_package_json(project: &NewProject) -> String {
+    let api_manifest = normalize_path(&project.repo_root.join("crates/api-collector/Cargo.toml"));
+    let api_command = format!(
+        "cargo run -q --manifest-path {} --bin api --",
+        shell_quote(&api_manifest)
+    );
+    let language_server = file_dependency(&project.repo_root.join("npm/language-server-wrapper"));
+    format!(
+        r#"{{
+  "name": {workspace_name},
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "app"
+  ],
+  "scripts": {{
+    "api:check": {api_check},
+    "api:gen": {api_gen},
+    "dev:server": {dev_server},
+    "typecheck": {typecheck}
+  }},
+  "devDependencies": {{
+    "@effect/language-service": "*",
+    "@rust-ts-integration/language-server": {language_server},
+    "typescript": "^5.5.0",
+    "typescript-language-server": "*"
+  }}
+}}
+"#,
+        workspace_name = json_string(&format!("{}-workspace", project.name)),
+        api_check = json_string(&format!(
+            "{api_command} check --manifest-path Cargo.toml --package {} --target-dir target --ts-dir app/src --cargo-check",
+            project.rust_package
+        )),
+        api_gen = json_string(&format!(
+            "{api_command} check --manifest-path Cargo.toml --package {} --target-dir target --ts-dir app/src",
+            project.rust_package
+        )),
+        dev_server = json_string(&format!(
+            "cargo run -p {} -- serve {}",
+            project.rust_package, project.bind_addr
+        )),
+        typecheck = json_string(&format!("npm --workspace {}-app run typecheck", project.name)),
+        language_server = json_string(&language_server),
+    )
+}
+
+fn render_new_app_package_json(project: &NewProject) -> String {
+    let effect_runtime = file_dependency(&project.repo_root.join("npm/effect-runtime"));
+    format!(
+        r#"{{
+  "name": {name},
+  "private": true,
+  "type": "module",
+  "scripts": {{
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }},
+  "dependencies": {{
+    "@rust-ts-integration/effect-runtime": {effect_runtime},
+    "effect": {effect_version}
+  }}
+}}
+"#,
+        name = json_string(&format!("{}-app", project.name)),
+        effect_runtime = json_string(&effect_runtime),
+        effect_version = json_string(api_gen_effect_v4::EFFECT_VERSION),
+    )
+}
+
+fn render_new_api_ls_json() -> String {
+    r#"{
+  "rustAnalyzer": {
+    "command": "rust-analyzer",
+    "args": []
+  },
+  "typescript": {
+    "command": "npm",
+    "args": ["exec", "--", "typescript-language-server", "--stdio"]
+  },
+  "effectLanguageServicePlugin": "@effect/language-service",
+  "generatedCacheDir": "target/api-contract/effect-v4/packages",
+  "symbolGraph": "target/api-contract/rust-ts-symbols.json",
+  "usageIndex": "target/api-contract/graph/effect-usage-index.json",
+  "unusedEndpointLints": "warn",
+  "logFile": "target/api-ls.log"
+}
+"#
+    .to_owned()
+}
+
+fn render_new_gitignore() -> String {
+    r#"/target/
+/node_modules/
+/app/node_modules/
+"#
+    .to_owned()
+}
+
+fn render_new_readme(project: &NewProject) -> String {
+    format!(
+        r#"# {name}
+
+Minimal Rust + TypeScript API starter generated by `api new`.
+
+## Setup
+
+```sh
+npm install
+npm run api:check
+npm run typecheck
+```
+
+Start the server:
+
+```sh
+npm run dev:server
+```
+
+The Rust endpoint lives in `server/src/lib.rs`. The TypeScript usage lives in
+`app/src/client.ts` and imports the generated package `{ts_package}` after
+`npm run api:check` writes it under `target/api-contract/effect-v4/packages`.
+
+## LSP
+
+This project includes `.api-ls.json`. Point your editor at:
+
+```sh
+npm exec -- api-ls
+```
+
+Use `api-ls` as the only language server for Rust and TypeScript files in this
+workspace.
+"#,
+        name = project.name,
+        ts_package = project.ts_package,
+    )
+}
+
+fn render_new_server_lib(project: &NewProject) -> String {
+    format!(
+        r#"use api_axum::{{router, Json, Path}};
+use api_collector::{{collect_contract, CollectorInput}};
+use api_core::{{api_module, ir::ApiContract, ApiModule, ApiType}};
+use axum::{{response::Response, Router}};
+use serde::{{Deserialize, Serialize}};
+
+pub const TS_PACKAGE_NAME: &str = {ts_package};
+
+#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiType)]
+#[serde(rename_all = "camelCase")]
+pub struct Greeting {{
+    pub message: String,
+    pub requested_name: String,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
+#[serde(tag = "_tag", rename_all = "PascalCase")]
+pub enum GreetingError {{
+    #[api_error(status = 400)]
+    EmptyName,
+}}
+
+#[api_macros::api(method = "GET", path = "/{route_prefix}/{{name}}")]
+pub async fn greet(name: Path<String>) -> Result<Json<Greeting>, GreetingError> {{
+    let name = name.into_inner();
+    if name.trim().is_empty() {{
+        return Err(GreetingError::EmptyName);
+    }}
+
+    Ok(Json(Greeting {{
+        message: format!("Hello, {{name}}!"),
+        requested_name: name,
+    }}))
+}}
+
+#[must_use]
+pub fn api() -> ApiModule {{
+    api_module!(name = {api_module}, endpoints = [greet])
+}}
+
+#[must_use]
+pub fn contract() -> ApiContract {{
+    collect_contract(CollectorInput {{
+        package_name: TS_PACKAGE_NAME.to_owned(),
+        root_module: api(),
+        types: Vec::new(),
+        errors: Vec::new(),
+    }})
+}}
+
+#[must_use]
+pub fn app() -> Router {{
+    router(api())
+        .route(__api_endpoint_greet(), greet_response)
+        .into_router()
+}}
+
+async fn greet_response(name: Path<String>) -> Response {{
+    api_axum::success_or_error(greet(name).await)
+}}
+"#,
+        ts_package = rust_string(&project.ts_package),
+        api_module = rust_string(&project.api_module),
+        route_prefix = project.api_module,
+    )
+}
+
+fn render_new_server_main(project: &NewProject) -> String {
+    format!(
+        r#"use std::{{
+    env,
+    io::{{self, Write}},
+    net::SocketAddr,
+    process::ExitCode,
+}};
+
+use api_collector::contract_to_json;
+
+#[tokio::main]
+async fn main() -> ExitCode {{
+    match run().await {{
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {{
+            eprintln!("{{error}}");
+            ExitCode::FAILURE
+        }}
+    }}
+}}
+
+async fn run() -> Result<(), String> {{
+    let mut args = env::args().skip(1);
+    let command = args.next().unwrap_or_else(|| "serve".to_owned());
+
+    match command.as_str() {{
+        "contract" => {{
+            let json = contract_to_json(&{crate_name}::contract())
+                .map_err(|error| format!("failed to serialize contract: {{error}}"))?;
+            println!("{{json}}");
+            Ok(())
+        }}
+        "serve" => {{
+            let addr = args
+                .next()
+                .unwrap_or_else(|| {bind_addr}.to_owned())
+                .parse::<SocketAddr>()
+                .map_err(|error| format!("invalid listen address: {{error}}"))?;
+            serve(addr).await
+        }}
+        "--help" | "-h" | "help" => {{
+            print_usage();
+            Ok(())
+        }}
+        other => Err(format!("unknown server command `{{other}}`")),
+    }}
+}}
+
+async fn serve(addr: SocketAddr) -> Result<(), String> {{
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|error| format!("failed to bind {{addr}}: {{error}}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to read local address: {{error}}"))?;
+
+    println!("LISTENING http://{{local_addr}}");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to flush listen address: {{error}}"))?;
+
+    axum::serve(listener, {crate_name}::app())
+        .await
+        .map_err(|error| format!("server failed: {{error}}"))
+}}
+
+fn print_usage() {{
+    println!("usage:\n  {rust_package} contract\n  {rust_package} serve [addr]");
+}}
+"#,
+        crate_name = project.crate_name,
+        bind_addr = rust_string(&project.bind_addr),
+        rust_package = project.rust_package,
+    )
+}
+
+fn render_new_app_tsconfig(project: &NewProject) -> String {
+    let package_dir =
+        api_gen_effect_v4::generated_package_dir(Path::new("../target"), &project.ts_package);
+    let package_dir = normalize_path(&package_dir);
+    format!(
+        r#"{{
+  "compilerOptions": {{
+    "baseUrl": ".",
+    "exactOptionalPropertyTypes": true,
+    "lib": ["DOM", "ES2022", "ESNext.Disposable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022",
+    "paths": {{
+      {ts_package}: [
+        {package_index}
+      ],
+      {ts_package_glob}: [
+        {package_glob}
+      ]
+    }}
+  }},
+  "include": ["src/**/*.ts"]
+}}
+"#,
+        ts_package = json_string(&project.ts_package),
+        package_index = json_string(&format!("{package_dir}/index.ts")),
+        ts_package_glob = json_string(&format!("{}/*", project.ts_package)),
+        package_glob = json_string(&format!("{package_dir}/*")),
+    )
+}
+
+fn render_new_app_client(project: &NewProject) -> String {
+    format!(
+        r#"import {{ Effect }} from "@rust-ts-integration/effect-runtime/compat"
+import {{ ServerApi, {api_module} }} from {ts_package}
+
+export const serverLayer = (baseUrl: string) =>
+  ServerApi.layer({{
+    baseUrl,
+    timeoutMs: 5_000,
+  }})
+
+export const loadGreetingMessage = (name: string) =>
+  Effect.gen(function* () {{
+    const greeting = yield* {api_module}.greet({{ name }})
+    return greeting.message
+  }}).pipe(
+    Effect.catchTag("EmptyName", () => Effect.succeed("Hello, stranger!")),
+  )
+
+export const program = loadGreetingMessage({sample_name}).pipe(
+  Effect.provide(serverLayer({base_url})),
+)
+"#,
+        api_module = project.api_module,
+        ts_package = json_string(&project.ts_package),
+        sample_name = json_string(&project.sample_name),
+        base_url = json_string(&format!("http://{}", project.bind_addr)),
+    )
+}
+
+fn file_dependency(path: &Path) -> String {
+    format!("file:{}", normalize_path(path))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn validate_cargo_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.ends_with('-')
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(format!(
+            "api new Rust package `{name}` must use ASCII letters, digits, '-' or '_'"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ts_package_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.contains(char::is_whitespace) {
+        return Err(
+            "api new TypeScript package name must be non-empty and contain no whitespace"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn sanitize_kebab(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_dash = false;
+    for character in value.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            output.push(character);
+            last_dash = false;
+        } else if !last_dash && !output.is_empty() {
+            output.push('-');
+            last_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    output
+}
+
+fn sanitize_snake_identifier(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_underscore = false;
+    for character in value.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            output.push(character);
+            last_underscore = false;
+        } else if !last_underscore && !output.is_empty() {
+            output.push('_');
+            last_underscore = true;
+        }
+    }
+    while output.ends_with('_') {
+        output.pop();
+    }
+    if output
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+    {
+        output.insert(0, '_');
+    }
+    output
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -748,67 +1537,46 @@ struct ResolvedCollectTarget {
     features: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Args)]
 struct CollectOptions {
+    /// Override the generated TypeScript package name.
+    #[arg(long = "package-name")]
     package_name: Option<String>,
+    /// Cargo package to collect.
+    #[arg(long = "package", short = 'p')]
     cargo_package: Option<String>,
+    /// Override the Rust API root function path.
+    #[arg(long = "api-root")]
     api_root: Option<String>,
+    /// Contract output path.
+    #[arg(long)]
     out: Option<PathBuf>,
+    /// Cargo manifest to inspect.
+    #[arg(long, default_value = "Cargo.toml")]
     manifest_path: PathBuf,
+    /// Directory for temporary collector and workspace contract output.
+    #[arg(long = "target-dir")]
     target_dir: Option<PathBuf>,
+    /// Cargo features to enable. May be repeated or space/comma separated.
+    #[arg(long, num_args = 1..)]
     features: Vec<String>,
+    /// Enable all Cargo features.
+    #[arg(long = "all-features")]
     all_features: bool,
+    /// Disable default Cargo features for the collected package.
+    #[arg(long = "no-default-features")]
     no_default_features: bool,
+    /// Explicitly write an empty contract for debugging or bootstrapping.
+    #[arg(long)]
     empty: bool,
+    /// Collect all API-enabled workspace packages into a workspace graph.
+    #[arg(long)]
     workspace: bool,
 }
 
 impl CollectOptions {
-    fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut args = args;
-        let mut options = Self {
-            package_name: None,
-            cargo_package: None,
-            api_root: None,
-            out: None,
-            manifest_path: PathBuf::from("Cargo.toml"),
-            target_dir: None,
-            features: Vec::new(),
-            all_features: false,
-            no_default_features: false,
-            empty: false,
-            workspace: false,
-        };
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--package-name" => options.package_name = args.next(),
-                "--package" | "-p" => options.cargo_package = args.next(),
-                "--api-root" => options.api_root = args.next(),
-                "--out" => options.out = args.next().map(PathBuf::from),
-                "--manifest-path" => {
-                    options.manifest_path = required_path(&mut args, "--manifest-path")?;
-                }
-                "--target-dir" => {
-                    options.target_dir = Some(required_path(&mut args, "--target-dir")?);
-                }
-                "--features" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "--features requires <features>".to_owned())?;
-                    options.features.extend(parse_features(&value));
-                }
-                "--all-features" => options.all_features = true,
-                "--no-default-features" => options.no_default_features = true,
-                "--empty" => options.empty = true,
-                "--workspace" => options.workspace = true,
-                other => return Err(format!("unknown api collect argument `{other}`")),
-            }
-        }
-
-        options.features.sort();
-        options.features.dedup();
-        Ok(options)
+    fn normalize(&mut self) {
+        normalize_features(&mut self.features);
     }
 }
 
@@ -1659,13 +2427,18 @@ fn tool_package_manifest_dir(
     }
 }
 
-fn parse_features(value: &str) -> Vec<String> {
-    value
-        .split([',', ' '])
-        .map(str::trim)
-        .filter(|feature| !feature.is_empty())
-        .map(str::to_owned)
-        .collect()
+fn normalize_features(features: &mut Vec<String>) {
+    let values = std::mem::take(features);
+    features.extend(
+        values
+            .iter()
+            .flat_map(|value| value.split([',', ' ']))
+            .map(str::trim)
+            .filter(|feature| !feature.is_empty())
+            .map(str::to_owned),
+    );
+    features.sort();
+    features.dedup();
 }
 
 fn sanitize_package_dir_name(name: &str) -> String {
@@ -1713,35 +2486,30 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-#[derive(Debug)]
-struct ContractTargetOptions {
-    contract: PathBuf,
+#[derive(Debug, Args)]
+struct GenOptions {
+    /// Contract JSON to generate from.
+    #[arg(long, conflicts_with = "workspace_contract")]
+    contract: Option<PathBuf>,
+    /// Workspace contract graph to generate from.
+    #[arg(long = "workspace-contract", conflicts_with = "contract")]
+    workspace_contract: Option<PathBuf>,
+    /// Directory for generated package and graph output.
+    #[arg(long, alias = "out-dir", default_value = "target")]
     target_dir: PathBuf,
-    once: bool,
 }
 
-impl ContractTargetOptions {
-    fn parse(args: impl Iterator<Item = String>, command: &str) -> Result<Self, String> {
-        let mut args = args;
-        let mut contract = None;
-        let mut target_dir = None;
-        let mut once = false;
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--contract" => contract = args.next().map(PathBuf::from),
-                "--target-dir" | "--out-dir" => target_dir = args.next().map(PathBuf::from),
-                "--once" => once = true,
-                other => return Err(format!("unknown {command} argument `{other}`")),
-            }
-        }
-
-        Ok(Self {
-            contract: contract.ok_or_else(|| format!("{command} requires --contract <path>"))?,
-            target_dir: target_dir.unwrap_or_else(|| PathBuf::from("target")),
-            once,
-        })
-    }
+#[derive(Debug, Args)]
+struct ContractTargetOptions {
+    /// Contract JSON to generate from.
+    #[arg(long)]
+    contract: PathBuf,
+    /// Directory for generated package and graph output.
+    #[arg(long, alias = "out-dir", default_value = "target")]
+    target_dir: PathBuf,
+    /// Accepted for compatibility; the current watch command regenerates once.
+    #[arg(long)]
+    once: bool,
 }
 
 fn read_contract(path: &Path) -> Result<ApiContract, String> {
@@ -2140,12 +2908,6 @@ fn stale_generated_files(package: &GeneratedPackage) -> Result<Vec<String>, Stri
     Ok(stale)
 }
 
-fn required_path(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
-    args.next()
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("{flag} requires <path>"))
-}
-
 fn collect_ts_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|error| {
         format!(
@@ -2193,22 +2955,6 @@ fn read_ts_sources(paths: &[PathBuf]) -> Result<Vec<TypeScriptSourceFile>, Strin
         .collect()
 }
 
-fn usage() -> String {
-    [
-        "usage:",
-        "  api collect --package <cargo-package> --out <path> [--api-root <path::to::api>] [--package-name <ts-package>] [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--features <list>] [--all-features] [--no-default-features]",
-        "  api collect --workspace [--manifest-path <Cargo.toml>] [--target-dir <dir>]",
-        "  api collect --empty --package-name <ts-package> --out <path>",
-        "  api gen --contract <path> [--target-dir <dir>]",
-        "  api gen --workspace-contract <path> [--target-dir <dir>]",
-        "  api watch --contract <path> [--target-dir <dir>] [--once]",
-        "  api check [--contract <path> | --package <cargo-package> | --workspace] [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--ts <file>] [--ts-dir <dir>] [--deny-unused-endpoints] [--cargo-check]",
-        "  api check-usages --contract <path> --out <path> [--symbol-graph <path>] [--ts <file>] [--ts-dir <dir>]",
-        "  api doctor [--manifest-path <Cargo.toml>]",
-    ]
-    .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2216,6 +2962,51 @@ mod tests {
     use super::*;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn new_project_generates_minimal_workspace() {
+        let root = test_root("new-project");
+
+        run_with_args(vec![
+            "new".to_owned(),
+            root.display().to_string(),
+            "--yes".to_owned(),
+            "--name".to_owned(),
+            "sample-api".to_owned(),
+            "--rust-package".to_owned(),
+            "sample-api-server".to_owned(),
+            "--ts-package".to_owned(),
+            "@workspace/sample-api".to_owned(),
+            "--module".to_owned(),
+            "greetings".to_owned(),
+            "--sample-name".to_owned(),
+            "Grace".to_owned(),
+            "--bind".to_owned(),
+            "127.0.0.1:3001".to_owned(),
+        ])
+        .expect("generate new project");
+
+        assert!(root.join("Cargo.toml").is_file());
+        assert!(root.join("package.json").is_file());
+        assert!(root.join(".api-ls.json").is_file());
+        assert!(root.join("server/src/lib.rs").is_file());
+        assert!(root.join("app/src/client.ts").is_file());
+
+        let server_manifest =
+            fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
+        assert!(server_manifest.contains("name = \"sample-api-server\""));
+        assert!(server_manifest.contains("ts_package = \"@workspace/sample-api\""));
+        assert!(server_manifest.contains("api_root = \"sample_api_server::api\""));
+
+        let client = fs::read_to_string(root.join("app/src/client.ts")).expect("read client");
+        assert!(client.contains("import { ServerApi, greetings } from \"@workspace/sample-api\""));
+        assert!(client.contains("yield* greetings.greet({ name })"));
+        assert!(client.contains("\"Grace\""));
+
+        let lsp = fs::read_to_string(root.join(".api-ls.json")).expect("read lsp config");
+        assert!(lsp.contains("typescript-language-server"));
+        assert!(lsp.contains("target/api-contract/rust-ts-symbols.json"));
+    }
 
     #[test]
     fn gen_and_check_hidden_package() {
