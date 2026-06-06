@@ -13,15 +13,17 @@
   },
   "type": "module",
   "bin": {
-    "typeweld-ls": "./src/index.ts"
+    "typeweld-ls": "./dist/index.js"
   },
   "files": [
     "bin",
-    "src"
+    "dist"
   ],
   "scripts": {
-    "prepare:binary": "node scripts/prepare-package.mjs",
-    "test": "npm run typecheck && npm run test:wrapper",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare:binary": "tsx scripts/prepare-package.mts",
+    "prepack": "npm run build",
+    "test": "npm run build && npm run typecheck && npm run test:wrapper",
     "test:wrapper": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   }

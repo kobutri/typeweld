@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import { execFileSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
@@ -7,7 +5,57 @@ import { fileURLToPath } from "node:url"
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
-const releaseCrates = [
+type CargoDependency = {
+  name: string
+  req: string
+}
+
+type CargoPackage = {
+  name: string
+  version: string
+  categories?: readonly string[]
+  dependencies: readonly CargoDependency[]
+  description?: string
+  keywords?: readonly string[]
+  license?: string
+  readme?: string
+  repository?: string
+}
+
+type CargoMetadata = {
+  packages: readonly CargoPackage[]
+}
+
+type NpmManifest = {
+  name?: string
+  version?: string
+  bin?: Record<string, string>
+  dependencies?: Record<string, string>
+  exports?: Record<string, unknown>
+  files?: readonly string[]
+  license?: string
+  private?: boolean
+  publishConfig?: {
+    access?: string
+  }
+  repository?: unknown
+  types?: string
+}
+
+type PackageLock = {
+  packages?: Record<string, {
+    name?: string
+    version?: string
+  }>
+}
+
+type NpmReleasePackage = readonly [
+  packageName: string,
+  manifestPath: string,
+  lockPath: string | null,
+]
+
+const releaseCrates: readonly string[] = [
   "typeweld-ir",
   "typeweld-build",
   "typeweld-core",
@@ -18,7 +66,7 @@ const releaseCrates = [
   "typeweld-ls",
 ]
 
-const npmReleasePackages = [
+const npmReleasePackages: readonly NpmReleasePackage[] = [
   ["typeweld", "npm/cli/package.json", "cli"],
   ["@typeweld/effect-runtime", "npm/effect-runtime/package.json", "effect-runtime"],
   [
@@ -34,7 +82,7 @@ const npmReleasePackages = [
   ],
 ]
 
-const npmPublicPackages = new Set([
+const npmPublicPackages = new Set<string>([
   "typeweld",
   "@typeweld/effect-runtime",
   "@typeweld/language-server",
@@ -43,34 +91,30 @@ const npmPublicPackages = new Set([
 const checkedInternalRustDependencies = new Set(releaseCrates)
 checkedInternalRustDependencies.add("typeweld-test-fixtures")
 
-function readJson(path) {
-  return JSON.parse(readFileSync(resolve(repoRoot, path), "utf8"))
+function readJson<T>(path: string): T {
+  return JSON.parse(readFileSync(resolve(repoRoot, path), "utf8")) as T
 }
 
-function fail(messages) {
+function fail(messages: readonly string[]): never {
   for (const message of messages) {
     console.error(message)
   }
   process.exit(1)
 }
 
-function versionSource(version, source) {
-  return `${source}: ${version}`
-}
-
-const errors = []
+const errors: string[] = []
 const cargoMetadata = JSON.parse(
   execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
     cwd: repoRoot,
     encoding: "utf8",
   }),
-)
+) as CargoMetadata
 
 const cargoPackages = new Map(
   cargoMetadata.packages.map((cargoPackage) => [cargoPackage.name, cargoPackage]),
 )
 
-const expectedVersions = []
+const expectedVersions: { name: string; version: string }[] = []
 
 for (const crateName of releaseCrates) {
   const cargoPackage = cargoPackages.get(crateName)
@@ -78,24 +122,26 @@ for (const crateName of releaseCrates) {
     errors.push(`missing Cargo package ${crateName}`)
     continue
   }
-  expectedVersions.push(versionSource(cargoPackage.version, crateName))
+  expectedVersions.push({ name: crateName, version: cargoPackage.version })
 }
 
-const expectedVersion = expectedVersions[0]?.split(": ")[1]
+const expectedVersion = expectedVersions[0]?.version
 
 if (!expectedVersion) {
   fail(errors.length === 0 ? ["could not derive release version"] : errors)
 }
 
-const requiredCargoMetadata = [
+const requiredCargoMetadata: readonly (keyof Pick<
+  CargoPackage,
+  "description" | "license" | "readme" | "repository"
+>)[] = [
   "description",
   "license",
   "repository",
   "readme",
 ]
 
-for (const source of expectedVersions) {
-  const [name, version] = source.split(": ")
+for (const { name, version } of expectedVersions) {
   const cargoPackage = cargoPackages.get(name)
   if (version !== expectedVersion) {
     errors.push(
@@ -134,13 +180,13 @@ for (const cargoPackage of cargoMetadata.packages) {
   }
 }
 
-const npmRootManifest = readJson("npm/package.json")
+const npmRootManifest = readJson<NpmManifest>("npm/package.json")
 if (npmRootManifest.private !== true) {
   errors.push("npm/package.json must stay private so the workspace root is never published")
 }
 
 for (const [packageName, manifestPath] of npmReleasePackages) {
-  const manifest = readJson(manifestPath)
+  const manifest = readJson<NpmManifest>(manifestPath)
   if (manifest.name !== packageName) {
     errors.push(
       `${manifestPath} has package name ${manifest.name}; expected ${packageName}`,
@@ -168,12 +214,12 @@ for (const [packageName, manifestPath] of npmReleasePackages) {
   }
 }
 
-const cliManifest = readJson("npm/cli/package.json")
-if (cliManifest.bin?.typeweld !== "./src/index.mjs") {
+const cliManifest = readJson<NpmManifest>("npm/cli/package.json")
+if (cliManifest.bin?.typeweld !== "./dist/index.js") {
   errors.push("typeweld npm package must expose the typeweld CLI bin")
 }
 
-const effectRuntimeManifest = readJson("npm/effect-runtime/package.json")
+const effectRuntimeManifest = readJson<NpmManifest>("npm/effect-runtime/package.json")
 if (effectRuntimeManifest.types !== "./src/index.ts") {
   errors.push("@typeweld/effect-runtime must expose ./src/index.ts as types")
 }
@@ -181,12 +227,12 @@ if (!effectRuntimeManifest.exports?.["."] || !effectRuntimeManifest.exports?.[".
   errors.push("@typeweld/effect-runtime must export . and ./compat")
 }
 
-const languageServerManifest = readJson("npm/language-server-wrapper/package.json")
-if (languageServerManifest.bin?.["typeweld-ls"] !== "./src/index.ts") {
+const languageServerManifest = readJson<NpmManifest>("npm/language-server-wrapper/package.json")
+if (languageServerManifest.bin?.["typeweld-ls"] !== "./dist/index.js") {
   errors.push("@typeweld/language-server must expose the typeweld-ls CLI bin")
 }
 
-const vscodeManifest = readJson("npm/vscode-extension/package.json")
+const vscodeManifest = readJson<NpmManifest>("npm/vscode-extension/package.json")
 if (
   vscodeManifest.dependencies?.["@typeweld/language-server"] !== expectedVersion
 ) {
@@ -195,7 +241,7 @@ if (
   )
 }
 
-const packageLock = readJson("npm/package-lock.json")
+const packageLock = readJson<PackageLock>("npm/package-lock.json")
 for (const [packageName, , lockPath] of npmReleasePackages) {
   if (!lockPath) {
     continue

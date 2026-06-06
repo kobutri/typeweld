@@ -660,9 +660,26 @@ function bundledLauncherPath(context: vscode.ExtensionContext): string | undefin
   }
 
   try {
+    return nodeRequire.resolve("@typeweld/language-server/dist/index.js")
+  } catch {
+    const packagedDistPath = context.asAbsolutePath(
+      path.join(
+        "node_modules",
+        "@typeweld",
+        "language-server",
+        "dist",
+        "index.js",
+      ),
+    )
+    if (fs.existsSync(packagedDistPath)) {
+      return packagedDistPath
+    }
+  }
+
+  try {
     return nodeRequire.resolve("@typeweld/language-server/src/index.ts")
   } catch {
-    const packagedPath = context.asAbsolutePath(
+    const sourcePath = context.asAbsolutePath(
       path.join(
         "node_modules",
         "@typeweld",
@@ -671,7 +688,7 @@ function bundledLauncherPath(context: vscode.ExtensionContext): string | undefin
         "index.ts",
       ),
     )
-    return fs.existsSync(packagedPath) ? packagedPath : undefined
+    return fs.existsSync(sourcePath) ? sourcePath : undefined
   }
 }
 

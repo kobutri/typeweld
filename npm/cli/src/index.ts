@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process"
+import { spawn, type ChildProcess } from "node:child_process"
 import {
   accessSync,
   constants,
@@ -14,18 +14,42 @@ import { fileURLToPath } from "node:url"
 export const binaryName = "typeweld"
 export const binaryOverrideEnvVars = ["TYPEWELD_BINARY", "API_CLI_BINARY"]
 
+type Candidate = {
+  source: string
+  path: string
+}
+
+type CandidateOptions = {
+  cwd: string
+  env: NodeJS.ProcessEnv
+  wrapperFile: string
+}
+
+type ExecutableStatus =
+  | { ok: true; reason: "found" }
+  | { ok: false; reason: string }
+
+export type ResolveOptions = {
+  env?: NodeJS.ProcessEnv
+  cwd?: string
+  wrapperFile?: string
+  invocationFile?: string
+}
+
 const wrapperFile = fileURLToPath(import.meta.url)
 const platformBinaryName = process.platform === "win32" ? `${binaryName}.exe` : binaryName
 
 export class TypeweldWrapperError extends Error {
-  constructor(message, checked) {
+  readonly checked: readonly string[]
+
+  constructor(message: string, checked: readonly string[]) {
     super(message)
     this.name = "TypeweldWrapperError"
     this.checked = checked
   }
 }
 
-export function resolveTypeweldBinary(options = {}) {
+export function resolveTypeweldBinary(options: ResolveOptions = {}): string {
   const env = options.env ?? process.env
   const cwd = resolve(options.cwd ?? process.cwd())
   const currentWrapperFile = resolve(options.wrapperFile ?? wrapperFile)
@@ -33,7 +57,7 @@ export function resolveTypeweldBinary(options = {}) {
     ? resolve(options.invocationFile)
     : process.argv[1]
   const wrapperRealpaths = realpathSet([currentWrapperFile, invocationFile])
-  const checked = []
+  const checked: string[] = []
   const override = resolveOverride(env, cwd)
 
   if (override !== undefined) {
@@ -78,17 +102,19 @@ export function resolveTypeweldBinary(options = {}) {
 }
 
 export function launchTypeweld(
-  binary,
-  args = process.argv.slice(2),
-  env = process.env,
-) {
+  binary: string,
+  args: readonly string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env,
+): ChildProcess {
   const child = spawn(binary, [...args], {
     env,
     stdio: "inherit",
     windowsHide: true,
   })
 
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  const forwardedSignals: readonly NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"]
+
+  for (const signal of forwardedSignals) {
     process.once(signal, () => {
       child.kill(signal)
     })
@@ -120,7 +146,7 @@ export function launchTypeweld(
   return child
 }
 
-export function main() {
+export function main(): void {
   try {
     launchTypeweld(resolveTypeweldBinary(), process.argv.slice(2))
   } catch (error) {
@@ -137,9 +163,9 @@ if (isMainModule(wrapperFile, process.argv[1])) {
   main()
 }
 
-function candidateBinaries(options) {
+function candidateBinaries(options: CandidateOptions): readonly Candidate[] {
   const packageRoots = findPackageRoots(dirname(options.wrapperFile))
-  const candidates = []
+  const candidates: Candidate[] = []
 
   for (const packageRoot of packageRoots) {
     candidates.push(
@@ -177,8 +203,8 @@ function candidateBinaries(options) {
   return dedupeCandidates(candidates)
 }
 
-function cargoTargetDirs(options) {
-  const roots = []
+function cargoTargetDirs(options: CandidateOptions): readonly string[] {
+  const roots: string[] = []
   const explicitTargetDir = options.env.CARGO_TARGET_DIR?.trim()
 
   if (explicitTargetDir !== undefined && explicitTargetDir !== "") {
@@ -198,8 +224,8 @@ function cargoTargetDirs(options) {
   return dedupeStrings(roots)
 }
 
-function workspaceRoots(start) {
-  const roots = []
+function workspaceRoots(start: string): readonly string[] {
+  const roots: string[] = []
 
   for (const directory of parentDirs(resolve(start))) {
     if (
@@ -213,7 +239,7 @@ function workspaceRoots(start) {
   return roots
 }
 
-function resolveOverride(env, cwd) {
+function resolveOverride(env: NodeJS.ProcessEnv, cwd: string): Candidate | undefined {
   for (const envVar of binaryOverrideEnvVars) {
     const raw = env[envVar]?.trim()
     if (raw !== undefined && raw !== "") {
@@ -227,7 +253,7 @@ function resolveOverride(env, cwd) {
   return undefined
 }
 
-function pathBinaries(env) {
+function pathBinaries(env: NodeJS.ProcessEnv): readonly string[] {
   const pathValue = readPathEnv(env)
   if (pathValue === undefined || pathValue === "") {
     return []
@@ -241,19 +267,19 @@ function pathBinaries(env) {
     )
 }
 
-function executableNames() {
+function executableNames(): readonly string[] {
   return process.platform === "win32"
     ? [`${binaryName}.exe`, binaryName]
     : [binaryName]
 }
 
-function readPathEnv(env) {
+function readPathEnv(env: NodeJS.ProcessEnv): string | undefined {
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path")
   return pathKey === undefined ? undefined : env[pathKey]
 }
 
-function findPackageRoots(start) {
-  const roots = []
+function findPackageRoots(start: string): readonly string[] {
+  const roots: string[] = []
   for (const directory of parentDirs(resolve(start))) {
     if (existsSync(join(directory, "package.json"))) {
       roots.push(directory)
@@ -263,8 +289,8 @@ function findPackageRoots(start) {
   return roots
 }
 
-function parentDirs(start) {
-  const directories = []
+function parentDirs(start: string): readonly string[] {
+  const directories: string[] = []
   let current = resolve(start)
 
   while (true) {
@@ -277,12 +303,12 @@ function parentDirs(start) {
   }
 }
 
-function executableStatus(file) {
+function executableStatus(file: string): ExecutableStatus {
   if (!existsSync(file)) {
     return { ok: false, reason: "it does not exist" }
   }
 
-  let stat
+  let stat: ReturnType<typeof statSync>
   try {
     stat = statSync(file)
   } catch (error) {
@@ -305,8 +331,8 @@ function executableStatus(file) {
   return { ok: true, reason: "found" }
 }
 
-function realpathSet(files) {
-  const paths = new Set()
+function realpathSet(files: readonly (string | undefined)[]): Set<string> {
+  const paths = new Set<string>()
   for (const file of files) {
     const realpath = file === undefined ? undefined : realpathSafe(file)
     if (realpath !== undefined) {
@@ -316,7 +342,7 @@ function realpathSet(files) {
   return paths
 }
 
-function realpathSafe(file) {
+function realpathSafe(file: string): string | undefined {
   try {
     return realpathSync(file)
   } catch {
@@ -324,13 +350,13 @@ function realpathSafe(file) {
   }
 }
 
-function dedupeStrings(values) {
+function dedupeStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)]
 }
 
-function dedupeCandidates(candidates) {
-  const seen = new Set()
-  const deduped = []
+function dedupeCandidates(candidates: readonly Candidate[]): readonly Candidate[] {
+  const seen = new Set<string>()
+  const deduped: Candidate[] = []
 
   for (const candidate of candidates) {
     const key = `${candidate.source}\0${candidate.path}`
@@ -344,11 +370,11 @@ function dedupeCandidates(candidates) {
   return deduped
 }
 
-function formatChecked(source, file, reason) {
+function formatChecked(source: string, file: string, reason: string): string {
   return `${source}: ${file} (${reason})`
 }
 
-function formatMissingDiagnostic(checked) {
+function formatMissingDiagnostic(checked: readonly string[]): string {
   const maxLines = 24
   const displayed = checked.slice(0, maxLines)
   const omitted = checked.length - displayed.length
@@ -375,7 +401,7 @@ function formatMissingDiagnostic(checked) {
   ].join("\n")
 }
 
-function isMainModule(moduleFile, invocationFile) {
+function isMainModule(moduleFile: string, invocationFile: string | undefined): boolean {
   if (invocationFile === undefined) {
     return false
   }
@@ -390,7 +416,7 @@ function isMainModule(moduleFile, invocationFile) {
   )
 }
 
-function exitFromSignal(signal) {
+function exitFromSignal(signal: NodeJS.Signals): void {
   try {
     process.kill(process.pid, signal)
   } catch {
@@ -400,6 +426,6 @@ function exitFromSignal(signal) {
   setTimeout(() => process.exit(1), 250).unref()
 }
 
-function errorMessage(error) {
+function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

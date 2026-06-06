@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import {
   accessSync,
   chmodSync,
@@ -15,7 +13,7 @@ import { fileURLToPath } from "node:url"
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(scriptDir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
-const binaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
+const binaryName = process.platform === "win32" ? "typeweld.exe" : "typeweld"
 const platformDir =
   parseOption(process.argv.slice(2), "--platform-dir") ??
   `${process.platform}-${process.arch}`
@@ -23,27 +21,25 @@ const outDir = join(packageRoot, "bin", platformDir)
 const outFile = join(outDir, binaryName)
 
 const explicitBinary =
-  parseOption(process.argv.slice(2), "--binary") ??
-  process.env.TYPEWELD_LS_BINARY ??
-  process.env.TYPEWELD_LS
+  parseOption(process.argv.slice(2), "--typeweld-binary") ?? process.env.TYPEWELD_BINARY
 const candidates = [
   explicitBinary,
   join(repoRoot, "target", "release", binaryName),
   join(repoRoot, "target", "debug", binaryName),
-].filter((value) => value !== undefined && value.trim() !== "")
+].filter((value): value is string => value !== undefined && value.trim() !== "")
 
 const source = candidates.find((candidate) => isExecutable(candidate))
 
 if (source === undefined) {
   console.error(
     [
-      "could not find a typeweld-ls binary to package.",
+      "could not find a typeweld binary to package.",
       "",
       "Build one first:",
-      "  cargo build -p typeweld-ls --bin typeweld-ls --release",
+      "  cargo build -p typeweld-cli --bin typeweld --release",
       "",
       "Or pass it explicitly:",
-      "  npm run prepare:binary --workspace @typeweld/language-server -- --binary /path/to/typeweld-ls",
+      "  npm run prepare:binary --workspace typeweld -- --typeweld-binary /path/to/typeweld",
       "",
       "Checked:",
       ...candidates.map((candidate) => `  - ${candidate}`),
@@ -57,9 +53,12 @@ copyFileSync(source, outFile)
 chmodSync(outFile, 0o755)
 console.log(`packaged ${source} -> ${outFile}`)
 
-function parseOption(args, name) {
+function parseOption(args: readonly string[], name: string): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
+    if (arg === undefined) {
+      continue
+    }
     if (arg === name) {
       return args[index + 1]
     }
@@ -70,7 +69,7 @@ function parseOption(args, name) {
   return undefined
 }
 
-function isExecutable(path) {
+function isExecutable(path: string | undefined): boolean {
   if (path === undefined || !existsSync(path)) {
     return false
   }

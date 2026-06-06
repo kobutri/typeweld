@@ -15,8 +15,7 @@ import type { SpawnSyncReturns } from "node:child_process"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
-const wrapperPath = join(packageRoot, "src", "index.ts")
-const tsxCli = join(packageRoot, "..", "node_modules", "tsx", "dist", "cli.mjs")
+const wrapperPath = join(packageRoot, "dist", "index.js")
 const wrapperModule = await import(pathToFileURL(wrapperPath).href)
 const binaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
 
@@ -25,14 +24,14 @@ it("package exposes typeweld-ls as an executable bin", () => {
     readFileSync(join(packageRoot, "package.json"), "utf8"),
   )
 
-  expect(packageJson.bin["typeweld-ls"]).toBe("./src/index.ts")
+  expect(packageJson.bin["typeweld-ls"]).toBe("./dist/index.js")
 })
 
 it("resolves a packaged gateway binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
   try {
     const fakePackageRoot = join(temp, "language-server")
-    const fakeWrapper = join(fakePackageRoot, "src", "index.ts")
+    const fakeWrapper = join(fakePackageRoot, "dist", "index.js")
     const fakeGateway = join(fakePackageRoot, "bin", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
@@ -95,7 +94,7 @@ it("resolves a local cargo build gateway from the current workspace", () => {
   const temp = createTempDir()
   try {
     const workspace = join(temp, "workspace")
-    const fakeWrapper = join(temp, "package", "src", "index.ts")
+    const fakeWrapper = join(temp, "package", "dist", "index.js")
     const fakeGateway = join(workspace, "target", "debug", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
@@ -181,7 +180,7 @@ function runWrapper(
   env: NodeJS.ProcessEnv,
   input = "",
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [tsxCli, wrapperPath, ...args], {
+  return spawnSync(process.execPath, [wrapperPath, ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,

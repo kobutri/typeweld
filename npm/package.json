@@ -11,7 +11,7 @@
     "vscode-extension"
   ],
   "scripts": {
-    "check:versions": "node ../scripts/check-versions.mjs",
+    "check:versions": "tsx ../scripts/check-versions.mts",
     "test": "npm run check:versions && npm run typecheck && npm run test:cli && npm run test:runtime && npm run test:lsp-wrapper && npm run test:vscode",
     "test:cli": "npm run test:wrapper --workspace typeweld",
     "test:lsp-wrapper": "npm run test:wrapper --workspace @typeweld/language-server",

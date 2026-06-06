@@ -15,7 +15,7 @@ import type { SpawnSyncReturns } from "node:child_process"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
-const wrapperPath = join(packageRoot, "src", "index.mjs")
+const wrapperPath = join(packageRoot, "dist", "index.js")
 const wrapperModule = await import(pathToFileURL(wrapperPath).href)
 const binaryName = process.platform === "win32" ? "typeweld.exe" : "typeweld"
 
@@ -24,14 +24,14 @@ it("package exposes typeweld as an executable bin", () => {
     readFileSync(join(packageRoot, "package.json"), "utf8"),
   )
 
-  expect(packageJson.bin.typeweld).toBe("./src/index.mjs")
+  expect(packageJson.bin.typeweld).toBe("./dist/index.js")
 })
 
 it("resolves a packaged CLI binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
   try {
     const fakePackageRoot = join(temp, "typeweld")
-    const fakeWrapper = join(fakePackageRoot, "src", "index.mjs")
+    const fakeWrapper = join(fakePackageRoot, "dist", "index.js")
     const fakeCli = join(fakePackageRoot, "bin", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeCli), { recursive: true })
@@ -55,7 +55,7 @@ it("resolves a local cargo build CLI from the current workspace", () => {
   const temp = createTempDir()
   try {
     const workspace = join(temp, "workspace")
-    const fakeWrapper = join(temp, "package", "src", "index.mjs")
+    const fakeWrapper = join(temp, "package", "dist", "index.js")
     const fakeCli = join(workspace, "target", "debug", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeCli), { recursive: true })
