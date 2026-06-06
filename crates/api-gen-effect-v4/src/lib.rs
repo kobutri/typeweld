@@ -910,10 +910,10 @@ pub fn render_package_json(contract: &ApiContract) -> String {
 #[must_use]
 pub fn render_package_index(contract: &ApiContract) -> String {
     let mut output = render_package_banner(contract);
-    output.push_str("export * from \"./schemas.js\"\n");
-    output.push_str("export * from \"./errors.js\"\n");
-    output.push_str("export * from \"./endpoints.js\"\n");
-    output.push_str("export * from \"./layer.js\"\n");
+    output.push_str("export * from \"./schemas\"\n");
+    output.push_str("export * from \"./errors\"\n");
+    output.push_str("export * from \"./endpoints\"\n");
+    output.push_str("export * from \"./layer\"\n");
     output
 }
 
@@ -1190,7 +1190,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
     } else {
         write_effect_compat_import(&mut writer, "Effect, Schema");
     }
-    writer.push("import { ServerApi } from \"./layer.js\"\n");
+    writer.push("import { ServerApi } from \"./layer\"\n");
     if contract_has_binary_upload_endpoints(contract) {
         writer.push(
             "import type { BinaryRequestBody } from \"@rust-ts-integration/effect-runtime\"\n",
@@ -1207,7 +1207,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas.js\"\n");
+        writer.push(" } from \"./schemas\"\n");
     }
 
     let error_imports = collect_endpoint_error_imports(contract);
@@ -1219,7 +1219,7 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
             .collect::<Vec<_>>()
             .join(", "),
     );
-    writer.push(" } from \"./errors.js\"\n\n");
+    writer.push(" } from \"./errors\"\n\n");
 
     let mut endpoints = contract.endpoints.iter().collect::<Vec<_>>();
     endpoints.sort_by(|left, right| {
@@ -1423,7 +1423,7 @@ fn render_tracked_errors(contract: &ApiContract, options: &EffectRenderOptions) 
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas.js\"\n");
+        writer.push(" } from \"./schemas\"\n");
     }
     writer.push("\n");
     writer.push(&render_client_errors());
@@ -1678,7 +1678,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./endpoints.js\"\n");
+        writer.push(" } from \"./endpoints\"\n");
     }
 
     let schema_imports = collect_service_schema_imports(contract);
@@ -1691,7 +1691,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./schemas.js\"\n");
+        writer.push(" } from \"./schemas\"\n");
     }
 
     let error_metadata_imports = collect_endpoint_error_metadata_imports(contract);
@@ -1704,7 +1704,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        writer.push(" } from \"./errors.js\"\n");
+        writer.push(" } from \"./errors\"\n");
     }
 
     let error_type_imports = collect_endpoint_error_imports(contract);
@@ -1716,7 +1716,7 @@ fn render_tracked_layer(contract: &ApiContract, options: &EffectRenderOptions) -
             .collect::<Vec<_>>()
             .join(", "),
     );
-    writer.push(" } from \"./errors.js\"\n\n");
+    writer.push(" } from \"./errors\"\n\n");
 
     writer.push("export interface ServerApiConfig {\n");
     writer.push("  readonly baseUrl: string\n");
@@ -3048,7 +3048,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_errors(&contract);
 
-        assert!(rendered.contains("import { UserId } from \"./schemas.js\""));
+        assert!(rendered.contains("import { UserId } from \"./schemas\""));
         assert!(rendered.contains(
             "export class GetUserNotFound extends Schema.TaggedErrorClass<GetUserNotFound>()(\n  \"notFound\","
         ));
@@ -3183,11 +3183,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "import { Effect, Schema } from \"@rust-ts-integration/effect-runtime/compat\""
         ));
-        assert!(rendered.contains("import { ServerApi } from \"./layer.js\""));
-        assert!(rendered.contains("import { User, UserId } from \"./schemas.js\""));
-        assert!(
-            rendered.contains("import type { ApiClientError, GetUserError } from \"./errors.js\"")
-        );
+        assert!(rendered.contains("import { ServerApi } from \"./layer\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
         assert!(rendered.contains("export namespace users {"));
         assert!(rendered.contains(
             "  export interface GetUserArgs {\n    readonly id: UserId;\n    readonly includePosts?: boolean;\n  }"
@@ -3415,11 +3413,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "import { makeUnaryHttpClient } from \"@rust-ts-integration/effect-runtime\""
         ));
-        assert!(rendered.contains("import { users } from \"./endpoints.js\""));
-        assert!(rendered.contains("import { User, UserId } from \"./schemas.js\""));
-        assert!(
-            rendered.contains("import type { ApiClientError, GetUserError } from \"./errors.js\"")
-        );
+        assert!(rendered.contains("import { users } from \"./endpoints\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
         assert!(rendered.contains(
             "export class ServerApi extends Context.Service<ServerApi, ServerApi.Service>()(\"@workspace/server-api::ServerApi\") {}"
         ));
@@ -3606,10 +3602,10 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert_eq!(
             render_package_index(&contract),
             r#"// Generated API package for @workspace/server-api
-export * from "./schemas.js"
-export * from "./errors.js"
-export * from "./endpoints.js"
-export * from "./layer.js"
+export * from "./schemas"
+export * from "./errors"
+export * from "./endpoints"
+export * from "./layer"
 "#
         );
     }
@@ -4237,7 +4233,7 @@ export * from "./layer.js"
         fs::write(
             root.join("tsconfig.json"),
             format!(
-                "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n      {package_name}: [{package_index}],\n      {package_glob}: [{package_dir_glob}],\n      \"@rust-ts-integration/effect-runtime\": [{runtime_index}],\n      \"@rust-ts-integration/effect-runtime/compat\": [{runtime_compat}],\n      \"@rust-ts-integration/effect-runtime/*\": [{runtime_glob}]\n    }}\n  }},\n  \"include\": [\"consumer.ts\"]\n}}\n",
+                "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n      {package_name}: [{package_index}],\n      {package_glob}: [{package_dir_glob}],\n      \"@rust-ts-integration/effect-runtime\": [{runtime_index}],\n      \"@rust-ts-integration/effect-runtime/compat\": [{runtime_compat}],\n      \"@rust-ts-integration/effect-runtime/*\": [{runtime_glob}]\n    }}\n  }},\n  \"include\": [\"consumer.ts\"]\n}}\n",
                 package_name = ts_string(&package.tsconfig_paths.package_name),
                 package_index = ts_string(&normalize_path(&package.package_dir.join("index.ts"))),
                 package_glob = ts_string(&format!("{}/*", package.tsconfig_paths.package_name)),

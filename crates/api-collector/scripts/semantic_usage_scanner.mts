@@ -22,8 +22,8 @@ files.set(
 const options = {
   allowJs: false,
   exactOptionalPropertyTypes: true,
-  module: ts.ModuleKind.NodeNext,
-  moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
   noUncheckedIndexedAccess: true,
   noEmit: true,
   skipLibCheck: true,

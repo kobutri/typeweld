@@ -503,7 +503,7 @@ fn generated_typecheck_tsconfig(packages: &[GeneratedPackage]) -> String {
         json_string(&format!("{runtime_dir}/*"))
     ));
     format!(
-        "{{\n  \"compilerOptions\": {{\n    \"baseUrl\": \".\",\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"compilerOptions\": {{\n    \"baseUrl\": \".\",\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\n{}\n  ]\n}}\n",
         paths.join(",\n"),
         include.join(",\n"),
     )
@@ -1373,8 +1373,8 @@ fn render_new_app_tsconfig(project: &NewProject) -> String {
     "baseUrl": ".",
     "exactOptionalPropertyTypes": true,
     "lib": ["DOM", "ES2022", "ESNext.Disposable"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "strict": true,

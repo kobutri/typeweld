@@ -1,8 +1,8 @@
 // Generated API package for @workspace/server-api
 import { Effect, Stream, Schema } from "@rust-ts-integration/effect-runtime/compat"
-import { ServerApi } from "./layer.js"
-import { CreateUserRequest, User, UserEvent } from "./schemas.js"
-import type { ApiClientError, GetUserError } from "./errors.js"
+import { ServerApi } from "./layer"
+import { CreateUserRequest, User, UserEvent } from "./schemas"
+import type { ApiClientError, GetUserError } from "./errors"
 
 export namespace events {
   export interface WatchUsersArgs {}

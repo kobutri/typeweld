@@ -20,9 +20,6 @@
       ],
       "@workspace/server-api/*": [
         "../../../target/api-contract/effect-v4/packages/_workspace_server-api/*"
-      ],
-      "effect": [
-        "../../../npm/node_modules/effect/dist/index.d.ts"
       ]
     }
   },

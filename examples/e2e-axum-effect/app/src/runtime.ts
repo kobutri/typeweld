@@ -1,7 +1,7 @@
 import { Effect, Schema } from "@rust-ts-integration/effect-runtime/compat"
 import { User } from "@workspace/e2e-api"
 
-import { program } from "./client.js"
+import { program } from "./client"
 
 export const runAgainstServer = async (baseUrl: string) => {
   const rawUserResponse = await fetch(`${baseUrl}/users/1`)

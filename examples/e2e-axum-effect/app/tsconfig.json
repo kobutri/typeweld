@@ -2,8 +2,8 @@
   "compilerOptions": {
     "exactOptionalPropertyTypes": true,
     "lib": ["DOM", "ES2022", "ESNext.Disposable"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "strict": true,
@@ -23,9 +23,6 @@
       ],
       "@workspace/e2e-api/*": [
         "../../../target/api-contract/effect-v4/packages/_workspace_e2e-api/*"
-      ],
-      "effect": [
-        "../../../npm/node_modules/effect/dist/index.d.ts"
       ]
     }
   },

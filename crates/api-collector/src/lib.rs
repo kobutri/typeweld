@@ -1203,7 +1203,7 @@ export { users as apiUsers } from "@workspace/server-api"
                 TypeScriptSourceFile {
                     path: "client/use-api.ts".to_owned(),
                     contents: r#"
-import { apiUsers } from "./api.js"
+import { apiUsers } from "./api"
 import { users as directUsers } from "@workspace/server-api"
 
 const unrelated = { getUser: () => "not an endpoint" }
