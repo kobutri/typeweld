@@ -181,3 +181,69 @@ jobs:
           pattern: typeweld-cli-*
           merge-multiple: true
       - run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish-marketplaces:
+    name: Publish VS Code marketplaces
+    runs-on: ubuntu-latest
+    needs:
+      - package
+      - upload-release-assets
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+        working-directory: npm
+      - uses: actions/download-artifact@v4
+        with:
+          path: marketplace-assets
+          pattern: vscode-extension-*
+          merge-multiple: true
+      - name: Validate VSIX artifacts
+        shell: bash
+        run: |
+          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
+          if [ "${#vsix_files[@]}" -ne 4 ]; then
+            printf 'expected 4 platform VSIX artifacts, found %s\n' "${#vsix_files[@]}" >&2
+            printf 'found artifacts:\n' >&2
+            printf '  %s\n' "${vsix_files[@]}" >&2
+            exit 1
+          fi
+          printf 'validated marketplace artifacts:\n'
+          printf '  %s\n' "${vsix_files[@]}"
+      - name: Check marketplace credentials
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          missing=0
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "missing release environment secret VSCE_PAT for Visual Studio Marketplace publishing" >&2
+            missing=1
+          fi
+          if [ -z "${OVSX_PAT:-}" ]; then
+            echo "missing release environment secret OVSX_PAT for Open VSX publishing" >&2
+            missing=1
+          fi
+          exit "$missing"
+      - name: Publish to Visual Studio Marketplace
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
+          npm --prefix npm exec --workspace typeweld-vscode -- \
+            vsce publish --skip-duplicate --packagePath "${vsix_files[@]}"
+      - name: Publish to Open VSX
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
+          npm --prefix npm exec --workspace typeweld-vscode -- \
+            ovsx --pat "$OVSX_PAT" publish --skip-duplicate --packagePath "${vsix_files[@]}"

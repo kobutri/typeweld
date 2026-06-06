@@ -7,6 +7,7 @@ Typeweld is released as one versioned product across two package ecosystems:
   `typeweld-cli`, and `typeweld-ls`.
 - npm packages: `typeweld`, `@typeweld/effect-runtime`, and
   `@typeweld/language-server`.
+- VS Code extension marketplaces: Visual Studio Marketplace and Open VSX.
 - GitHub release assets: VSIX files plus standalone `typeweld` CLI archives.
 
 All publishable Typeweld crates, public npm packages, and VSIX/package-lock
@@ -20,14 +21,21 @@ repository. A compromised local machine or browser session should not be able to
 publish packages by opening GitHub Actions and pressing a dispatch button.
 
 The current repository intentionally has no npm/crates.io publish workflow.
-Registry publishing stays outside repository Actions until a release process is
-built around protected tags or published GitHub Releases, protected
+npm/crates.io publishing stays outside repository Actions until a release
+process is built around protected tags or published GitHub Releases, protected
 environments, short-lived credentials, and reviewable release PRs.
+
+VS Code extension marketplace publishing is part of the GitHub Release workflow,
+but it is not manually triggerable. The publish job uses the protected `release`
+environment, installs pinned publisher CLIs with lifecycle scripts disabled, and
+publishes the already-built VSIX artifacts instead of rebuilding while
+marketplace credentials are present.
 
 The repository has:
 
 - `.github/workflows/release-vscode-extension.yml` for GitHub release assets,
-  triggered only by a published GitHub Release.
+  Visual Studio Marketplace publishing, and Open VSX publishing, triggered only
+  by a published GitHub Release.
 - `npm run check:versions`, which verifies release crate versions, npm package
   versions, npm lockfile workspace versions, VS Code extension dependency pins,
   internal Rust dependency pins, and `GITHUB_REF_NAME` tags.
@@ -38,7 +46,7 @@ The repository has:
 
 ## Options
 
-Option A, recommended now: no registry publish workflow.
+Option A, recommended now for npm/crates.io: no package publish workflow.
 
 - Version bumps and changelog stay reviewable.
 - Package dry-runs happen locally and in ordinary CI.
@@ -46,7 +54,8 @@ Option A, recommended now: no registry publish workflow.
   environment with fresh authentication.
 - There is no manual GitHub Actions dispatch path that can publish packages.
 
-Option B, later: protected tag publishing with trusted publishers.
+Option B, later for npm/crates.io: protected tag publishing with trusted
+publishers.
 
 - Trigger only from protected tags such as `v*` or from `release.published`,
   never from manual dispatch.
@@ -89,6 +98,15 @@ The Rust manifests should keep crates.io metadata populated through
 categories. npm leaf packages should keep package metadata, `files`, `bin` or
 `exports`, and `publishConfig.access` where applicable.
 
+Set up the VS Code extension registries:
+
+- Visual Studio Marketplace: create the `typeweld` publisher and authorize the
+  release identity or token for extension publishing.
+- Open VSX: create the `typeweld` namespace, sign the Eclipse Publisher
+  Agreement, and generate an access token for CI.
+- GitHub: store `VSCE_PAT` and `OVSX_PAT` as `release` environment secrets, not
+  repository-wide secrets, and require reviewer approval for that environment.
+
 Do not configure npm or crates.io trusted publishers until the corresponding
 tag/release-event-only workflow exists. When that workflow is added, configure
 npm trusted publishing for each package:
@@ -108,7 +126,8 @@ publishing and disallow long-lived publish tokens where the registry supports
 that.
 
 Create a GitHub environment named `release` and require reviewer approval before
-adding any registry publishing workflow.
+adding any npm/crates.io publishing workflow. The existing VS Code marketplace
+publish job already uses that environment.
 
 ## Release Walkthrough
 
@@ -151,7 +170,13 @@ adding any registry publishing workflow.
    generated from those binaries points at GitHub release assets and git-tagged
    Rust dependencies.
 
-4. Publish registry packages outside repository Actions.
+4. Let the release workflow publish extension marketplaces.
+
+   `.github/workflows/release-vscode-extension.yml` uploads VSIX and standalone
+   CLI assets, then publishes the VSIX artifacts to Visual Studio Marketplace and
+   Open VSX from the protected `release` environment.
+
+5. Publish npm/crates.io packages outside repository Actions.
 
    Until there is a protected tag/release-event-only workflow, publish
    npm/crates.io packages only from a hardened environment with short-lived
@@ -201,6 +226,13 @@ binary packaging steps, and no registry tokens stored in repository secrets.
   long-lived crates.io token.
 - Cargo recommends `cargo publish --dry-run` and `cargo package --list` before
   publishing.
+- VS Code supports platform-specific VSIX packages and `vsce publish
+  --packagePath` for publishing prebuilt VSIX files.
+- VS Code's current security guidance prefers Microsoft Entra ID-based
+  publishing over long-lived Marketplace PATs where the release infrastructure
+  supports it.
+- Open VSX publishes prebuilt VSIX files with `ovsx publish <file>` or
+  `ovsx publish --packagePath`.
 
 References:
 
@@ -208,3 +240,5 @@ References:
 - <https://forge.rust-lang.org/infra/docs/trusted-publishing.html>
 - <https://doc.rust-lang.org/cargo/reference/publishing.html>
 - <https://docs.github.com/en/actions/concepts/security/openid-connect>
+- <https://code.visualstudio.com/api/working-with-extensions/publishing-extension>
+- <https://github.com/eclipse-openvsx/openvsx/wiki/Publishing-Extensions>
