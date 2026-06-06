@@ -2,6 +2,7 @@
 
 Start here:
 
+- `npx typeweld new my-api --yes` creates a minimal Rust + TypeScript starter.
 - [Getting started](getting-started.md)
 - [Axum example guide](axum-example.md)
 - [Effect client guide](effect-client.md)

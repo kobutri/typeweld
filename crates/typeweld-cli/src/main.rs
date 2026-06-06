@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use dialoguer::{theme::ColorfulTheme, Input};
 use notify_debouncer_full::{
     new_debouncer, notify::RecursiveMode, DebounceEventResult, DebouncedEvent,
@@ -743,6 +743,9 @@ struct NewProjectOptions {
     /// Default server listen address used in scripts and examples.
     #[arg(long = "bind")]
     bind_addr: Option<String>,
+    /// Where generated Typeweld dependencies should come from.
+    #[arg(long = "template-source", value_enum)]
+    template_source: Option<TemplateSource>,
     /// Accept defaults for omitted values without prompting.
     #[arg(long)]
     yes: bool,
@@ -761,7 +764,34 @@ struct NewProject {
     sample_name: String,
     bind_addr: String,
     force: bool,
-    repo_root: PathBuf,
+    dependency_source: DependencySource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TemplateSource {
+    /// Use the local checkout when available, otherwise published registries.
+    Auto,
+    /// Use path/file dependencies into the local checkout.
+    Path,
+    /// Use npm and crates.io package versions.
+    Registry,
+    /// Use GitHub release tarballs for npm and git-tagged Rust dependencies.
+    Github,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DependencySource {
+    Path {
+        repo_root: PathBuf,
+    },
+    Registry {
+        version: String,
+    },
+    Github {
+        repo: String,
+        tag: String,
+        npm_tarball_base: String,
+    },
 }
 
 fn new_project_command(options: NewProjectOptions) -> Result<(), String> {
@@ -872,8 +902,124 @@ fn resolve_new_project(options: NewProjectOptions) -> Result<NewProject, String>
         sample_name,
         bind_addr,
         force: options.force,
-        repo_root: repo_root(),
+        dependency_source: resolve_dependency_source(options.template_source)?,
     })
+}
+
+fn resolve_dependency_source(source: Option<TemplateSource>) -> Result<DependencySource, String> {
+    match source.unwrap_or_else(default_template_source) {
+        TemplateSource::Auto if local_checkout_available(&repo_root()) => {
+            Ok(DependencySource::Path {
+                repo_root: repo_root(),
+            })
+        }
+        TemplateSource::Auto | TemplateSource::Registry => Ok(DependencySource::Registry {
+            version: template_version(),
+        }),
+        TemplateSource::Path => {
+            let repo_root = repo_root();
+            if !local_checkout_available(&repo_root) {
+                return Err(format!(
+                    "typeweld new --template-source path expected a Typeweld checkout at `{}`; use --template-source registry for published packages",
+                    repo_root.display()
+                ));
+            }
+            Ok(DependencySource::Path { repo_root })
+        }
+        TemplateSource::Github => {
+            let version = template_version();
+            let tag = if version.starts_with('v') {
+                version.clone()
+            } else {
+                format!("v{version}")
+            };
+            let repo = template_github_repo()?;
+            let npm_tarball_base = template_npm_tarball_base(&repo, &tag);
+            Ok(DependencySource::Github {
+                repo,
+                tag,
+                npm_tarball_base,
+            })
+        }
+    }
+}
+
+fn local_checkout_available(repo_root: &Path) -> bool {
+    repo_root.join("crates/typeweld-core/Cargo.toml").is_file()
+        && repo_root.join("crates/typeweld-cli/Cargo.toml").is_file()
+        && repo_root.join("npm/cli/package.json").is_file()
+}
+
+fn default_template_source() -> TemplateSource {
+    env_template_source()
+        .and_then(|value| parse_template_source(&value).ok())
+        .unwrap_or(TemplateSource::Auto)
+}
+
+fn env_template_source() -> Option<String> {
+    env::var("TYPEWELD_TEMPLATE_SOURCE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("TYPEWELD_TEMPLATE_SOURCE")
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
+fn parse_template_source(value: &str) -> Result<TemplateSource, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(TemplateSource::Auto),
+        "path" | "local" => Ok(TemplateSource::Path),
+        "registry" | "npm" | "published" => Ok(TemplateSource::Registry),
+        "github" | "git" => Ok(TemplateSource::Github),
+        other => Err(format!(
+            "TYPEWELD_TEMPLATE_SOURCE must be auto, path, registry, or github; got `{other}`"
+        )),
+    }
+}
+
+fn template_version() -> String {
+    env::var("TYPEWELD_TEMPLATE_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("TYPEWELD_TEMPLATE_VERSION")
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+fn template_github_repo() -> Result<String, String> {
+    let repo = env::var("TYPEWELD_TEMPLATE_GITHUB_REPO")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("TYPEWELD_TEMPLATE_GITHUB_REPO")
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_REPOSITORY").to_owned());
+    if repo.trim().is_empty() {
+        return Err(
+            "typeweld new --template-source github requires TYPEWELD_TEMPLATE_GITHUB_REPO"
+                .to_owned(),
+        );
+    }
+    Ok(repo)
+}
+
+fn template_npm_tarball_base(repo: &str, tag: &str) -> String {
+    env::var("TYPEWELD_TEMPLATE_NPM_TARBALL_BASE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("TYPEWELD_TEMPLATE_NPM_TARBALL_BASE")
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| format!("{}/releases/download/{}", repo.trim_end_matches('/'), tag))
 }
 
 fn prompt_string(
@@ -997,16 +1143,16 @@ pedantic = "warn"
 }
 
 fn render_new_server_cargo_toml(project: &NewProject) -> String {
-    let crate_dir = |name: &str| {
-        toml_string(
-            &project
-                .repo_root
-                .join("crates")
-                .join(name)
-                .display()
-                .to_string(),
-        )
-    };
+    let typeweld_axum = project.rust_dependency("typeweld-axum", RustDependencyOptions::default());
+    let typeweld_cli = project.rust_dependency(
+        "typeweld-cli",
+        RustDependencyOptions {
+            default_features: Some(false),
+        },
+    );
+    let typeweld_core = project.rust_dependency("typeweld-core", RustDependencyOptions::default());
+    let typeweld_macros =
+        project.rust_dependency("typeweld-macros", RustDependencyOptions::default());
     format!(
         r#"[package]
 name = {rust_package}
@@ -1020,10 +1166,10 @@ ts_package = {ts_package}
 api_root = {api_root}
 
 [dependencies]
-typeweld-axum = {{ path = {typeweld_axum_path} }}
-typeweld-cli = {{ path = {typeweld_cli_path}, default-features = false }}
-typeweld-core = {{ path = {typeweld_core_path} }}
-typeweld-macros = {{ path = {typeweld_macros_path} }}
+typeweld-axum = {typeweld_axum}
+typeweld-cli = {typeweld_cli}
+typeweld-core = {typeweld_core}
+typeweld-macros = {typeweld_macros}
 axum = "0.8"
 clap = {{ version = "4.5", features = ["derive"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -1038,20 +1184,19 @@ workspace = true
             "{}::routes",
             cargo_crate_name(&project.rust_package)
         )),
-        typeweld_axum_path = crate_dir("typeweld-axum"),
-        typeweld_cli_path = crate_dir("typeweld-cli"),
-        typeweld_core_path = crate_dir("typeweld-core"),
-        typeweld_macros_path = crate_dir("typeweld-macros"),
+        typeweld_axum = typeweld_axum,
+        typeweld_cli = typeweld_cli,
+        typeweld_core = typeweld_core,
+        typeweld_macros = typeweld_macros,
     )
 }
 
 fn render_new_root_package_json(project: &NewProject) -> String {
-    let api_manifest = normalize_path(&project.repo_root.join("crates/typeweld-cli/Cargo.toml"));
-    let api_command = format!(
-        "cargo run --manifest-path {} --bin typeweld --",
-        shell_quote(&api_manifest)
+    let typeweld = project.npm_dependency("typeweld", Some("npm/cli"));
+    let language_server = project.npm_dependency(
+        "@typeweld/language-server",
+        Some("npm/language-server-wrapper"),
     );
-    let language_server = file_dependency(&project.repo_root.join("npm/language-server-wrapper"));
     format!(
         r#"{{
   "name": {workspace_name},
@@ -1070,6 +1215,7 @@ fn render_new_root_package_json(project: &NewProject) -> String {
   }},
   "devDependencies": {{
     "@effect/language-service": "*",
+    "typeweld": {typeweld},
     "@typeweld/language-server": {language_server},
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",
@@ -1079,11 +1225,11 @@ fn render_new_root_package_json(project: &NewProject) -> String {
 "#,
         workspace_name = json_string(&format!("{}-workspace", project.name)),
         api_check = json_string(&format!(
-            "{api_command} check --manifest-path Cargo.toml --target-dir target --package {} --ts-dir app/src --cargo-check",
+            "typeweld check --manifest-path Cargo.toml --target-dir target --package {} --ts-dir app/src --cargo-check",
             shell_quote(&project.rust_package)
         )),
         api_gen = json_string(&format!(
-            "{api_command} gen --manifest-path Cargo.toml --target-dir target --package {}",
+            "typeweld gen --manifest-path Cargo.toml --target-dir target --package {}",
             shell_quote(&project.rust_package)
         )),
         app = json_string(&format!("npm --workspace {}-app run start", project.name)),
@@ -1093,12 +1239,14 @@ fn render_new_root_package_json(project: &NewProject) -> String {
         )),
         start = json_string(&format!("npm --workspace {}-app run start", project.name)),
         typecheck = json_string(&format!("npm --workspace {}-app run typecheck", project.name)),
+        typeweld = json_string(&typeweld),
         language_server = json_string(&language_server),
     )
 }
 
 fn render_new_app_package_json(project: &NewProject) -> String {
-    let effect_runtime = file_dependency(&project.repo_root.join("npm/effect-runtime"));
+    let effect_runtime =
+        project.npm_dependency("@typeweld/effect-runtime", Some("npm/effect-runtime"));
     format!(
         r#"{{
   "name": {name},
@@ -1121,7 +1269,6 @@ fn render_new_app_package_json(project: &NewProject) -> String {
 }
 
 fn render_new_typeweld_ls_json(project: &NewProject) -> String {
-    let api_manifest = normalize_path(&project.repo_root.join("crates/typeweld-cli/Cargo.toml"));
     format!(
         r#"{{
   "rustAnalyzer": {{
@@ -1134,14 +1281,11 @@ fn render_new_typeweld_ls_json(project: &NewProject) -> String {
   }},
   "typeweldWatch": {{
     "enabled": true,
-    "command": "cargo",
+    "command": "npm",
     "args": [
-      "run",
-      "--manifest-path",
-      {api_manifest},
-      "--bin",
-      "typeweld",
+      "exec",
       "--",
+      "typeweld",
       "watch",
       "--manifest-path",
       "Cargo.toml",
@@ -1159,7 +1303,6 @@ fn render_new_typeweld_ls_json(project: &NewProject) -> String {
   "logFile": "target/typeweld-ls.log"
 }}
 "#,
-        api_manifest = json_string(&api_manifest),
         rust_package = json_string(&project.rust_package),
     )
 }
@@ -1411,6 +1554,81 @@ console.log(message)
         sample_name = json_string(&project.sample_name),
         base_url = json_string(&format!("http://{}", project.bind_addr)),
     )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RustDependencyOptions {
+    default_features: Option<bool>,
+}
+
+impl NewProject {
+    fn npm_dependency(&self, package_name: &str, local_relative_path: Option<&str>) -> String {
+        match &self.dependency_source {
+            DependencySource::Path { repo_root } => file_dependency(
+                &repo_root.join(
+                    local_relative_path
+                        .expect("local npm dependencies require a checkout-relative path"),
+                ),
+            ),
+            DependencySource::Registry { version } => version.clone(),
+            DependencySource::Github {
+                npm_tarball_base,
+                tag,
+                ..
+            } => {
+                let file_name = npm_pack_file_name(package_name, tag);
+                format!("{}/{}", npm_tarball_base.trim_end_matches('/'), file_name)
+            }
+        }
+    }
+
+    fn rust_dependency(&self, crate_name: &str, options: RustDependencyOptions) -> String {
+        match &self.dependency_source {
+            DependencySource::Path { repo_root } => {
+                let mut fields = vec![format!(
+                    "path = {}",
+                    toml_string(
+                        &repo_root
+                            .join("crates")
+                            .join(crate_name)
+                            .display()
+                            .to_string()
+                    )
+                )];
+                append_rust_dependency_options(&mut fields, options);
+                format!("{{ {} }}", fields.join(", "))
+            }
+            DependencySource::Registry { version } => {
+                if options == RustDependencyOptions::default() {
+                    toml_string(version)
+                } else {
+                    let mut fields = vec![format!("version = {}", toml_string(version))];
+                    append_rust_dependency_options(&mut fields, options);
+                    format!("{{ {} }}", fields.join(", "))
+                }
+            }
+            DependencySource::Github { repo, tag, .. } => {
+                let mut fields = vec![
+                    format!("git = {}", toml_string(repo)),
+                    format!("tag = {}", toml_string(tag)),
+                ];
+                append_rust_dependency_options(&mut fields, options);
+                format!("{{ {} }}", fields.join(", "))
+            }
+        }
+    }
+}
+
+fn append_rust_dependency_options(fields: &mut Vec<String>, options: RustDependencyOptions) {
+    if let Some(default_features) = options.default_features {
+        fields.push(format!("default-features = {default_features}"));
+    }
+}
+
+fn npm_pack_file_name(package_name: &str, version_or_tag: &str) -> String {
+    let version = version_or_tag.trim_start_matches('v');
+    let name = package_name.trim_start_matches('@').replace('/', "-");
+    format!("{name}-{version}.tgz")
 }
 
 fn file_dependency(path: &Path) -> String {
@@ -3180,8 +3398,10 @@ mod tests {
         assert!(!root_manifest.contains("-- contract >"));
         assert!(!root_manifest.contains("--contract"));
         assert!(root_manifest.contains("\"typeweld:gen\""));
-        assert!(root_manifest.contains("gen --manifest-path Cargo.toml"));
+        assert!(root_manifest.contains("typeweld gen --manifest-path Cargo.toml"));
         assert!(root_manifest.contains("--package 'sample-api-server'"));
+        assert!(root_manifest.contains("\"typeweld\": \"file:"));
+        assert!(root_manifest.contains("npm/cli"));
         assert!(root_manifest.contains("\"app\""));
         assert!(root_manifest.contains("run start"));
 
@@ -3192,6 +3412,8 @@ mod tests {
         assert!(server_manifest.contains("[package.metadata.rust_ts]"));
         assert!(server_manifest.contains("ts_package = \"@workspace/sample-api\""));
         assert!(server_manifest.contains("api_root = \"sample_api_server::routes\""));
+        assert!(server_manifest.contains("typeweld-axum = { path = "));
+        assert!(server_manifest.contains("typeweld-cli = { path = "));
         assert!(server_manifest.contains("clap ="));
 
         let server_lib =
@@ -3219,6 +3441,9 @@ mod tests {
         let lsp = fs::read_to_string(root.join(".typeweld.json")).expect("read lsp config");
         assert!(lsp.contains("typescript-language-server"));
         assert!(lsp.contains("\"typeweldWatch\""));
+        assert!(lsp.contains("\"command\": \"npm\""));
+        assert!(lsp.contains("\"exec\""));
+        assert!(lsp.contains("\"typeweld\""));
         assert!(lsp.contains("\"--package\""));
         assert!(lsp.contains("\"sample-api-server\""));
         assert!(!lsp.contains("\"-q\""));
@@ -3228,6 +3453,91 @@ mod tests {
         let tsconfig = fs::read_to_string(root.join("app/tsconfig.json")).expect("read tsconfig");
         assert!(tsconfig.contains("\"plugins\""));
         assert!(tsconfig.contains("\"@effect/language-service\""));
+    }
+
+    #[test]
+    fn new_project_registry_source_uses_published_packages() {
+        let root = test_root("new-project-registry");
+
+        run_with_args(vec![
+            "new".to_owned(),
+            root.display().to_string(),
+            "--yes".to_owned(),
+            "--name".to_owned(),
+            "sample-api".to_owned(),
+            "--rust-package".to_owned(),
+            "sample-api-server".to_owned(),
+            "--ts-package".to_owned(),
+            "@workspace/sample-api".to_owned(),
+            "--template-source".to_owned(),
+            "registry".to_owned(),
+        ])
+        .expect("generate new registry project");
+
+        let root_manifest =
+            fs::read_to_string(root.join("package.json")).expect("read root manifest");
+        assert!(root_manifest.contains("\"typeweld\": \"0.0.0\""));
+        assert!(root_manifest.contains("\"@typeweld/language-server\": \"0.0.0\""));
+        assert!(!root_manifest.contains("cargo run --manifest-path"));
+        assert!(!root_manifest.contains("file:"));
+
+        let app_manifest =
+            fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
+        assert!(app_manifest.contains("\"@typeweld/effect-runtime\": \"0.0.0\""));
+        assert!(!app_manifest.contains("file:"));
+
+        let server_manifest =
+            fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
+        assert!(server_manifest.contains("typeweld-axum = \"0.0.0\""));
+        assert!(server_manifest
+            .contains("typeweld-cli = { version = \"0.0.0\", default-features = false }"));
+        assert!(server_manifest.contains("typeweld-core = \"0.0.0\""));
+        assert!(server_manifest.contains("typeweld-macros = \"0.0.0\""));
+        assert!(!server_manifest.contains("path = "));
+    }
+
+    #[test]
+    fn new_project_github_source_uses_release_assets_and_git_deps() {
+        let root = test_root("new-project-github");
+
+        run_with_args(vec![
+            "new".to_owned(),
+            root.display().to_string(),
+            "--yes".to_owned(),
+            "--name".to_owned(),
+            "sample-api".to_owned(),
+            "--rust-package".to_owned(),
+            "sample-api-server".to_owned(),
+            "--ts-package".to_owned(),
+            "@workspace/sample-api".to_owned(),
+            "--template-source".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("generate new github project");
+
+        let root_manifest =
+            fs::read_to_string(root.join("package.json")).expect("read root manifest");
+        assert!(root_manifest.contains(
+            "https://github.com/typeweld/typeweld/releases/download/v0.0.0/typeweld-0.0.0.tgz"
+        ));
+        assert!(root_manifest.contains(
+            "https://github.com/typeweld/typeweld/releases/download/v0.0.0/typeweld-language-server-0.0.0.tgz"
+        ));
+
+        let app_manifest =
+            fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
+        assert!(app_manifest.contains(
+            "https://github.com/typeweld/typeweld/releases/download/v0.0.0/typeweld-effect-runtime-0.0.0.tgz"
+        ));
+
+        let server_manifest =
+            fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
+        assert!(server_manifest.contains(
+            "typeweld-axum = { git = \"https://github.com/typeweld/typeweld\", tag = \"v0.0.0\" }"
+        ));
+        assert!(server_manifest.contains(
+            "typeweld-cli = { git = \"https://github.com/typeweld/typeweld\", tag = \"v0.0.0\", default-features = false }"
+        ));
     }
 
     #[test]

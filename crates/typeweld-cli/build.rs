@@ -9,6 +9,11 @@ use std::{
 };
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=TYPEWELD_TEMPLATE_SOURCE");
+    println!("cargo:rerun-if-env-changed=TYPEWELD_TEMPLATE_VERSION");
+    println!("cargo:rerun-if-env-changed=TYPEWELD_TEMPLATE_GITHUB_REPO");
+    println!("cargo:rerun-if-env-changed=TYPEWELD_TEMPLATE_NPM_TARBALL_BASE");
+
     if env::var_os("CARGO_FEATURE_EMBEDDED_SEMANTIC_SCANNER").is_none() {
         return;
     }

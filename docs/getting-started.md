@@ -4,6 +4,23 @@ This project turns a Rust API contract into an Effect-native TypeScript package.
 Rust remains the source of truth: endpoint routes, request shapes, response
 types, domain errors, and symbol locations all come from Rust metadata.
 
+## Quick start
+
+Create a starter project with the npm CLI:
+
+```sh
+npx typeweld new my-api --yes
+cd my-api
+npm install
+npm run typeweld:check
+npm run typecheck
+```
+
+The generated project installs `typeweld` as a dev dependency, so its scripts and
+`.typeweld.json` use `typeweld` directly instead of shelling back into this
+repository. When working on Typeweld itself from this checkout, you can still run
+the same CLI with `cargo run -p typeweld-cli --bin typeweld -- ...`.
+
 ## 0. Install repository TypeScript tooling
 
 The repository's JavaScript workspace lives under `npm/` and is locked with
@@ -76,7 +93,7 @@ features = []
 ```
 
 ```sh
-cargo run -p typeweld-cli --bin typeweld -- collect \
+npm exec -- typeweld collect \
   --package server \
   --out target/api-contract/server-api.json
 ```
@@ -87,7 +104,7 @@ router and generated contract come from the same route tree.
 ## 3. Generate the hidden TypeScript package
 
 ```sh
-cargo run -p typeweld-cli --bin typeweld -- gen \
+npm exec -- typeweld gen \
   --contract target/api-contract/server-api.json \
   --target-dir target
 ```
@@ -96,7 +113,7 @@ During local development, use `typeweld watch` to keep the hidden package and sy
 graph refreshed as Rust source changes:
 
 ```sh
-cargo run -p typeweld-cli --bin typeweld -- watch \
+npm exec -- typeweld watch \
   --package server \
   --target-dir target
 ```
@@ -134,11 +151,11 @@ Effect error channel, not thrown promises and not a success-channel `Result`.
 ## 6. Check generated state and usages
 
 ```sh
-cargo run -p typeweld-cli --bin typeweld -- check \
+npm exec -- typeweld check \
   --contract target/api-contract/server-api.json \
   --target-dir target
 
-cargo run -p typeweld-cli --bin typeweld -- check-usages \
+npm exec -- typeweld check-usages \
   --contract target/api-contract/server-api.json \
   --out target/api-contract/graph/effect-usage-index.json \
   --ts-dir app/src

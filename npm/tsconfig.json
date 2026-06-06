@@ -21,6 +21,9 @@
   "files": [],
   "references": [
     {
+      "path": "./cli"
+    },
+    {
       "path": "./effect-runtime"
     },
     {

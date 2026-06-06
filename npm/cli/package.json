@@ -1,15 +1,16 @@
 {
-  "name": "@typeweld/language-server",
+  "name": "typeweld",
   "version": "0.0.0",
   "type": "module",
   "bin": {
-    "typeweld-ls": "./src/index.ts"
+    "typeweld": "./src/index.mjs"
   },
   "files": [
     "bin",
     "src"
   ],
   "scripts": {
+    "prepare:binary": "node scripts/prepare-package.mjs",
     "test": "npm run typecheck && npm run test:wrapper",
     "test:wrapper": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"

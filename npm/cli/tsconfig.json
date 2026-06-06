@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "tsBuildInfoFile": "../node_modules/.cache/cli.tsbuildinfo",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "test/**/*.ts"
+  ]
+}

@@ -2954,25 +2954,24 @@ async fn prepare_generated_package_cache(
     event_tx: mpsc::UnboundedSender<GatewayEvent>,
     log_file: Option<PathBuf>,
 ) -> Result<(PathBuf, Option<TypeweldWatchProcess>), String> {
-    let typeweld_watch = match TypeweldWatchProcess::start(workspace, event_tx, log_file.clone())
-        .await
-    {
-        Ok(process) => process,
-        Err(error) => {
-            if workspace.generated_cache_dir.is_dir() {
-                log_typeweld_watch_message(
-                    log_file,
-                    &format!(
+    let typeweld_watch =
+        match TypeweldWatchProcess::start(workspace, event_tx, log_file.clone()).await {
+            Ok(process) => process,
+            Err(error) => {
+                if workspace.generated_cache_dir.is_dir() {
+                    log_typeweld_watch_message(
+                        log_file,
+                        &format!(
                         "typeweldWatch failed to start; using existing generated cache: {error}"
                     ),
-                )
-                .await;
-                None
-            } else {
-                return Err(typeweld_watch_start_diagnostic(workspace, &error));
+                    )
+                    .await;
+                    None
+                } else {
+                    return Err(typeweld_watch_start_diagnostic(workspace, &error));
+                }
             }
-        }
-    };
+        };
 
     if let Some(mut typeweld_watch) = typeweld_watch {
         let tsconfig = wait_for_generated_package_cache(workspace, &mut typeweld_watch).await?;

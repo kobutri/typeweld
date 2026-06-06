@@ -39,7 +39,7 @@ Build scripts can use `typeweld-build` to turn this into Cargo warnings or
 compile-time errors. The CLI can regenerate the index:
 
 ```sh
-cargo run -p typeweld-cli --bin typeweld -- check-usages \
+npm exec -- typeweld check-usages \
   --contract target/api-contract/server-api.json \
   --out target/api-contract/graph/effect-usage-index.json \
   --ts-dir app/src
