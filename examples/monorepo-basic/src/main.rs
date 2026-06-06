@@ -14,6 +14,10 @@ use api_collector::{collect_contract, contract_to_json, CollectorInput};
 use api_core::{api_module, ApiModule, ApiType, Body, Json, Path};
 use serde::{Deserialize, Serialize};
 
+// This contract-only example uses framework-neutral `api_core` marker wrappers.
+// Runnable Axum handlers should import the matching runtime wrappers from
+// `api_axum` instead.
+
 /// This is a DTO: a data type that crosses the Rust/TypeScript boundary.
 ///
 /// `ApiType` produces the framework-neutral schema metadata used by the

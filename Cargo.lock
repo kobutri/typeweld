@@ -86,6 +86,7 @@ dependencies = [
 name = "api-macros"
 version = "0.0.0"
 dependencies = [
+ "api-axum",
  "api-core",
  "api-gen-effect-v4",
  "proc-macro2",

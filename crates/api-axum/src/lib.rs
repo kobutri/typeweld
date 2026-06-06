@@ -1,4 +1,9 @@
 //! Axum integration adapter.
+//!
+//! Use this crate's `Json`, `Path`, `Query`, `Body`, `Created`, `NoContent`,
+//! and `Sse` wrappers in Axum handler signatures. The `#[api]` macro reads
+//! those signatures into the same framework-neutral contract shapes used by
+//! `api_core`.
 
 use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 

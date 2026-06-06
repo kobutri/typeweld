@@ -771,7 +771,7 @@ Acceptance criteria:
 - Route metadata and router behavior match in tests.
 - A handler cannot silently be mounted under a different contract path.
 
-### H2. Align framework wrappers with core wrappers
+### H2. Align framework wrappers with core wrappers [done]
 
 Goal: remove confusion between similarly named wrappers.
 

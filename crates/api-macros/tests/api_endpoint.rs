@@ -50,6 +50,23 @@ async fn search_users() -> Result<Json<User>, SearchUsersError> {
     unimplemented!()
 }
 
+#[api_macros::api(method = "POST", path = "/axum-users/{id}")]
+#[allow(dead_code)]
+async fn axum_wrapped_create_user(
+    id: api_axum::Path<i64>,
+    body: api_axum::Body<User>,
+) -> Result<api_axum::Created<User>, GetUserError> {
+    let _ = (id, body);
+    std::future::ready(()).await;
+    unimplemented!()
+}
+
+#[api_macros::api(method = "SSE", path = "/axum-users/events")]
+#[allow(dead_code)]
+fn axum_wrapped_user_events() -> Result<api_axum::Sse<User>, GetUserError> {
+    unimplemented!()
+}
+
 #[test]
 fn api_endpoint_macro_emits_metadata() {
     let endpoint = __api_endpoint_get_user();
@@ -102,6 +119,32 @@ fn api_endpoint_macro_accepts_endpoint_specific_error_enum() {
 
     assert_eq!(endpoint.errors[0].name, "SearchUsersError");
     assert_eq!(endpoint.ts_path, ["users", "searchUsers"]);
+}
+
+#[test]
+fn api_endpoint_macro_accepts_axum_handler_wrappers() {
+    let endpoint = __api_endpoint_axum_wrapped_create_user();
+
+    assert_eq!(endpoint.method, HttpMethod::Post);
+    assert_eq!(endpoint.route.0, "/axum-users/{id}");
+    assert_eq!(endpoint.request.path_params[0].rust_name, "id");
+    assert_eq!(endpoint.request.body.expect("body").name, "User");
+    let ResponseShape::Created(response) = endpoint.response else {
+        panic!("expected created response");
+    };
+    assert_eq!(response.name, "User");
+}
+
+#[test]
+fn api_endpoint_macro_accepts_axum_sse_wrapper() {
+    let endpoint = __api_endpoint_axum_wrapped_user_events();
+
+    assert_eq!(endpoint.method, HttpMethod::Get);
+    assert_eq!(endpoint.transport, Transport::ServerSentEvents);
+    let ResponseShape::Stream(item) = endpoint.response else {
+        panic!("expected stream response");
+    };
+    assert_eq!(item.name, "User");
 }
 
 #[test]

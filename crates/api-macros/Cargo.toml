@@ -15,6 +15,7 @@ quote = "1.0"
 syn = { version = "2.0", features = ["derive", "full"] }
 
 [dev-dependencies]
+api-axum = { path = "../api-axum" }
 api-core = { path = "../api-core" }
 api-gen-effect-v4 = { path = "../api-gen-effect-v4" }
 serde = { version = "1.0", features = ["derive"] }

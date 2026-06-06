@@ -31,6 +31,9 @@ pub async fn get_user(Path(id): Path<i64>) -> Result<Json<User>, GetUserError> {
 }
 ```
 
+These `api_core` wrappers are framework-neutral contract markers. In runnable
+Axum handlers, import the matching runtime wrappers from `api_axum` instead.
+
 Export endpoints through an explicit module so collection only includes routes
 you chose to publish:
 

@@ -6,8 +6,8 @@ the contract layer framework-neutral.
 ## Basic shape
 
 ```rust
-use api_axum::{method_router, router};
-use api_core::{api_module, ir::HttpMethod, Json, Path};
+use api_axum::{router, Json, Path};
+use api_core::api_module;
 use api_macros::{api, ApiError, ApiType};
 use serde::{Deserialize, Serialize};
 
@@ -37,20 +37,19 @@ fn app() -> axum::Router {
     let module = api_module!(name = "users", endpoints = [get_user]);
 
     router(module)
-        .route(
-            __api_endpoint_get_user(),
-            method_router(HttpMethod::Get, || async {
-                api_axum::success_or_error(get_user(Path(1)).await)
-            }),
-        )
+        .route(__api_endpoint_get_user(), |path: Path<i64>| async move {
+            api_axum::success_or_error(get_user(path).await)
+        })
         .into_router()
 }
 ```
 
 ## Server-sent events
 
-Use the `Sse<T, Stream>` wrapper for streaming endpoint metadata. The generated
-TypeScript accessor returns `Stream.Stream<Item, Error, ServerApi>`.
+Use the `api_axum::Sse<T, Stream>` wrapper for streaming Axum handlers. The
+`#[api]` macro records the same stream item shape in framework-neutral metadata,
+and the generated TypeScript accessor returns
+`Stream.Stream<Item, Error, ServerApi>`.
 
 See `examples/axum-sse` for the current SSE shape.
 
@@ -59,3 +58,6 @@ See `examples/axum-sse` for the current SSE shape.
 - Endpoints are registered only when included in an `api_module!`.
 - Domain errors should derive `ApiError` and declare HTTP status metadata.
 - The generated TypeScript success type is the decoded response body.
+- In runnable Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`,
+  `NoContent`, and `Sse` from `api_axum`; the `api_core` wrappers are
+  framework-neutral markers for contract-only code.
