@@ -579,7 +579,7 @@ Acceptance criteria:
 - Rust references on an error variant include TS handlers.
 - Rust references on a field include only typed usages of that field.
 
-### E4. Persist a rich usage index
+### E4. Persist a rich usage index [done]
 
 Goal: make LSP/build diagnostics reproducible.
 

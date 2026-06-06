@@ -605,6 +605,9 @@ impl<W: Write> LspServer<W> {
         let Some(index) = EffectUsageIndex::load(&workspace.usage_index)? else {
             return Ok(());
         };
+        if index.is_stale_for(&graph) {
+            return Ok(());
+        }
         let diagnostics = graph.unused_endpoint_diagnostics(&index, workspace);
 
         for (uri, diagnostics) in diagnostics {
@@ -630,6 +633,10 @@ enum BackendKind {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SymbolGraph {
+    #[serde(default)]
+    contract_hash: Option<String>,
+    #[serde(default)]
+    contract_hashes: Vec<String>,
     symbols: Vec<LinkedSymbol>,
 }
 
@@ -644,6 +651,17 @@ impl SymbolGraph {
         serde_json::from_str(&contents)
             .map(Some)
             .map_err(|error| format!("failed to parse symbol graph `{}`: {error}", path.display()))
+    }
+
+    fn contains_contract_hash(&self, contract_hash: &str) -> bool {
+        if contract_hash.is_empty() {
+            return false;
+        }
+        self.contract_hash.as_deref() == Some(contract_hash)
+            || self
+                .contract_hashes
+                .iter()
+                .any(|candidate| candidate == contract_hash)
     }
 
     fn definition(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> Option<Value> {
@@ -948,6 +966,10 @@ struct SymbolMetadata {
 #[derive(Clone, Debug, Deserialize)]
 struct EffectUsageIndex {
     #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    contract_hash: String,
+    #[serde(default)]
     endpoints: Vec<EndpointUsageSummary>,
 }
 
@@ -961,6 +983,10 @@ impl EffectUsageIndex {
         serde_json::from_str(&contents)
             .map(Some)
             .map_err(|error| format!("failed to parse usage index `{}`: {error}", path.display()))
+    }
+
+    fn is_stale_for(&self, graph: &SymbolGraph) -> bool {
+        self.schema_version != 2 || !graph.contains_contract_hash(&self.contract_hash)
     }
 
     fn strong_usage_count(&self, endpoint_id: &str) -> u64 {
@@ -2285,6 +2311,8 @@ mod tests {
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
             json!({
+                "schemaVersion": 1,
+                "contractHash": "test-contract",
                 "symbols": [
                     endpoint_symbol(
                         "endpoint:unused",
@@ -2321,6 +2349,8 @@ mod tests {
         fs::write(
             root.join("target/api-contract/graph/effect-usage-index.json"),
             json!({
+                "schema_version": 2,
+                "contract_hash": "test-contract",
                 "package_name": "@workspace/server-api",
                 "endpoints": [
                     { "endpoint_id": "endpoint:unused", "accessor_path": ["api", "unused"], "strong": 0 },
@@ -2533,6 +2563,8 @@ mod tests {
         fs::write(
             root.join("target/api-contract/rust-ts-symbols.json"),
             json!({
+                "schemaVersion": 1,
+                "contractHash": "test-contract",
                 "symbols": [
                     endpoint_symbol(
                         "endpoint:unused",
@@ -2551,6 +2583,8 @@ mod tests {
         fs::write(
             root.join("target/api-contract/graph/effect-usage-index.json"),
             json!({
+                "schema_version": 2,
+                "contract_hash": "test-contract",
                 "package_name": "@workspace/server-api",
                 "endpoints": [
                     { "endpoint_id": "endpoint:unused", "accessor_path": ["api", "unused"], "strong": 0 }

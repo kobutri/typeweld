@@ -14,6 +14,8 @@ use api_ir::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const EFFECT_USAGE_INDEX_SCHEMA_VERSION: u32 = 2;
+
 #[must_use]
 pub fn collect_empty_contract(package_name: impl Into<String>) -> ApiContract {
     ApiContract {
@@ -115,6 +117,13 @@ pub struct FieldUsage {
     pub diagnostics: Vec<EffectUsageDiagnostic>,
 }
 
+/// Source file digest included in a persisted TypeScript usage index.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct TypeScriptSourceSummary {
+    pub path: String,
+    pub hash: String,
+}
+
 /// Per-endpoint usage counters.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EndpointUsageSummary {
@@ -129,6 +138,14 @@ pub struct EndpointUsageSummary {
 /// Serialized `effect-usage-index.json` payload.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EffectUsageIndex {
+    #[serde(default = "default_effect_usage_index_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub contract_hash: String,
+    #[serde(default)]
+    pub ts_program_hash: String,
+    #[serde(default)]
+    pub source_files: Vec<TypeScriptSourceSummary>,
     pub package_name: String,
     pub endpoints: Vec<EndpointUsageSummary>,
     pub usages: Vec<EndpointUsage>,
@@ -136,6 +153,12 @@ pub struct EffectUsageIndex {
     pub error_usages: Vec<ErrorUsage>,
     #[serde(default)]
     pub field_usages: Vec<FieldUsage>,
+    #[serde(default)]
+    pub diagnostics: Vec<EffectUsageDiagnostic>,
+}
+
+const fn default_effect_usage_index_schema_version() -> u32 {
+    EFFECT_USAGE_INDEX_SCHEMA_VERSION
 }
 
 #[must_use]
@@ -299,6 +322,9 @@ pub fn try_scan_effect_usages_with_config(
         .iter()
         .map(EndpointAccessor::from_endpoint)
         .collect::<Vec<_>>();
+    let contract_hash = hash_contract(contract)?;
+    let source_files = source_file_summaries(files);
+    let ts_program_hash = hash_ts_program(&source_files);
     let mut usages = Vec::new();
     let semantic_output = semantic_endpoint_references(contract, files, &endpoint_accessors)?;
     let mut all_diagnostics = semantic_output.diagnostics;
@@ -396,11 +422,16 @@ pub fn try_scan_effect_usages_with_config(
     endpoints.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
 
     Ok(EffectUsageIndex {
+        schema_version: EFFECT_USAGE_INDEX_SCHEMA_VERSION,
+        contract_hash,
+        ts_program_hash,
+        source_files,
         package_name: contract.package_name.clone(),
         endpoints,
         usages,
         error_usages,
         field_usages,
+        diagnostics: all_diagnostics,
     })
 }
 
@@ -421,6 +452,47 @@ pub fn write_contract_json(contract: &ApiContract, path: impl AsRef<Path>) -> st
     let json = contract_to_json(contract)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     std::fs::write(path, json)
+}
+
+fn hash_contract(contract: &ApiContract) -> Result<String, String> {
+    serde_json::to_vec(contract)
+        .map(|bytes| stable_hash(&bytes))
+        .map_err(|error| format!("failed to hash API contract: {error}"))
+}
+
+fn source_file_summaries(files: &[TypeScriptSourceFile]) -> Vec<TypeScriptSourceSummary> {
+    let mut summaries = files
+        .iter()
+        .map(|file| TypeScriptSourceSummary {
+            path: file.path.clone(),
+            hash: stable_hash(file.contents.as_bytes()),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.path.cmp(&right.path));
+    summaries
+}
+
+fn hash_ts_program(sources: &[TypeScriptSourceSummary]) -> String {
+    let mut bytes = Vec::new();
+    for source in sources {
+        bytes.extend_from_slice(source.path.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(source.hash.as_bytes());
+        bytes.push(0);
+    }
+    stable_hash(&bytes)
+}
+
+fn stable_hash(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn collect_field_types(field: &Field, needed_types: &mut BTreeSet<SymbolId>) {
@@ -1373,6 +1445,12 @@ export const program = Effect.gen(function* () {
         let _ = std::fs::remove_file(path);
 
         assert_eq!(round_tripped.package_name, "@workspace/server-api");
+        assert_eq!(
+            round_tripped.schema_version,
+            EFFECT_USAGE_INDEX_SCHEMA_VERSION
+        );
+        assert!(round_tripped.contract_hash.starts_with("fnv1a64:"));
+        assert!(round_tripped.ts_program_hash.starts_with("fnv1a64:"));
         assert_eq!(round_tripped.endpoints.len(), 1);
     }
 }

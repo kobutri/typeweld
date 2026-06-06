@@ -306,6 +306,8 @@ pub fn render_symbol_graph_with_options(
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SymbolGraph {
+    schema_version: u32,
+    contract_hash: String,
     symbols: Vec<LinkedSymbol>,
 }
 
@@ -367,8 +369,30 @@ impl SymbolGraph {
                 .cmp(&right.kind)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        Self { symbols }
+        Self {
+            schema_version: 1,
+            contract_hash: hash_contract(contract),
+            symbols,
+        }
     }
+}
+
+fn hash_contract(contract: &ApiContract) -> String {
+    serde_json::to_vec(contract)
+        .map(|bytes| stable_hash(&bytes))
+        .expect("API contract serialization should not fail")
+}
+
+fn stable_hash(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3381,6 +3405,10 @@ export * from "./layer.js"
         assert_eq!(graph, render_symbol_graph(&contract, &package));
 
         let value: serde_json::Value = serde_json::from_str(&graph).expect("parse symbol graph");
+        assert_eq!(value["schemaVersion"], 1);
+        assert!(value["contractHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("fnv1a64:")));
         let symbols = value["symbols"].as_array().expect("symbols array");
         let endpoint = find_symbol(symbols, "fixture:endpoint:getUser");
         assert_eq!(endpoint["kind"], "endpoint");

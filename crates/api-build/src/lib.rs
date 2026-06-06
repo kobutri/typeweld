@@ -3,7 +3,6 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 use serde::Deserialize;
@@ -184,7 +183,7 @@ pub fn check_usage_lints(config: &UsageLintConfig) -> Result<UsageLintReport, Us
 
     let usage_index = read_json::<EffectUsageIndex>(&config.usage_index, "usage index")?;
     let symbol_graph = read_json::<SymbolGraph>(&config.symbol_graph, "symbol graph")?;
-    let stale = is_stale(&config.usage_index, &config.symbol_graph);
+    let stale = usage_index.is_stale_for(&symbol_graph);
     let mut diagnostics = Vec::new();
 
     if stale {
@@ -193,7 +192,7 @@ pub fn check_usage_lints(config: &UsageLintConfig) -> Result<UsageLintReport, Us
             route: None,
             accessor: None,
             message: format!(
-                "stale Effect usage index `{}`; regenerate it after the newer symbol graph `{}`",
+                "stale Effect usage index `{}`; regenerate it because its metadata does not match symbol graph `{}`",
                 config.usage_index.display(),
                 config.symbol_graph.display()
             ),
@@ -285,19 +284,6 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T
     })
 }
 
-fn is_stale(usage_index: &Path, symbol_graph: &Path) -> bool {
-    let usage_modified = modified_at(usage_index);
-    let graph_modified = modified_at(symbol_graph);
-
-    matches!((usage_modified, graph_modified), (Some(usage), Some(graph)) if usage < graph)
-}
-
-fn modified_at(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-}
-
 fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name).map(PathBuf::from)
 }
@@ -309,10 +295,18 @@ fn rust_string(value: &str) -> String {
 #[derive(Clone, Debug, Deserialize)]
 struct EffectUsageIndex {
     #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    contract_hash: String,
+    #[serde(default)]
     endpoints: Vec<EndpointUsageSummary>,
 }
 
 impl EffectUsageIndex {
+    fn is_stale_for(&self, graph: &SymbolGraph) -> bool {
+        self.schema_version != 2 || !graph.contains_contract_hash(&self.contract_hash)
+    }
+
     fn strong_usage_count(&self, endpoint_id: &str) -> u64 {
         self.endpoints
             .iter()
@@ -329,9 +323,27 @@ struct EndpointUsageSummary {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SymbolGraph {
     #[serde(default)]
+    contract_hash: Option<String>,
+    #[serde(default)]
+    contract_hashes: Vec<String>,
+    #[serde(default)]
     symbols: Vec<LinkedSymbol>,
+}
+
+impl SymbolGraph {
+    fn contains_contract_hash(&self, contract_hash: &str) -> bool {
+        if contract_hash.is_empty() {
+            return false;
+        }
+        self.contract_hash.as_deref() == Some(contract_hash)
+            || self
+                .contract_hashes
+                .iter()
+                .any(|candidate| candidate == contract_hash)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -373,11 +385,7 @@ impl SymbolMetadata {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::atomic::{AtomicU64, Ordering},
-        thread,
-        time::Duration,
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::json;
 
@@ -470,12 +478,9 @@ mod tests {
             &root,
             UsageLintLevel::Warn,
             json!({ "symbols": [] }),
-            json!({ "endpoints": [] }),
+            json!({ "schema_version": 2, "contract_hash": "different", "endpoints": [] }),
         );
 
-        thread::sleep(Duration::from_millis(5));
-        fs::write(&config.symbol_graph, json!({ "symbols": [] }).to_string())
-            .expect("touch symbol graph");
         let report = check_usage_lints(&config).expect("check usage lints");
 
         assert!(report.stale);
@@ -513,6 +518,8 @@ mod tests {
         fs::create_dir_all(root.join("target/api-contract/graph")).expect("create graph dir");
         let symbol_graph_path = root.join("target/api-contract/rust-ts-symbols.json");
         let usage_index_path = root.join("target/api-contract/graph/effect-usage-index.json");
+        let symbol_graph = with_default_graph_metadata(symbol_graph);
+        let usage_index = with_default_usage_metadata(usage_index);
         fs::write(&symbol_graph_path, symbol_graph.to_string()).expect("write symbol graph");
         fs::write(&usage_index_path, usage_index.to_string()).expect("write usage index");
 
@@ -522,6 +529,28 @@ mod tests {
             lint_level,
             generated_lint_path: root.join("out/api_usage_lints.rs"),
         }
+    }
+
+    fn with_default_graph_metadata(mut value: serde_json::Value) -> serde_json::Value {
+        let object = value.as_object_mut().expect("graph object");
+        object
+            .entry("schemaVersion")
+            .or_insert_with(|| serde_json::json!(1));
+        object
+            .entry("contractHash")
+            .or_insert_with(|| serde_json::json!("test-contract"));
+        value
+    }
+
+    fn with_default_usage_metadata(mut value: serde_json::Value) -> serde_json::Value {
+        let object = value.as_object_mut().expect("usage index object");
+        object
+            .entry("schema_version")
+            .or_insert_with(|| serde_json::json!(2));
+        object
+            .entry("contract_hash")
+            .or_insert_with(|| serde_json::json!("test-contract"));
+        value
     }
 
     fn endpoint_symbol(

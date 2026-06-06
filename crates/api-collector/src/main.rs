@@ -1597,9 +1597,16 @@ fn source_range_json(source: &api_ir::SourceRange) -> serde_json::Value {
 
 fn merge_symbol_graphs(graphs: &[String]) -> Result<String, String> {
     let mut symbols = Vec::new();
+    let mut contract_hashes = Vec::new();
     for graph in graphs {
         let value = serde_json::from_str::<serde_json::Value>(graph)
             .map_err(|error| format!("failed to parse generated symbol graph: {error}"))?;
+        if let Some(contract_hash) = value
+            .get("contractHash")
+            .and_then(serde_json::Value::as_str)
+        {
+            contract_hashes.push(contract_hash.to_owned());
+        }
         let graph_symbols = value
             .get("symbols")
             .and_then(serde_json::Value::as_array)
@@ -1617,8 +1624,14 @@ fn merge_symbol_graphs(graphs: &[String]) -> Result<String, String> {
         );
         left_key.cmp(&right_key)
     });
-    serde_json::to_string_pretty(&serde_json::json!({ "symbols": symbols }))
-        .map_err(|error| format!("failed to serialize merged symbol graph: {error}"))
+    contract_hashes.sort();
+    contract_hashes.dedup();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schemaVersion": 1,
+        "contractHashes": contract_hashes,
+        "symbols": symbols,
+    }))
+    .map_err(|error| format!("failed to serialize merged symbol graph: {error}"))
 }
 
 fn stale_generated_files(package: &GeneratedPackage) -> Result<Vec<String>, String> {
