@@ -9,10 +9,12 @@
   ],
   "scripts": {
     "format": "prettier --check .",
-    "test": "npm run typecheck --workspaces && npm run test:runtime --workspace @rust-ts-integration/effect-runtime",
+    "test": "npm run typecheck --workspaces && npm run test:runtime --workspace @rust-ts-integration/effect-runtime && npm run test:wrapper --workspace @rust-ts-integration/language-server",
+    "test:lsp-wrapper": "npm run test:wrapper --workspace @rust-ts-integration/language-server",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }
 }

@@ -160,7 +160,7 @@ Required behavior:
 | Symbol graph | `api-ls` and `api-build` consume `rust-ts-symbols.json`; no production producer is present. | Navigation, rename, hover, references, and lints depend on a missing core artifact. |
 | Build bridge | `api-build` can read usage/symbol graphs and warn/deny. | Useful, but dependent on missing/weak graph inputs. |
 | Axum adapter | Basic wrappers, domain error serialization, and SSE serialization exist. | Needs tighter route/contract coupling and end-to-end tests. |
-| npm LSP wrapper | The wrapper is not an executable launcher yet. | Editor installation is not real yet. |
+| npm LSP wrapper | The wrapper exposes an executable `api-ls` npm bin, resolves packaged/local/PATH gateway binaries, forwards stdio, and reports missing-binary install diagnostics. | Editor installation can use the npm wrapper; packaged native gateway artifacts are still a release/distribution concern. |
 
 ## Critical gaps
 
@@ -812,7 +812,7 @@ Acceptance criteria:
 
 ## Track I: npm packaging and editor installation
 
-### I1. Make the language-server wrapper executable
+### I1. Make the language-server wrapper executable [done]
 
 Goal: editors can launch `api-ls` consistently.
 

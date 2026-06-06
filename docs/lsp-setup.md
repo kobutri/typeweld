@@ -27,13 +27,28 @@ Create `.api-ls.json` at the workspace root when defaults are not enough:
 
 ## Editor command
 
-Point your editor at:
+Point your editor at the npm wrapper when using the workspace package:
 
 ```sh
-cargo run -p api-ls --bin api-ls
+npm exec --workspace @rust-ts-integration/language-server -- api-ls
 ```
 
-In a published install, use the installed `api-ls` binary directly.
+The wrapper launches the Rust gateway binary with stdio inherited unchanged. It
+checks, in order:
+
+- `API_LS_BINARY` or `RUST_TS_API_LS`.
+- A packaged binary under the wrapper package's `bin/` directory.
+- Local Cargo build outputs under `target/debug` and `target/release`.
+- `api-ls` on `PATH`, skipping the npm wrapper itself to avoid recursion.
+
+For local development, build the gateway first:
+
+```sh
+cargo build -p api-ls --bin api-ls
+```
+
+In a published install, use the installed `api-ls` command directly; the npm
+wrapper will use the packaged gateway binary when one is present.
 
 ## Generated package reads
 
