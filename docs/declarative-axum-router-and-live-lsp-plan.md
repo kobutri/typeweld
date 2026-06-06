@@ -1031,6 +1031,8 @@ Acceptance:
 
 ### Phase 6: Rename Orchestrator
 
+Status: Done.
+
 Files:
 
 - `crates/api-ls/src/lib.rs`
@@ -1038,13 +1040,13 @@ Files:
 
 Steps:
 
-1. Change prepare rename to use the live normalized graph.
-2. Add async `ApiRename` pending request state.
-3. Request rust-analyzer rename for Rust-side edits.
-4. Add API graph edits for TS usages, route placeholders, and serde attrs.
-5. Merge edits with conflict detection.
-6. Add TypeScript-origin rename support.
-7. Add legacy rename support until old APIs are migrated away.
+1. [x] Change prepare rename to use the live normalized graph.
+2. [x] Add async `ApiRename` pending request state.
+3. [x] Request rust-analyzer rename for Rust-side edits.
+4. [x] Add API graph edits for TS usages, route placeholders, and serde attrs.
+5. [x] Merge edits with conflict detection.
+6. [x] Add TypeScript-origin rename support.
+7. [x] Add legacy rename support until old APIs are migrated away.
 
 Acceptance:
 

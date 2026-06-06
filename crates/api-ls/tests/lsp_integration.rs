@@ -732,6 +732,8 @@ while True:
         result = None
     elif method == "textDocument/references":
         result = []
+    elif method == "textDocument/rename":
+        result = {"changes": {}}
     else:
         result = None
     send({"jsonrpc": "2.0", "id": message["id"], "result": result})

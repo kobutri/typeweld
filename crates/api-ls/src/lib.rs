@@ -176,6 +176,7 @@ struct AsyncLspServer {
     backend_requests_by_client_id: HashMap<String, BackendRequestKey>,
     backend_request_client_ids: HashMap<BackendRequestKey, Value>,
     reference_requests: HashMap<String, ReferenceRequest>,
+    rename_requests: HashMap<String, RenameRequest>,
     workspace_symbol_requests: HashMap<String, WorkspaceSymbolRequest>,
     pending_shutdown: Option<PendingShutdown>,
     semantic_tokens: Option<MergedSemanticTokens>,
@@ -183,6 +184,7 @@ struct AsyncLspServer {
     client_eof: bool,
     next_backend_client_id: u64,
     next_reference_request_id: u64,
+    next_rename_request_id: u64,
 }
 
 impl AsyncLspServer {
@@ -204,6 +206,7 @@ impl AsyncLspServer {
             backend_requests_by_client_id: HashMap::new(),
             backend_request_client_ids: HashMap::new(),
             reference_requests: HashMap::new(),
+            rename_requests: HashMap::new(),
             workspace_symbol_requests: HashMap::new(),
             pending_shutdown: None,
             semantic_tokens: None,
@@ -211,6 +214,7 @@ impl AsyncLspServer {
             client_eof: false,
             next_backend_client_id: 1,
             next_reference_request_id: 1,
+            next_rename_request_id: 1,
         }
     }
 
@@ -417,18 +421,7 @@ impl AsyncLspServer {
             }
             "textDocument/rename" => {
                 if let Some(id) = message.id {
-                    match self.cross_language_rename(&message.params) {
-                        Ok(Some(edit)) => self.write_response(id, edit)?,
-                        Ok(None) => {
-                            self.route_or_default_response(
-                                method,
-                                message.params,
-                                id,
-                                json!({ "changes": {} }),
-                            )?;
-                        }
-                        Err(error) => self.write_error(id, -32_602, error)?,
-                    }
+                    self.handle_rename_request(message.params, id)?;
                 }
             }
             "workspace/symbol" => {
@@ -613,10 +606,54 @@ impl AsyncLspServer {
         }
     }
 
+    fn handle_rename_request(&mut self, params: Value, id: Value) -> Result<(), String> {
+        match self.cross_language_rename_plan(&params) {
+            Ok(Some(plan)) => {
+                let Some(rust_params) = plan.rust_params else {
+                    return self.write_response(id, plan.api_edit);
+                };
+                if self.backend(BackendKind::Rust).is_none() {
+                    return self.write_response(id, plan.api_edit);
+                }
+
+                let request_id = self.allocate_rename_request_id();
+                self.rename_requests.insert(
+                    request_id.clone(),
+                    RenameRequest {
+                        client_id: id.clone(),
+                        workspace: plan.workspace,
+                        api_edit: plan.api_edit,
+                    },
+                );
+                self.forward_request_to_backend(
+                    BackendKind::Rust,
+                    "textDocument/rename",
+                    rust_params,
+                    id,
+                    PendingRequestKind::Rename { request_id },
+                    true,
+                )
+            }
+            Ok(None) => self.route_or_default_response(
+                "textDocument/rename",
+                params,
+                id,
+                json!({ "changes": {} }),
+            ),
+            Err(error) => self.write_error(id, -32_602, error),
+        }
+    }
+
     fn allocate_reference_request_id(&mut self) -> String {
         let id = self.next_reference_request_id;
         self.next_reference_request_id += 1;
         format!("references:{id}")
+    }
+
+    fn allocate_rename_request_id(&mut self) -> String {
+        let id = self.next_rename_request_id;
+        self.next_rename_request_id += 1;
+        format!("rename:{id}")
     }
 
     fn handle_workspace_symbol_request(&mut self, params: Value, id: Value) -> Result<(), String> {
@@ -850,6 +887,9 @@ impl AsyncLspServer {
             PendingRequestKind::References { request_id } => {
                 self.finish_reference_backend(&request_id, raw)
             }
+            PendingRequestKind::Rename { request_id } => {
+                self.finish_rename_backend(&request_id, raw)
+            }
             PendingRequestKind::WorkspaceSymbols { request_id } => {
                 self.finish_workspace_symbol_backend(kind, &request_id, raw)
             }
@@ -906,6 +946,24 @@ impl AsyncLspServer {
             )?;
         }
         Ok(())
+    }
+
+    fn finish_rename_backend(&mut self, request_id: &str, raw: Value) -> Result<(), String> {
+        let Some(request) = self.rename_requests.remove(request_id) else {
+            return Ok(());
+        };
+        if let Some(error) = raw.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("rust-analyzer rename failed");
+            return self.write_error(request.client_id, -32_602, message.to_owned());
+        }
+        let rust_edit = raw.get("result").cloned().unwrap_or(Value::Null);
+        match merge_workspace_edits(request.api_edit, rust_edit, &request.workspace) {
+            Ok(edit) => self.write_response(request.client_id, edit),
+            Err(error) => self.write_error(request.client_id, -32_602, error),
+        }
     }
 
     fn begin_shutdown(&mut self, id: Value) -> Result<(), String> {
@@ -982,6 +1040,12 @@ impl AsyncLspServer {
                     }
                     PendingRequestKind::References { request_id } => {
                         self.finish_reference_backend(&request_id, json!({ "result": [] }))?;
+                    }
+                    PendingRequestKind::Rename { request_id } => {
+                        self.finish_rename_backend(
+                            &request_id,
+                            json!({ "result": { "changes": {} } }),
+                        )?;
                     }
                     PendingRequestKind::WorkspaceSymbols { request_id } => {
                         self.finish_workspace_symbol_backend(
@@ -1206,7 +1270,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
             return Ok(None);
         };
         if let Some(reason) = graph.rename_block_reason(&query, workspace) {
@@ -1215,7 +1279,7 @@ impl AsyncLspServer {
         Ok(graph.prepare_rename(&query, workspace))
     }
 
-    fn cross_language_rename(&self, params: &Value) -> Result<Option<Value>, String> {
+    fn cross_language_rename_plan(&self, params: &Value) -> Result<Option<ApiRenamePlan>, String> {
         let Some(workspace) = &self.workspace else {
             return Ok(None);
         };
@@ -1225,13 +1289,21 @@ impl AsyncLspServer {
         let Some(new_name) = params.get("newName").and_then(Value::as_str) else {
             return Err("rename requires `newName`".to_owned());
         };
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
             return Ok(None);
         };
         if let Some(reason) = graph.rename_block_reason(&query, workspace) {
             return Err(reason);
         }
-        graph.rename(&query, new_name, workspace)
+        let Some(api_edit) = graph.rename(&query, new_name, workspace)? else {
+            return Ok(None);
+        };
+        let rust_params = graph.rust_rename_params(&query, new_name, workspace);
+        Ok(Some(ApiRenamePlan {
+            workspace: workspace.clone(),
+            api_edit,
+            rust_params,
+        }))
     }
 
     fn publish_unused_endpoint_diagnostics(&mut self) -> Result<(), String> {
@@ -1324,6 +1396,7 @@ struct PendingRequest {
 enum PendingRequestKind {
     Forward,
     References { request_id: String },
+    Rename { request_id: String },
     WorkspaceSymbols { request_id: String },
     Shutdown,
 }
@@ -1347,6 +1420,20 @@ struct ReferenceRequest {
     workspace: WorkspaceConfig,
     remaining: usize,
     locations: Vec<Value>,
+}
+
+#[derive(Debug)]
+struct RenameRequest {
+    client_id: Value,
+    workspace: WorkspaceConfig,
+    api_edit: Value,
+}
+
+#[derive(Debug)]
+struct ApiRenamePlan {
+    workspace: WorkspaceConfig,
+    api_edit: Value,
+    rust_params: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -1609,6 +1696,22 @@ impl SymbolGraph {
         }
 
         Ok(Some(json!({ "changes": changes })))
+    }
+
+    fn rust_rename_params(
+        &self,
+        query: &TextPositionQuery,
+        new_name: &str,
+        workspace: &WorkspaceConfig,
+    ) -> Option<Value> {
+        let (symbol, _) = self.rename_symbol_at(query, workspace)?;
+        let source = if symbol.matches_any_rust_location(query, workspace) {
+            RenameSource::Rust
+        } else {
+            RenameSource::TypeScript
+        };
+        let rename_texts = symbol.rename_texts(new_name, source);
+        symbol.rust.to_rename_params(workspace, &rename_texts.rust)
     }
 
     fn rename_block_reason(
@@ -2272,6 +2375,16 @@ impl GraphLocation {
             "context": {
                 "includeDeclaration": query.include_declaration,
             },
+        }))
+    }
+
+    fn to_rename_params(&self, workspace: &WorkspaceConfig, new_name: &str) -> Option<Value> {
+        Some(json!({
+            "textDocument": {
+                "uri": self.resolved_uri(workspace)?,
+            },
+            "position": self.rename_range().start,
+            "newName": new_name,
         }))
     }
 
@@ -3572,6 +3685,113 @@ fn dedupe_locations(locations: Vec<Value>, workspace: &WorkspaceConfig) -> Value
     }
 
     Value::Array(deduped)
+}
+
+fn merge_workspace_edits(
+    api_edit: Value,
+    rust_edit: Value,
+    workspace: &WorkspaceConfig,
+) -> Result<Value, String> {
+    let mut changes = serde_json::Map::new();
+    append_workspace_edit_changes(&mut changes, api_edit, workspace)?;
+    append_workspace_edit_changes(&mut changes, rust_edit, workspace)?;
+    Ok(json!({ "changes": changes }))
+}
+
+fn append_workspace_edit_changes(
+    changes: &mut serde_json::Map<String, Value>,
+    edit: Value,
+    workspace: &WorkspaceConfig,
+) -> Result<(), String> {
+    if edit.is_null() {
+        return Ok(());
+    }
+
+    if let Some(by_uri) = edit.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in by_uri {
+            let edits = edits
+                .as_array()
+                .ok_or_else(|| format!("workspace edit changes for `{uri}` must be an array"))?;
+            for edit in edits {
+                append_text_edit(changes, uri, edit.clone(), workspace)?;
+            }
+        }
+    }
+
+    if let Some(document_changes) = edit.get("documentChanges").and_then(Value::as_array) {
+        for change in document_changes {
+            if change.get("kind").is_some() {
+                return Err("rename produced unsupported resource operations".to_owned());
+            }
+            let uri = change
+                .get("textDocument")
+                .and_then(|text_document| text_document.get("uri"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| "documentChanges item is missing textDocument.uri".to_owned())?;
+            let edits = change
+                .get("edits")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("documentChanges item for `{uri}` is missing text edits"))?;
+            for edit in edits {
+                append_text_edit(changes, uri, edit.clone(), workspace)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn append_text_edit(
+    changes: &mut serde_json::Map<String, Value>,
+    uri: &str,
+    edit: Value,
+    workspace: &WorkspaceConfig,
+) -> Result<(), String> {
+    if is_generated_package_uri(uri, workspace) {
+        return Ok(());
+    }
+    let candidate_range = text_edit_range(&edit)?;
+    let candidate_text = edit
+        .get("newText")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "workspace edit is missing newText".to_owned())?;
+    let edits = changes
+        .entry(uri.to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("rename changes entry is an array");
+    for existing in edits.iter() {
+        let existing_range = text_edit_range(existing)?;
+        let existing_text = existing
+            .get("newText")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "workspace edit is missing newText".to_owned())?;
+        if existing_range == candidate_range && existing_text == candidate_text {
+            return Ok(());
+        }
+        if edit_ranges_overlap(existing_range, candidate_range) {
+            return Err(format!(
+                "rename edits conflict in `{uri}` at line {}, character {}",
+                candidate_range.start.line, candidate_range.start.character
+            ));
+        }
+    }
+    edits.push(edit);
+    Ok(())
+}
+
+fn text_edit_range(edit: &Value) -> Result<GraphRange, String> {
+    serde_json::from_value(
+        edit.get("range")
+            .cloned()
+            .ok_or_else(|| "workspace edit is missing range".to_owned())?,
+    )
+    .map_err(|error| format!("workspace edit has invalid range: {error}"))
+}
+
+fn edit_ranges_overlap(left: GraphRange, right: GraphRange) -> bool {
+    (left.start == right.start && left.end == right.end)
+        || (left.start < right.end && right.start < left.end)
 }
 
 fn has_non_generated_typescript_location(locations: &[Value], workspace: &WorkspaceConfig) -> bool {
@@ -6070,6 +6290,72 @@ mod tests {
     }
 
     #[test]
+    fn rename_merges_rust_analyzer_and_api_graph_edits() {
+        let root = test_root("rename-merge");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(&root, RUST_RENAME_BACKEND, MOCK_BACKEND, None);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": graph_location_json(&rust_uri, 10, 9, 17, false, true, "rustDeclaration"),
+                    "typescript": [
+                        graph_location_json(&usage_uri, 2, 4, 11, false, true, "userUsage")
+                    ],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "rustName": "get_user",
+                        "tsName": "getUser",
+                        "renamePlaceholder": "getUser"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/rename",
+                    "params": {
+                        "textDocument": { "uri": usage_uri },
+                        "position": { "line": 2, "character": 6 },
+                        "newName": "fetchUser"
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("rename response");
+        let changes = response["result"]["changes"]
+            .as_object()
+            .expect("rename changes");
+
+        assert_text_edit(changes, &rust_uri, 10, 9, 17, "fetch_user");
+        assert_text_edit(changes, &rust_uri, 30, 4, 12, "fetch_user");
+        assert_text_edit(changes, &usage_uri, 2, 4, 11, "fetchUser");
+    }
+
+    #[test]
     fn rejects_rename_from_generated_api_file() {
         let root = test_root("rename-generated");
         let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
@@ -7129,6 +7415,56 @@ mod tests {
         String::from_utf8(output).expect("utf8 output")
     }
 
+    const RUST_RENAME_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"renameProvider":{"prepareProvider":True}}}})
+    elif method == "textDocument/rename":
+        uri = message["params"]["textDocument"]["uri"]
+        new_name = message["params"]["newName"]
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":{"changes":{
+                uri:[{
+                    "range":{"start":{"line":30,"character":4},"end":{"line":30,"character":12}},
+                    "newText":new_name
+                }]
+            }}
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
     const MOCK_BACKEND: &str = r#"
 import json
 import sys
@@ -7190,6 +7526,12 @@ while True:
                 "uri":"file:///mock-reference.rs",
                 "range":{"start":{"line":3,"character":0},"end":{"line":3,"character":4}}
             }]
+        })
+    elif method == "textDocument/rename":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":{"changes":{}}
         })
     elif method == "shutdown":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
