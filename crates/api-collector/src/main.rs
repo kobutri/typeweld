@@ -1041,7 +1041,7 @@ publish = false
 
 [dependencies]
 api-axum = {{ path = {api_axum_path} }}
-api-collector = {{ path = {api_collector_path} }}
+api-collector = {{ path = {api_collector_path}, default-features = false }}
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
 axum = "0.8"
@@ -2317,7 +2317,7 @@ publish = false
 [workspace]
 
 [dependencies]
-api-collector = {{ path = {api_collector_path} }}
+api-collector = {{ path = {api_collector_path}, default-features = false }}
 api-core = {{ path = {api_core_path} }}
 
 [dependencies.target-api-package]

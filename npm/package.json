@@ -6,6 +6,7 @@
   "workspaces": [
     "effect-runtime",
     "language-server-wrapper",
+    "semantic-usage-scanner",
     "vscode-extension"
   ],
   "scripts": {

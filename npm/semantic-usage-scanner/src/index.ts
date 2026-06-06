@@ -1,149 +1,144 @@
-import fs from "node:fs"
-import { createRequire } from "node:module"
-import path from "node:path"
+// @ts-nocheck
+import * as ts from "typescript"
 
-const require = createRequire(new URL("../../../npm/package.json", import.meta.url))
-const ts = require("typescript")
-
-const input = JSON.parse(fs.readFileSync(0, "utf8"))
 const generatedFileName = "__generated_api__.d.ts"
-const files = new Map()
-const typeById = new Map((input.types ?? []).map((type) => [type.id, type]))
-const errorById = new Map((input.errors ?? []).map((error) => [error.error_id, error]))
-
-for (const file of input.files) {
-  files.set(normalizePath(file.path), file.contents)
-}
-files.set(
-  generatedFileName,
-  renderGeneratedModule(input.package_name, input.endpoints, input.types, input.errors)
+const effectDeclarationFileName = "/node_modules/effect/dist/index.d.ts"
+const typescriptLibDir = "/__typescript_lib__"
+const typescriptLibs = Object.fromEntries(
+  Object.entries(
+    import.meta.glob("../../node_modules/typescript/lib/lib.*.d.ts", {
+      eager: true,
+      import: "default",
+      query: "?raw",
+    })
+  ).map(([fileName, contents]) => [basename(fileName), contents])
 )
 
-const options = {
-  allowJs: false,
-  exactOptionalPropertyTypes: true,
-  module: ts.ModuleKind.ESNext,
-  moduleResolution: ts.ModuleResolutionKind.Bundler,
-  noUncheckedIndexedAccess: true,
-  noEmit: true,
-  skipLibCheck: true,
-  strict: true,
-  target: ts.ScriptTarget.ES2022,
-}
+let input
+let files
+let typeById
+let errorById
+let program
+let checker
+let endpointTargets
+let fieldTargets
+let errorTargets
+let aliasTargets
+let endpointValueAliases
 
-const defaultHost = ts.createCompilerHost(options, true)
-const host = ts.createCompilerHost(options, true)
-host.getSourceFile = (fileName, languageVersion) => {
-  const normalized = lookupFile(fileName)
-  const contents = normalized === undefined ? undefined : files.get(normalized)
-  if (contents !== undefined) {
-    return ts.createSourceFile(normalized, contents, languageVersion, true)
+export function scan(inputJson) {
+  input = JSON.parse(inputJson)
+  files = new Map()
+  typeById = new Map((input.types ?? []).map((type) => [type.id, type]))
+  errorById = new Map((input.errors ?? []).map((error) => [error.error_id, error]))
+
+  for (const file of input.files) {
+    files.set(normalizePath(file.path), file.contents)
   }
-  return defaultHost.getSourceFile(fileName, languageVersion)
-}
-host.fileExists = (fileName) => lookupFile(fileName) !== undefined || defaultHost.fileExists(fileName)
-host.readFile = (fileName) => {
-  const normalized = lookupFile(fileName)
-  return normalized === undefined ? defaultHost.readFile(fileName) : files.get(normalized)
-}
-host.writeFile = () => {}
-host.resolveModuleNames = (moduleNames, containingFile) =>
-  moduleNames.map((moduleName) => {
-    const local = resolveLocalModule(moduleName, containingFile)
-    if (local !== undefined) {
-      return local
-    }
-    const resolved = ts.resolveModuleName(moduleName, containingFile, options, defaultHost)
-    if (resolved.resolvedModule !== undefined) {
-      return resolved.resolvedModule
-    }
-    return ts.resolveModuleName(
-      moduleName,
-      path.join(process.cwd(), "__semantic_usage_scanner__.ts"),
-      options,
-      defaultHost
-    ).resolvedModule
-  })
+  files.set(
+    generatedFileName,
+    renderGeneratedModule(input.package_name, input.endpoints, input.types, input.errors)
+  )
+  files.set(effectDeclarationFileName, effectDeclarationSource())
 
-const program = ts.createProgram([...files.keys()], options, host)
-const checker = program.getTypeChecker()
-const generatedSource = program.getSourceFile(generatedFileName)
-
-if (generatedSource === undefined) {
-  throw new Error("generated API declaration source was not loaded")
-}
-
-const endpointTargets = collectEndpointTargets(generatedSource, input.endpoints)
-const fieldTargets = collectGeneratedFieldTargets(generatedSource)
-const errorTargets = collectGeneratedErrorTargets(generatedSource)
-const aliasTargets = collectLocalAliases()
-const endpointValueAliases = collectEndpointValueAliases()
-const references = []
-const errorReferences = []
-const fieldReferences = []
-
-for (const source of program.getSourceFiles()) {
-  if (source.fileName === generatedFileName || source.isDeclarationFile) {
-    continue
+  for (const [fileName, contents] of Object.entries(typescriptLibs)) {
+    files.set(`${typescriptLibDir}/${fileName}`, contents)
+    files.set(fileName, contents)
   }
-  visit(source, (node) => {
-    if (ts.isStringLiteralLike(node)) {
-      for (const target of errorTargetsForStringLiteral(node)) {
+
+  const options = {
+    allowJs: false,
+    exactOptionalPropertyTypes: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noUncheckedIndexedAccess: true,
+    noEmit: true,
+    skipLibCheck: true,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+  }
+  const host = createScannerCompilerHost(options)
+
+  program = ts.createProgram([...files.keys()], options, host)
+  checker = program.getTypeChecker()
+  const generatedSource = program.getSourceFile(generatedFileName)
+
+  if (generatedSource === undefined) {
+    throw new Error("generated API declaration source was not loaded")
+  }
+
+  endpointTargets = collectEndpointTargets(generatedSource, input.endpoints)
+  fieldTargets = collectGeneratedFieldTargets(generatedSource)
+  errorTargets = collectGeneratedErrorTargets(generatedSource)
+  aliasTargets = collectLocalAliases()
+  endpointValueAliases = collectEndpointValueAliases()
+  const references = []
+  const errorReferences = []
+  const fieldReferences = []
+
+  for (const source of program.getSourceFiles()) {
+    if (source.fileName === generatedFileName || source.isDeclarationFile) {
+      continue
+    }
+    visit(source, (node) => {
+      if (ts.isStringLiteralLike(node)) {
+        for (const target of errorTargetsForStringLiteral(node)) {
+          errorReferences.push(symbolReference(source, node, target.symbol_id, target.reason))
+        }
+        return
+      }
+
+      if (!ts.isIdentifier(node) || !isRuntimeReference(node)) {
+        return
+      }
+
+      for (const target of errorTargetsForIdentifier(node)) {
         errorReferences.push(symbolReference(source, node, target.symbol_id, target.reason))
       }
-      return
-    }
 
-    if (!ts.isIdentifier(node) || !isRuntimeReference(node)) {
-      return
-    }
+      const fieldTarget = fieldTargetForIdentifier(node)
+      if (fieldTarget !== undefined) {
+        fieldReferences.push(fieldReference(source, node, fieldTarget))
+      }
 
-    for (const target of errorTargetsForIdentifier(node)) {
-      errorReferences.push(symbolReference(source, node, target.symbol_id, target.reason))
-    }
+      const accessorTarget = endpointForIdentifier(node, aliasTargets, endpointTargets.bySymbol)
+      const valueTarget = endpointValueForIdentifier(node)
+      const target = accessorTarget ?? valueTarget
+      if (target === undefined) {
+        return
+      }
 
-    const fieldTarget = fieldTargetForIdentifier(node)
-    if (fieldTarget !== undefined) {
-      fieldReferences.push(fieldReference(source, node, fieldTarget))
-    }
-
-    const accessorTarget = endpointForIdentifier(node, aliasTargets, endpointTargets.bySymbol)
-    const valueTarget = endpointValueForIdentifier(node)
-    const target = accessorTarget ?? valueTarget
-    if (target === undefined) {
-      return
-    }
-
-    const classification =
-      accessorTarget !== undefined
-        ? classifyEndpointAccessorReference(node)
-        : classifyEndpointValueReference(node)
-    references.push({
-      endpoint_id: target.endpoint_id,
-      accessor_path: target.accessor_path,
-      file: source.fileName,
-      source: sourceRange(source, node),
-      strength: classification.strength,
-      reason: classification.reason,
+      const classification =
+        accessorTarget !== undefined
+          ? classifyEndpointAccessorReference(node)
+          : classifyEndpointValueReference(node)
+      references.push({
+        endpoint_id: target.endpoint_id,
+        accessor_path: target.accessor_path,
+        file: source.fileName,
+        source: sourceRange(source, node),
+        strength: classification.strength,
+        reason: classification.reason,
+      })
     })
-  })
-}
+  }
 
-references.sort((left, right) =>
-  left.endpoint_id.localeCompare(right.endpoint_id) ||
-  left.file.localeCompare(right.file) ||
-  left.source.start_line - right.source.start_line ||
-  left.source.start_column - right.source.start_column
-)
+  references.sort((left, right) =>
+    left.endpoint_id.localeCompare(right.endpoint_id) ||
+    left.file.localeCompare(right.file) ||
+    left.source.start_line - right.source.start_line ||
+    left.source.start_column - right.source.start_column
+  )
 
-process.stdout.write(
-  JSON.stringify({
+  return JSON.stringify({
     references,
     error_references: deduplicateReferences(errorReferences),
     field_references: deduplicateReferences(fieldReferences),
     diagnostics: collectProgramDiagnostics(),
   })
-)
+}
+
+globalThis.__semanticUsageScanner = { scan }
 
 function renderGeneratedModule(packageName, endpoints, types, errors) {
   const namespaces = new Map()
@@ -1195,8 +1190,117 @@ function diagnosticToJson(diagnostic) {
   }
 }
 
+function createScannerCompilerHost(options) {
+  return {
+    getSourceFile: (fileName, languageVersion) => {
+      const normalized = lookupFile(fileName)
+      const contents = normalized === undefined ? undefined : files.get(normalized)
+      if (contents === undefined) {
+        return undefined
+      }
+      return ts.createSourceFile(normalized, contents, languageVersion, true)
+    },
+    getDefaultLibFileName: () => `${typescriptLibDir}/lib.es2022.full.d.ts`,
+    getDefaultLibLocation: () => typescriptLibDir,
+    getCurrentDirectory: () => "/",
+    getCanonicalFileName: (fileName) => normalizePath(fileName),
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (fileName) => lookupFile(fileName) !== undefined,
+    readFile: (fileName) => {
+      const normalized = lookupFile(fileName)
+      return normalized === undefined ? undefined : files.get(normalized)
+    },
+    writeFile: () => {},
+    directoryExists: (directoryName) => {
+      const normalized = normalizePath(directoryName).replace(/\/+$/, "")
+      return [...files.keys()].some((fileName) => fileName.startsWith(`${normalized}/`))
+    },
+    getDirectories: () => [],
+    realpath: (fileName) => normalizePath(fileName),
+    resolveModuleNames: (moduleNames, containingFile) =>
+      moduleNames.map((moduleName) => {
+        const local = resolveLocalModule(moduleName, containingFile)
+        if (local !== undefined) {
+          return local
+        }
+        if (moduleName === "effect") {
+          return {
+            resolvedFileName: effectDeclarationFileName,
+            extension: ts.Extension.Dts,
+          }
+        }
+        return undefined
+      }),
+  }
+}
+
+function effectDeclarationSource() {
+  const errorForTag = generatedEffectErrorForTagType()
+  return `
+declare module "effect" {
+  type __RustTsIntegrationErrorForTag<Tag extends string> = ${errorForTag}
+
+  export namespace Effect {
+    export interface Effect<A = unknown, E = unknown, R = unknown> {
+      pipe<B>(ab: (self: Effect<A, E, R>) => B): B
+      pipe<B, C>(ab: (self: Effect<A, E, R>) => B, bc: (self: B) => C): C
+      pipe<B, C, D>(
+        ab: (self: Effect<A, E, R>) => B,
+        bc: (self: B) => C,
+        cd: (self: C) => D,
+      ): D
+      [Symbol.iterator](): Iterator<Effect<A, E, R>, A, unknown>
+    }
+    export function all(input: unknown): Effect<unknown, unknown, unknown>
+    export function catchTag<Tag extends string>(
+      tag: Tag,
+      handler: (error: __RustTsIntegrationErrorForTag<Tag>) => Effect<unknown, unknown, unknown>,
+    ): <A, E, R>(effect: Effect<A, E, R>) => Effect<A, E, R>
+    export function catchTags<Handlers extends Record<string, (error: any) => Effect<unknown, unknown, unknown>>>(
+      handlers: { readonly [Tag in keyof Handlers]: (error: __RustTsIntegrationErrorForTag<Extract<Tag, string>>) => Effect<unknown, unknown, unknown> },
+    ): <A, E, R>(effect: Effect<A, E, R>) => Effect<A, E, R>
+    export function gen(body: (...args: ReadonlyArray<unknown>) => Generator<unknown, unknown, unknown>): Effect<unknown, unknown, unknown>
+    export function retry(options: unknown): <A, E, R>(effect: Effect<A, E, R>) => Effect<A, E, R>
+    export function succeed<A>(value: A): Effect<A, never, never>
+  }
+
+  export namespace Layer {
+    export interface Layer<A = unknown, E = unknown, R = unknown> {
+      pipe(...args: ReadonlyArray<unknown>): Layer<unknown, unknown, unknown>
+    }
+    export function effect(tag: unknown, effect: Effect.Effect<unknown, unknown, unknown>): Layer<unknown, unknown, unknown>
+  }
+
+  export namespace Stream {
+    export interface Stream<A = unknown, E = unknown, R = unknown> {
+      pipe(...args: ReadonlyArray<unknown>): Stream<unknown, unknown, unknown>
+    }
+    export function fromEffect(effect: Effect.Effect<unknown, unknown, unknown>): Stream<unknown, unknown, unknown>
+  }
+}
+`
+}
+
+function generatedEffectErrorForTagType() {
+  const packageName = JSON.stringify(input.package_name)
+  const branches = []
+  for (const error of input.errors ?? []) {
+    for (const variant of error.variants ?? []) {
+      branches.push(
+        `Tag extends ${JSON.stringify(variant.tag)} ? import(${packageName}).${errorVariantClassName(error, variant)} :`
+      )
+    }
+  }
+  return `${branches.join(" ")} never`
+}
+
 function normalizePath(path) {
   return path.replaceAll("\\", "/")
+}
+
+function basename(path) {
+  return normalizePath(path).split("/").pop()
 }
 
 function lookupFile(fileName) {
@@ -1205,9 +1309,14 @@ function lookupFile(fileName) {
     return normalized
   }
 
-  const relativeToCwd = normalizePath(path.relative(process.cwd(), normalized))
-  if (files.has(relativeToCwd)) {
-    return relativeToCwd
+  const withoutLeadingSlash = normalized.replace(/^\/+/, "")
+  if (files.has(withoutLeadingSlash)) {
+    return withoutLeadingSlash
+  }
+
+  const withLeadingSlash = `/${withoutLeadingSlash}`
+  if (files.has(withLeadingSlash)) {
+    return withLeadingSlash
   }
 
   return undefined
@@ -1218,8 +1327,8 @@ function resolveLocalModule(moduleName, containingFile) {
     return undefined
   }
 
-  const containingDir = path.posix.dirname(normalizePath(containingFile))
-  const requested = normalizePath(path.posix.join(containingDir, moduleName))
+  const containingDir = posixDirname(normalizePath(containingFile))
+  const requested = normalizePath(posixJoin(containingDir, moduleName))
   for (const candidate of moduleCandidates(requested)) {
     const resolvedFileName = lookupFile(candidate)
     if (resolvedFileName !== undefined) {
@@ -1251,6 +1360,37 @@ function moduleCandidates(requested) {
     `${requested}/index.d.ts`
   )
   return candidates
+}
+
+function posixDirname(fileName) {
+  const normalized = normalizePath(fileName).replace(/\/+$/, "")
+  const index = normalized.lastIndexOf("/")
+  if (index < 0) {
+    return "."
+  }
+  if (index === 0) {
+    return "/"
+  }
+  return normalized.slice(0, index)
+}
+
+function posixJoin(base, requested) {
+  if (requested.startsWith("/")) {
+    return requested
+  }
+  const parts = `${base === "." ? "" : base}/${requested}`.split("/")
+  const output = []
+  for (const part of parts) {
+    if (part === "" || part === ".") {
+      continue
+    }
+    if (part === "..") {
+      output.pop()
+      continue
+    }
+    output.push(part)
+  }
+  return `${base.startsWith("/") ? "/" : ""}${output.join("/")}`
 }
 
 function extensionFor(fileName) {

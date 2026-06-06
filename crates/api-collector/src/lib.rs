@@ -2,9 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
     path::Path,
-    process::{Command, Stdio},
 };
 
 use api_core::ApiModule;
@@ -15,6 +13,9 @@ use api_ir::{
 use serde::{Deserialize, Serialize};
 
 pub const EFFECT_USAGE_INDEX_SCHEMA_VERSION: u32 = 2;
+#[cfg(feature = "embedded-semantic-scanner")]
+const SEMANTIC_USAGE_SCANNER_BUNDLE: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/semantic_usage_scanner.js"));
 
 #[must_use]
 pub fn collect_empty_contract(package_name: impl Into<String>) -> ApiContract {
@@ -683,67 +684,48 @@ fn semantic_endpoint_references(
     let input = serde_json::to_vec(&input)
         .map_err(|error| format!("failed to serialize semantic TypeScript usage input: {error}"))?;
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script = repo_root
-        .join("crates")
-        .join("api-collector")
-        .join("scripts")
-        .join("semantic_usage_scanner.mts");
-    let npm_dir = repo_root.join("npm");
-    let tsx = npm_dir
-        .join("node_modules")
-        .join("tsx")
-        .join("dist")
-        .join("cli.mjs");
-    if !tsx.is_file() {
-        return Err(format!(
-            "missing local tsx runner at {}; run `npm install` in npm/",
-            tsx.display()
-        ));
-    }
-    let mut child = Command::new("node")
-        .arg(&tsx)
-        .arg(&script)
-        .current_dir(&npm_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "failed to start semantic TypeScript usage scanner `{}`: {error}",
-                script.display()
-            )
-        })?;
+    let output = run_semantic_usage_scanner(&input)?;
 
-    child
-        .stdin
-        .as_mut()
-        .expect("semantic scanner stdin is piped")
-        .write_all(&input)
-        .map_err(|error| format!("failed to write semantic TypeScript usage input: {error}"))?;
-
-    let output = child.wait_with_output().map_err(|error| {
-        format!("failed to wait for semantic TypeScript usage scanner: {error}")
+    let output: SemanticScannerOutput = serde_json::from_str(&output).map_err(|error| {
+        format!(
+            "failed to parse semantic TypeScript usage scanner output: {error}\nstdout:\n{}",
+            output
+        )
     })?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "semantic TypeScript usage scanner failed with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let output: SemanticScannerOutput =
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            format!(
-                "failed to parse semantic TypeScript usage scanner output: {error}\nstdout:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            )
-        })?;
     Ok(output)
+}
+
+#[cfg(feature = "embedded-semantic-scanner")]
+fn run_semantic_usage_scanner(input: &[u8]) -> Result<String, String> {
+    let input = std::str::from_utf8(input)
+        .map_err(|error| format!("semantic TypeScript usage input was not UTF-8: {error}"))?;
+    let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions::default());
+    runtime
+        .execute_script(
+            "semantic_usage_scanner_bundle.js",
+            SEMANTIC_USAGE_SCANNER_BUNDLE,
+        )
+        .map_err(|error| format!("failed to initialize semantic TypeScript scanner: {error}"))?;
+
+    let input_argument = serde_json::to_string(input)
+        .map_err(|error| format!("failed to quote semantic TypeScript scanner input: {error}"))?;
+    let script = format!("globalThis.__semanticUsageScanner.scan({input_argument})");
+    let value = runtime
+        .execute_script("semantic_usage_scanner_call.js", script)
+        .map_err(|error| format!("semantic TypeScript usage scanner failed: {error}"))?;
+
+    deno_core::scope!(scope, runtime);
+    let local = deno_core::v8::Local::new(scope, value);
+    deno_core::serde_v8::from_v8::<String>(scope, local)
+        .map_err(|error| format!("semantic TypeScript scanner returned invalid output: {error}"))
+}
+
+#[cfg(not(feature = "embedded-semantic-scanner"))]
+fn run_semantic_usage_scanner(_input: &[u8]) -> Result<String, String> {
+    Err(
+        "semantic TypeScript usage scanning requires the `embedded-semantic-scanner` feature"
+            .to_owned(),
+    )
 }
 
 fn add_import_only_usages(
