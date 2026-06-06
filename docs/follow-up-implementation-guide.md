@@ -998,17 +998,17 @@ Do not spend milestone time on these until the core loop is real:
 
 ## Final release checklist
 
-- [ ] `cargo api collect` produces a non-empty contract from a real API root.
-- [ ] `cargo api gen` writes a hidden package and symbol graph.
-- [ ] Generated packages typecheck under the repository-pinned Effect version.
-- [ ] Generated runtime decodes and encodes through generated schemas.
-- [ ] `i64` and other unsafe integers are not generated as plain JS numbers by default.
-- [ ] Serde-tagged errors decode to catchable tagged generated errors.
-- [ ] SSE streams fail with typed domain errors when the server sends an API error frame.
-- [ ] `api-ls` fails initialization if rust-analyzer or the TS/Effect backend is unavailable.
-- [ ] TS definition on endpoint/type/field/error tag jumps to Rust.
-- [ ] Rust references on endpoint/type/field/error variant include TS usages.
-- [ ] Rename from TS field changes the Rust wire contract and TS usages.
-- [ ] Usage index is semantic and Effect-aware.
-- [ ] Unused endpoint diagnostics appear in editor and CI/build mode.
-- [ ] A fresh end-to-end example passes without editing generated files.
+- [x] `cargo api collect` produces a non-empty contract from a real API root.
+- [x] `cargo api gen` writes a hidden package and symbol graph.
+- [x] Generated packages typecheck under the repository-pinned Effect version.
+- [x] Generated runtime decodes and encodes through generated schemas.
+- [x] `i64` and other unsafe integers are not generated as plain JS numbers by default.
+- [x] Serde-tagged errors decode to catchable tagged generated errors.
+- [x] SSE streams fail with typed domain errors when the server sends an API error frame.
+- [x] `api-ls` fails initialization if rust-analyzer or the TS/Effect backend is unavailable.
+- [x] TS definition on endpoint/type/field/error tag jumps to Rust.
+- [x] Rust references on endpoint/type/field/error variant include TS usages.
+- [x] Rename from TS field changes the Rust wire contract and TS usages.
+- [x] Usage index is semantic and Effect-aware.
+- [x] Unused endpoint diagnostics appear in editor and CI/build mode.
+- [x] A fresh end-to-end example passes without editing generated files.
