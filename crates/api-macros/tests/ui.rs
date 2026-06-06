@@ -18,6 +18,11 @@ fn api_type_compile_failures_are_clear() {
     tests.compile_fail("tests/ui/api_endpoint_non_async.rs");
     tests.compile_fail("tests/ui/api_endpoint_invalid_return.rs");
     tests.compile_fail("tests/ui/api_endpoint_invalid_error.rs");
+    tests.compile_fail("tests/ui/api_endpoint_string_error.rs");
+    tests.compile_fail("tests/ui/api_endpoint_anyhow_error.rs");
+    tests.compile_fail("tests/ui/api_endpoint_std_io_error.rs");
+    tests.compile_fail("tests/ui/api_endpoint_box_dyn_error.rs");
+    tests.compile_fail("tests/ui/api_endpoint_impl_error.rs");
     tests.compile_fail("tests/ui/api_module_missing_endpoint.rs");
     tests.compile_fail("tests/ui/api_type_unsupported_external_generic.rs");
 }

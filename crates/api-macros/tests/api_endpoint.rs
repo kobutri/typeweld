@@ -17,6 +17,14 @@ enum GetUserError {
     NotFound,
 }
 
+#[derive(api_macros::ApiError)]
+#[serde(tag = "_tag")]
+#[allow(dead_code)]
+enum SearchUsersError {
+    #[api_error(status = 400)]
+    BadFilter,
+}
+
 #[api_macros::api(method = "GET", path = "/users/{id}", allow_unused)]
 #[allow(dead_code)]
 async fn get_user(id: Path<i64>, filter: Query<String>) -> Result<Json<User>, GetUserError> {
@@ -33,6 +41,12 @@ async fn create_user() -> Result<Created<User>, GetUserError> {
 #[api_macros::api(method = "SSE", path = "/users/events")]
 #[allow(dead_code)]
 fn user_events() -> Result<Sse<User>, GetUserError> {
+    unimplemented!()
+}
+
+#[api_macros::api(method = "GET", path = "/users/search")]
+#[allow(dead_code)]
+async fn search_users() -> Result<Json<User>, SearchUsersError> {
     unimplemented!()
 }
 
@@ -80,6 +94,14 @@ fn api_endpoint_macro_preserves_created_response_shape() {
         panic!("expected created response");
     };
     assert_eq!(response.name, "User");
+}
+
+#[test]
+fn api_endpoint_macro_accepts_endpoint_specific_error_enum() {
+    let endpoint = __api_endpoint_search_users();
+
+    assert_eq!(endpoint.errors[0].name, "SearchUsersError");
+    assert_eq!(endpoint.ts_path, ["users", "searchUsers"]);
 }
 
 #[test]

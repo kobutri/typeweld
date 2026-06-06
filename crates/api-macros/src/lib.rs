@@ -688,6 +688,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
     }
 
     if let Some((ok, err)) = result_types(ty) {
+        validate_endpoint_error_type(err)?;
         let ok_return = return_for_type(ok)?;
         let mut registrations = ok_return.registrations;
         registrations.push(contract_register_error_call(err));
@@ -702,6 +703,104 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
         ty,
         "#[api] endpoint returns must be Json<T>, Created<T>, NoContent, or Result of those",
     ))
+}
+
+fn validate_endpoint_error_type(err: &Type) -> syn::Result<()> {
+    if is_string_type(err) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "`String` errors are not finite or catchable in generated Effect clients",
+        ));
+    }
+
+    if is_anyhow_error(err) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "`anyhow::Error` is opaque and cannot be represented as a generated error channel",
+        ));
+    }
+
+    if is_std_io_error(err) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "`std::io::Error` is transport/runtime detail, not a public API error contract",
+        ));
+    }
+
+    if is_boxed_dyn_error(err) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "`Box<dyn Error>` is opaque and cannot be represented as a generated error channel",
+        ));
+    }
+
+    if matches!(err, Type::TraitObject(_)) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "`dyn Error` is opaque and cannot be represented as a generated error channel",
+        ));
+    }
+
+    if matches!(err, Type::ImplTrait(_) | Type::Infer(_)) {
+        return Err(unsupported_endpoint_error(
+            err,
+            "opaque endpoint error types cannot be represented as generated error channels",
+        ));
+    }
+
+    Ok(())
+}
+
+fn unsupported_endpoint_error(err: &Type, reason: &str) -> syn::Error {
+    syn::Error::new_spanned(
+        err,
+        format!(
+            "#[api] endpoint errors must be typed ApiError enums; {reason}. Derive ApiError for a \
+             domain enum or map the error into one before returning it."
+        ),
+    )
+}
+
+fn is_string_type(ty: &Type) -> bool {
+    type_path_last_ident(ty).is_some_and(|ident| ident == "String")
+}
+
+fn is_anyhow_error(ty: &Type) -> bool {
+    type_path_segments(ty).is_some_and(|segments| {
+        segments.last().is_some_and(|segment| segment == "Error")
+            && segments.iter().any(|segment| segment == "anyhow")
+    })
+}
+
+fn is_std_io_error(ty: &Type) -> bool {
+    type_path_segments(ty).is_some_and(|segments| {
+        segments.last().is_some_and(|segment| segment == "Error")
+            && segments.windows(2).any(|window| {
+                (window[0] == "std" && window[1] == "io")
+                    || (window[0] == "tokio" && window[1] == "io")
+            })
+    })
+}
+
+fn is_boxed_dyn_error(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Box" {
+        return false;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return false;
+    };
+    args.args.iter().any(|arg| {
+        matches!(
+            arg,
+            GenericArgument::Type(Type::TraitObject(_)) | GenericArgument::Type(Type::ImplTrait(_))
+        )
+    })
 }
 
 fn extractor_inner<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
@@ -747,6 +846,19 @@ fn type_path_last_ident(ty: &Type) -> Option<String> {
         return None;
     };
     Some(path.path.segments.last()?.ident.to_string())
+}
+
+fn type_path_segments(ty: &Type) -> Option<Vec<String>> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
 }
 
 fn route_params(path: &str) -> Vec<String> {

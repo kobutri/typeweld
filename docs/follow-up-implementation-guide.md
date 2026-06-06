@@ -379,7 +379,7 @@ Acceptance criteria:
 - Plain `Option<T>` and omitted `Option<T>` produce different encoded shapes.
 - Defaults are accepted on decode when Rust would accept them.
 
-### C3. Require typed public errors
+### C3. Require typed public errors [done]
 
 Goal: keep generated error channels finite and catchable.
 
