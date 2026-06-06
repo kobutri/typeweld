@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -29,7 +29,7 @@ const apiBinaryPath =
     ? resolve(extensionRoot, configuredApiBinary)
     : defaultApiBinaryPath()
 
-assertFile(binaryPath, "api-ls binary")
+assertFile(binaryPath, "api-ls binary", "Build api-ls first or pass --binary.")
 
 const launcherSource = resolve(
   npmRoot,
@@ -64,7 +64,7 @@ await esbuild.build({
 writeFileSync(launcherPackageTarget, `${JSON.stringify({ type: "module" }, null, 2)}\n`)
 copyFileSync(binaryPath, binaryTarget)
 const copiedApiBinary = maybeCopyApiBinary(apiBinaryPath, apiBinaryTarget)
-copyDirectory(typescriptPluginSource, typescriptPluginTarget)
+await buildTypescriptPlugin(typescriptPluginSource, typescriptPluginTarget)
 
 if (process.platform !== "win32") {
   chmodSync(launcherTarget, 0o755)
@@ -105,19 +105,35 @@ function maybeCopyApiBinary(source: string, target: string): boolean {
   return true
 }
 
-function copyDirectory(source: string, target: string): void {
+async function buildTypescriptPlugin(source: string, target: string): Promise<void> {
+  const entry = join(source, "index.ts")
+  const manifest = join(source, "package.json")
+  assertFile(entry, "TypeScript server plugin source")
+  assertFile(manifest, "TypeScript server plugin manifest")
+
   rmSync(target, { force: true, recursive: true })
-  mkdirSync(dirname(target), { recursive: true })
-  cpSync(source, target, { recursive: true })
+  mkdirSync(target, { recursive: true })
+  copyFileSync(manifest, join(target, "package.json"))
+  await esbuild.build({
+    bundle: false,
+    entryPoints: [entry],
+    format: "cjs",
+    legalComments: "none",
+    logLevel: "silent",
+    outfile: join(target, "index.js"),
+    platform: "node",
+    target: "node20",
+  })
 }
 
-function assertFile(path: string, label: string): void {
+function assertFile(path: string, label: string, hint = ""): void {
   try {
     if (!statSync(path).isFile()) {
       throw new Error("not a file")
     }
   } catch (error) {
-    throw new Error(`Missing ${label}: ${path}. Build api-ls first or pass --binary.`)
+    const suffix = hint === "" ? "" : ` ${hint}`
+    throw new Error(`Missing ${label}: ${path}.${suffix}`)
   }
 }
 

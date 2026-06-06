@@ -19,7 +19,7 @@
     "typecheck:lsp-wrapper": "npm run typecheck --workspace @rust-ts-integration/language-server",
     "typecheck:runtime": "npm run typecheck --workspace @rust-ts-integration/effect-runtime",
     "typecheck:vscode": "npm run typecheck --workspace rust-ts-integration",
-    "typecheck:workspaces": "tsc -b --noEmit tsconfig.json"
+    "typecheck:workspaces": "tsc -b --noEmit tsconfig.json && tsc --noEmit -p vscode-extension/typescript-plugin/tsconfig.json"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.78",

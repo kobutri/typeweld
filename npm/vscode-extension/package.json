@@ -48,7 +48,7 @@
     "package": "npm run typecheck && vite build --config vite.config.mts --mode production",
     "package:vsix": "tsx scripts/ensure-out-dir.mts && vsce package --no-dependencies && tsx scripts/patch-vsix-typescript-plugin.mts",
     "prepare:server": "tsx scripts/prepare-package.mts",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p typescript-plugin/tsconfig.json",
     "vscode:prepublish": "npm run package",
     "watch": "vite build --config vite.config.mts --mode development --watch"
   },
