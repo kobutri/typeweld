@@ -11,15 +11,19 @@ This project has three release surfaces:
 
 ## Recommendation
 
-Use GitHub Actions trusted publishing for crates.io and npm, with a manual
-workflow dispatch for the first few releases. That gives you short-lived OIDC
-credentials instead of long-lived registry tokens, while keeping a human approval
-step before anything is published.
+Do not keep a manually-triggerable package publishing workflow in this
+repository. A compromised local machine or browser session should not be able to
+publish packages by opening GitHub Actions and pressing a dispatch button.
+
+The current repository setup intentionally has no npm/crates.io publish workflow.
+Registry publishing should stay deferred until a release process is designed
+around protected tags or published GitHub Releases, protected environments,
+short-lived credentials, and reviewable release PRs.
 
 The repository now has:
 
-- `.github/workflows/publish.yml` for crates.io and npm dry runs or publishes.
-- `.github/workflows/release-vscode-extension.yml` for GitHub release assets.
+- `.github/workflows/release-vscode-extension.yml` for GitHub release assets,
+  triggered only by a published GitHub Release.
 - `npm run prepare:binary --workspace typeweld` to place a native CLI binary in
   `npm/cli/bin/<platform>/`.
 - `npm run prepare:binary --workspace @typeweld/language-server` to place a
@@ -27,25 +31,28 @@ The repository now has:
 
 ## Options
 
-Option A, recommended now: manual release PR plus manual publish workflow.
+Option A, recommended now: no registry publish workflow.
 
 - Version bumps and changelog stay reviewable.
-- The publish workflow defaults to `dry_run: true`.
-- npm and crates.io can use trusted publishing once configured.
-- GitHub release assets are tied to an actual GitHub Release.
+- Package dry-runs happen locally and in ordinary CI.
+- Actual registry publication requires a deliberate, separate operator action
+  from a hardened environment.
+- There is no `workflow_dispatch` path that can publish packages.
 
-Option B, later: release-plz or cargo-release for Rust version bumps.
+Option B, later: protected release-event publishing.
+
+- Trigger only from protected tags or `release.published`, never
+  `workflow_dispatch`.
+- Use GitHub environments with required reviewers.
+- Use npm/crates.io trusted publishing so CI gets short-lived OIDC credentials
+  instead of long-lived registry tokens.
+
+Option C, later: release-plz or cargo-release for Rust version bumps.
 
 - Good once the release cadence stabilizes.
 - Still keep npm package versions and native binary packaging in the same release
   checklist.
-- Adds another moving part before the first public release, so this is not the
-  first setup.
-
-Option C, not recommended: local machine publishing.
-
-- Fine for the first name reservation if crates.io requires it.
-- Worse long-term because it depends on local auth tokens and is harder to audit.
+- Adds another moving part before the first public release.
 
 ## One-Time Registry Setup
 
@@ -56,23 +63,25 @@ npm packages:
 - `@typeweld/effect-runtime`
 - `@typeweld/language-server`
 
-On npmjs.com, configure a trusted publisher for each package:
+Do not configure npm or crates.io trusted publishers until the corresponding
+release-event-only workflow exists. When that workflow is added, configure npm
+trusted publishing for each package:
 
 - Provider: GitHub Actions
 - Organization/user: `typeweld`
 - Repository: `typeweld`
-- Workflow filename: `publish.yml`
+- Workflow filename: the future release-event-only workflow
 - Environment: `release`
 - Allowed action: `npm publish`
 
 On crates.io, create or reserve each crate name, then configure trusted
 publishing for the same repository/workflow/environment for each publishable
 crate. If crates.io still requires the first crate version to be published
-manually, publish `0.0.1` locally once, then enable trusted publishing for later
-versions.
+manually, publish `0.0.1` locally once, then enable trusted publishing only after
+the release-event workflow exists.
 
-Create a GitHub environment named `release` and require reviewer approval. Both
-the npm and crates.io publishing jobs use that environment.
+Create a GitHub environment named `release` and require reviewer approval before
+adding any registry publishing workflow.
 
 ## Release Walkthrough
 
@@ -101,32 +110,17 @@ the npm and crates.io publishing jobs use that environment.
    crates.io index for the internal dependency versions, so the full dry-run is
    only meaningful after the lower-level crates have been published once.
 
-3. Run the GitHub publish workflow in dry-run mode.
-
-   Use Actions -> Publish Packages:
-
-   - `version`: the release version, for example `0.1.0`
-   - `dry_run`: `true`
-   - `publish_crates`: `true`
-   - `publish_npm`: `true`
-
-4. Create and publish a GitHub Release for tag `vX.Y.Z`.
+3. Create and publish a GitHub Release for tag `vX.Y.Z`.
 
    The release workflow uploads VSIX and standalone CLI assets. Release-built CLI
    binaries are compiled with `TYPEWELD_TEMPLATE_SOURCE=github`, so `typeweld new`
    generated from those binaries points at GitHub release assets and git-tagged
    Rust dependencies.
 
-5. Publish packages.
+4. Publish registry packages outside repository Actions.
 
-   Re-run Publish Packages with:
-
-   - `dry_run`: `false`
-   - `publish_crates`: `true`
-   - `publish_npm`: `true`
-
-   npm-published CLI binaries are compiled with `TYPEWELD_TEMPLATE_SOURCE=registry`,
-   so `npx typeweld new` generates npm and crates.io dependencies.
+   Until there is a protected release-event-only workflow, publish npm/crates.io
+   packages only from a hardened environment with short-lived authentication.
 
 ## Source Notes
 

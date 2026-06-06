@@ -3,12 +3,6 @@ name: Release Artifacts
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: GitHub release tag to attach release assets to, for example v0.1.0.
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -42,7 +36,7 @@ jobs:
             binary-name: typeweld-ls.exe
             cli-binary-name: typeweld.exe
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -174,7 +168,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
