@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "format": "prettier --check .",
-    "test": "npm run typecheck --workspaces",
+    "test": "npm run typecheck --workspaces && npm run test:runtime --workspace @rust-ts-integration/effect-runtime",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {

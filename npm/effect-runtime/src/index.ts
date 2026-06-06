@@ -296,12 +296,14 @@ async function* decodeSseStream<Args, Success, DomainError>(
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
+  let completed = false
 
   try {
     while (true) {
       const read = await readSseChunk(reader)
       if (read.done) {
         buffer += decoder.decode()
+        completed = true
         break
       }
 
@@ -324,6 +326,9 @@ async function* decodeSseStream<Args, Success, DomainError>(
       }
     }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined)
+    }
     reader.releaseLock()
   }
 }

@@ -512,7 +512,7 @@ Acceptance criteria:
 - Known status plus invalid body is a decode failure.
 - Tagged domain errors narrow correctly in TS fixtures.
 
-### D6. Harden SSE protocol
+### D6. Harden SSE protocol [done]
 
 Goal: reliable stream success/error handling.
 

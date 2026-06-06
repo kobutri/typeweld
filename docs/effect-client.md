@@ -40,6 +40,21 @@ Domain errors such as `UserNotFound` stay typed in the Effect error channel.
 Transport, encode, decode, timeout, and unexpected-status failures are surfaced
 as `ApiClientError` variants.
 
+## SSE Wire Protocol
+
+Successful stream frames use normal SSE `data:` lines containing JSON that
+matches the stream item schema. The reserved `api-error` event carries domain
+errors:
+
+```text
+event: api-error
+data: {"status":404,"body":{"_tag":"UserNotFound","id":1}}
+```
+
+Malformed JSON is a protocol error. A successful frame with the wrong shape is a
+decode error. An `api-error` status not declared by the endpoint is an
+unexpected-status error.
+
 ## Strong usage
 
 Unused endpoint checks only count strong Effect usage. These count:
