@@ -2,14 +2,15 @@ use api_core::{
     ir::{HttpMethod, RequestBodyTransport, ResponseShape, Transport},
     ApiType, Binary, Created, Json, Path, Query, Sse,
 };
+use axum::{body::to_bytes, http::StatusCode};
 
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, serde::Deserialize, serde::Serialize)]
 #[allow(dead_code)]
 struct User {
     id: i64,
 }
 
-#[derive(api_macros::ApiError)]
+#[derive(api_macros::ApiError, serde::Serialize)]
 #[serde(tag = "_tag")]
 #[allow(dead_code)]
 enum GetUserError {
@@ -17,7 +18,7 @@ enum GetUserError {
     NotFound,
 }
 
-#[derive(api_macros::ApiError)]
+#[derive(api_macros::ApiError, serde::Serialize)]
 #[serde(tag = "_tag")]
 #[allow(dead_code)]
 enum SearchUsersError {
@@ -61,10 +62,45 @@ async fn axum_wrapped_create_user(
     unimplemented!()
 }
 
+type UserEventStream =
+    futures_util::stream::Iter<std::array::IntoIter<Result<User, GetUserError>, 1>>;
+
 #[api_macros::api(method = "SSE", path = "/axum-users/events")]
 #[allow(dead_code)]
-fn axum_wrapped_user_events() -> Result<api_axum::Sse<User>, GetUserError> {
+fn axum_wrapped_user_events() -> Result<api_axum::Sse<User, UserEventStream>, GetUserError> {
     unimplemented!()
+}
+
+#[api_macros::api(method = "GET", path = "/axum-users/plain")]
+#[allow(dead_code)]
+async fn axum_plain_user() -> api_axum::Json<User> {
+    api_axum::Json(User { id: 7 })
+}
+
+#[api_macros::api(method = "GET", path = "/axum-users/result")]
+#[allow(dead_code)]
+async fn axum_result_user() -> Result<api_axum::Json<User>, GetUserError> {
+    Ok(api_axum::Json(User { id: 9 }))
+}
+
+#[api_macros::api(method = "GET", path = "/axum-users/missing")]
+#[allow(dead_code)]
+async fn axum_missing_user() -> Result<api_axum::Json<User>, GetUserError> {
+    Err(GetUserError::NotFound)
+}
+
+#[api_macros::api(method = "SSE", path = "/axum-users/plain-events")]
+#[allow(dead_code)]
+fn axum_plain_events() -> api_axum::Sse<User, UserEventStream> {
+    api_axum::Sse::new(futures_util::stream::iter([Ok(User { id: 11 })]))
+}
+
+#[api_macros::api(method = "SSE", path = "/axum-users/result-events")]
+#[allow(dead_code)]
+fn axum_result_events() -> Result<api_axum::Sse<User, UserEventStream>, GetUserError> {
+    Ok(api_axum::Sse::new(futures_util::stream::iter([Ok(User {
+        id: 13,
+    })])))
 }
 
 #[api_macros::api(method = "GET", path = "/files/{id}")]
@@ -73,6 +109,23 @@ async fn download_file(id: Path<i64>) -> Result<Binary<bytes::Bytes>, GetUserErr
     let _ = id;
     std::future::ready(()).await;
     unimplemented!()
+}
+
+#[api_macros::api(method = "GET", path = "/axum-files/{id}")]
+#[allow(dead_code)]
+async fn axum_download_file(id: api_axum::Path<i64>) -> api_axum::Binary<bytes::Bytes> {
+    let _ = id;
+    api_axum::Binary(bytes::Bytes::from_static(b"file"))
+}
+
+#[api_macros::api(method = "POST", path = "/axum-files/{id}")]
+#[allow(dead_code)]
+async fn axum_upload_file(
+    id: api_axum::Path<i64>,
+    body: api_axum::Binary<bytes::Bytes>,
+) -> api_axum::Json<User> {
+    let _ = (id, body);
+    api_axum::Json(User { id: 17 })
 }
 
 #[api_macros::api(method = "POST", path = "/files/{id}")]
@@ -221,4 +274,58 @@ fn api_module_accepts_endpoint_functions_directly() {
     assert_eq!(module.endpoints[0].ts_path, ["users", "getUser"]);
     assert_eq!(module.registry().type_defs()[0].rust_name, "User");
     assert_eq!(module.registry().error_defs()[0].rust_name, "GetUserError");
+}
+
+#[test]
+fn api_endpoint_macro_emits_axum_handler_adapters() {
+    fn accepts_handler<H, T>(_: H)
+    where
+        H: axum::handler::Handler<T, ()> + Clone + Send + Sync + 'static,
+        T: 'static,
+    {
+    }
+
+    accepts_handler(__api_axum_handler_axum_wrapped_create_user);
+    accepts_handler(__api_axum_handler_axum_plain_user);
+    accepts_handler(__api_axum_handler_axum_result_user);
+    accepts_handler(__api_axum_handler_axum_plain_events);
+    accepts_handler(__api_axum_handler_axum_result_events);
+    accepts_handler(__api_axum_handler_axum_download_file);
+    accepts_handler(__api_axum_handler_axum_upload_file);
+}
+
+#[tokio::test]
+async fn generated_axum_adapter_converts_result_success() {
+    let response = __api_axum_handler_axum_result_user().await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(std::str::from_utf8(&body).expect("utf8"), r#"{"id":9}"#);
+}
+
+#[tokio::test]
+async fn generated_axum_adapter_converts_result_error() {
+    let response = __api_axum_handler_axum_missing_user().await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(
+        std::str::from_utf8(&body).expect("utf8"),
+        r#"{"_tag":"NotFound"}"#
+    );
+}
+
+#[tokio::test]
+async fn generated_axum_adapter_converts_plain_response() {
+    let response = __api_axum_handler_axum_plain_user().await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(std::str::from_utf8(&body).expect("utf8"), r#"{"id":7}"#);
 }

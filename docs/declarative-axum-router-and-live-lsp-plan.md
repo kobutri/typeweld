@@ -924,6 +924,8 @@ Acceptance:
 
 ### Phase 2: Generated Axum Adapters
 
+Status: Done.
+
 Files:
 
 - `crates/api-macros/src/lib.rs`
@@ -933,11 +935,11 @@ Files:
 
 Steps:
 
-1. Extend `#[api]` expansion to emit hidden axum handler adapters.
-2. Add tests for `Result<T, E>`, plain `T`, SSE result, SSE plain, binary
-   upload, and binary download.
-3. Keep existing `__api_endpoint_*` and descriptor helpers for compatibility.
-4. Do not require users to import `axum::response::Response`.
+- [x] Extend `#[api]` expansion to emit hidden axum handler adapters.
+- [x] Add tests for `Result<T, E>`, plain `T`, SSE result, SSE plain, binary
+  upload, and binary download.
+- [x] Keep existing `__api_endpoint_*` and descriptor helpers for compatibility.
+- [x] Do not require users to import `axum::response::Response`.
 
 Acceptance:
 

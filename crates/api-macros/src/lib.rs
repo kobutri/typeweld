@@ -424,6 +424,7 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let metadata_ident = format_ident!("__api_endpoint_{fn_ident}");
     let register_ident = format_ident!("__api_register_endpoint_{fn_ident}");
     let descriptor_ident = format_ident!("__api_endpoint_descriptor_{fn_ident}");
+    let axum_handler_ident = format_ident!("__api_axum_handler_{fn_ident}");
     let method = args.method_tokens()?;
     let route_params = route_params(&args.path);
     let request = endpoint_request(&input.sig.inputs, &route_params)?;
@@ -431,6 +432,13 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     args.validate_request_policy(&request, &input.sig)?;
     args.validate_return_policy(&request, &endpoint_return, &input.sig.output)?;
     let transport = args.transport_tokens(&request, &endpoint_return);
+    let adapter_inputs = input.sig.inputs.clone();
+    let adapter_call_args = endpoint_call_args(&input.sig.inputs)?;
+    let adapter_response = endpoint_return.adapter_response(
+        fn_ident,
+        adapter_call_args,
+        input.sig.asyncness.is_some(),
+    );
     let request_shape = request.shape;
     let request_registrations = request.registrations;
     let response = endpoint_return.response;
@@ -475,7 +483,39 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
         pub fn #descriptor_ident() -> ::api_core::EndpointDescriptor {
             ::api_core::EndpointDescriptor::new(#metadata_ident(), #register_ident)
         }
+
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        pub async fn #axum_handler_ident(
+            #adapter_inputs
+        ) -> ::api_axum::Response {
+            #adapter_response
+        }
     })
+}
+
+fn endpoint_call_args(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    inputs
+        .iter()
+        .map(|input| {
+            let FnArg::Typed(input) = input else {
+                return Err(syn::Error::new_spanned(
+                    input,
+                    "#[api] endpoints cannot take self receivers",
+                ));
+            };
+            let syn::Pat::Ident(pat_ident) = input.pat.as_ref() else {
+                return Err(syn::Error::new_spanned(
+                    input,
+                    "#[api] endpoint parameters must use simple identifiers",
+                ));
+            };
+            let ident = &pat_ident.ident;
+            Ok(quote!(#ident))
+        })
+        .collect()
 }
 
 struct EndpointRequest {
@@ -690,6 +730,7 @@ struct EndpointReturn {
     registrations: Vec<proc_macro2::TokenStream>,
     is_stream: bool,
     is_binary: bool,
+    is_result: bool,
 }
 
 fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
@@ -700,6 +741,7 @@ fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
             registrations: Vec::new(),
             is_stream: false,
             is_binary: false,
+            is_result: false,
         }),
         ReturnType::Type(_, ty) => return_for_type(ty),
     }
@@ -713,6 +755,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations: Vec::new(),
             is_stream: false,
             is_binary: false,
+            is_result: false,
         });
     }
 
@@ -726,6 +769,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations: Vec::new(),
             is_stream: false,
             is_binary: true,
+            is_result: false,
         });
     }
 
@@ -738,6 +782,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations: vec![contract_register_type_call(inner)],
             is_stream: false,
             is_binary: false,
+            is_result: false,
         });
     }
 
@@ -750,6 +795,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations: vec![contract_register_type_call(inner)],
             is_stream: false,
             is_binary: false,
+            is_result: false,
         });
     }
 
@@ -762,6 +808,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations: vec![contract_register_type_call(inner)],
             is_stream: true,
             is_binary: false,
+            is_result: false,
         });
     }
 
@@ -776,6 +823,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             registrations,
             is_stream: ok_return.is_stream,
             is_binary: ok_return.is_binary,
+            is_result: true,
         });
     }
 
@@ -783,6 +831,27 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
         ty,
         "#[api] endpoint returns must be Json<T>, Created<T>, NoContent, Binary<bytes::Bytes>, or Result of those",
     ))
+}
+
+impl EndpointReturn {
+    fn adapter_response(
+        &self,
+        fn_ident: &syn::Ident,
+        call_args: Vec<proc_macro2::TokenStream>,
+        endpoint_is_async: bool,
+    ) -> proc_macro2::TokenStream {
+        let endpoint_call = if endpoint_is_async {
+            quote!(#fn_ident(#(#call_args),*).await)
+        } else {
+            quote!(#fn_ident(#(#call_args),*))
+        };
+
+        if self.is_result {
+            quote!(::api_axum::success_or_error_response(#endpoint_call))
+        } else {
+            quote!(::api_axum::into_api_response(#endpoint_call))
+        }
+    }
 }
 
 fn validate_endpoint_error_type(err: &Type) -> syn::Result<()> {

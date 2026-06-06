@@ -11,6 +11,7 @@ use api_core::{
     ir::{HttpMethod, HttpStatus},
     ApiError, ApiModule, Endpoint,
 };
+pub use axum::response::Response;
 use axum::{
     body::Bytes,
     extract::{FromRequest, FromRequestParts},
@@ -18,7 +19,7 @@ use axum::{
     http::{header::CONTENT_TYPE, request::Parts, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse as AxumSse},
-        IntoResponse, Response,
+        IntoResponse,
     },
     routing::{delete, get, patch, post, put, MethodRouter},
     Router,
@@ -179,6 +180,31 @@ where
 {
     match result {
         Ok(success) => success.into_response(),
+        Err(error) => DomainError(error).into_response(),
+    }
+}
+
+/// Success response conversion used by generated Axum endpoint adapters.
+pub trait ApiSuccessResponse {
+    fn into_api_response(self) -> Response;
+}
+
+#[must_use]
+pub fn into_api_response<T>(response: T) -> Response
+where
+    T: ApiSuccessResponse,
+{
+    response.into_api_response()
+}
+
+#[must_use]
+pub fn success_or_error_response<T, E>(result: Result<T, E>) -> Response
+where
+    T: ApiSuccessResponse,
+    E: ApiError + Serialize,
+{
+    match result {
+        Ok(success) => success.into_api_response(),
         Err(error) => DomainError(error).into_response(),
     }
 }
@@ -394,6 +420,101 @@ where
 {
     fn into_response(self) -> Response {
         (status_code(self.0.status()), axum::Json(self.0)).into_response()
+    }
+}
+
+impl<T> ApiSuccessResponse for Json<T>
+where
+    T: Serialize,
+{
+    fn into_api_response(self) -> Response {
+        self.into_response()
+    }
+}
+
+impl<T> ApiSuccessResponse for Created<T>
+where
+    T: Serialize,
+{
+    fn into_api_response(self) -> Response {
+        self.into_response()
+    }
+}
+
+impl ApiSuccessResponse for NoContent {
+    fn into_api_response(self) -> Response {
+        self.into_response()
+    }
+}
+
+impl ApiSuccessResponse for () {
+    fn into_api_response(self) -> Response {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl ApiSuccessResponse for Binary<Bytes> {
+    fn into_api_response(self) -> Response {
+        self.into_response()
+    }
+}
+
+impl<T, S, E> ApiSuccessResponse for Sse<T, S>
+where
+    S: Stream<Item = Result<T, E>> + Send + 'static,
+    T: Serialize,
+    E: ApiError + Serialize,
+{
+    fn into_api_response(self) -> Response {
+        self.into_response()
+    }
+}
+
+impl<T> ApiSuccessResponse for api_core::Json<T>
+where
+    T: Serialize,
+{
+    fn into_api_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+impl<T> ApiSuccessResponse for api_core::Created<T>
+where
+    T: Serialize,
+{
+    fn into_api_response(self) -> Response {
+        (StatusCode::CREATED, axum::Json(self.0)).into_response()
+    }
+}
+
+impl ApiSuccessResponse for api_core::NoContent {
+    fn into_api_response(self) -> Response {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl ApiSuccessResponse for api_core::Binary<Bytes> {
+    fn into_api_response(self) -> Response {
+        (
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            )],
+            self.0,
+        )
+            .into_response()
+    }
+}
+
+impl<T> ApiSuccessResponse for api_core::Sse<T>
+where
+    T: Serialize + Send + 'static,
+{
+    fn into_api_response(self) -> Response {
+        let events = futures_util::stream::once(async move { Event::default().json_data(self.0) });
+
+        AxumSse::new(events).into_response()
     }
 }
 

@@ -164,12 +164,15 @@ dependencies = [
  "api-axum",
  "api-core",
  "api-gen-effect-v4",
+ "axum",
  "bytes",
+ "futures-util",
  "proc-macro2",
  "quote",
  "serde",
  "serde_json",
  "syn",
+ "tokio",
  "trybuild",
 ]
 
@@ -1461,6 +1464,7 @@ dependencies = [
 name = "monorepo-basic"
 version = "0.0.0"
 dependencies = [
+ "api-axum",
  "api-collector",
  "api-core",
  "api-macros",
