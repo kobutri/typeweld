@@ -1,7 +1,7 @@
-# VS Code Extension Release Process
+# Release Process
 
-The release workflow packages platform-specific VSIX files and attaches them to
-the GitHub Release after the release is published.
+The release workflow packages platform-specific VSIX files and CLI binaries,
+then attaches them to the GitHub Release after the release is published.
 
 ## What CI Builds
 
@@ -24,13 +24,20 @@ Each VSIX includes the compiled extension bundle plus the matching `api-ls`
 binary. The extension manifest version is stamped from the release tag during
 the workflow, so use tags like `v0.1.0`.
 
+The same workflow also builds and uploads the `api` CLI:
+
+- `rust-ts-integration-api-<version>-linux-x64.tar.gz`
+- `rust-ts-integration-api-<version>-darwin-x64.tar.gz`
+- `rust-ts-integration-api-<version>-darwin-arm64.tar.gz`
+- `rust-ts-integration-api-<version>-win32-x64.zip`
+
 ## Steps
 
 1. Land the release commit on `main`.
 2. Run `npm test` locally if you want a final preflight.
 3. Create a GitHub Release for a semver tag such as `v0.1.0`.
 4. Publish the release. Draft creation alone does not upload assets.
-5. Wait for the `Release VS Code Extension` workflow to finish.
+5. Wait for the `Release Artifacts` workflow to finish.
 6. Download the VSIX for your platform from the release assets and test install:
 
 ```sh
