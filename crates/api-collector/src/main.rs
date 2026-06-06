@@ -3577,7 +3577,6 @@ serde = {{ version = "1.0", features = ["derive"] }}
         fs::write(
             server_dir.join("src/lib.rs"),
             r#"use api_axum::{ApiRouter, Json, Path};
-use api_core::ApiType;
 use serde::Serialize;
 
 #[derive(api_macros::ApiType, Serialize)]
@@ -3755,7 +3754,6 @@ pub fn routes() -> api_axum::ApiRouter {
         )
         .expect("write lib");
         let users_rs = r#"use api_axum::{ApiRouter, Json, Path};
-use api_core::ApiType;
 use serde::Serialize;
 
 #[derive(api_macros::ApiType, Serialize)]

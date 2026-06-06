@@ -1,5 +1,4 @@
 use api_axum::{ApiRouter, Sse};
-use api_core::ApiType;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 

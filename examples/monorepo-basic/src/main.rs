@@ -12,7 +12,6 @@
 
 use api_axum::{ApiRouter, Body, Json, Path};
 use api_collector::{collect_contract, contract_to_json, CollectorInput};
-use api_core::ApiType;
 use serde::{Deserialize, Serialize};
 
 /// This is a DTO: a data type that crosses the Rust/TypeScript boundary.

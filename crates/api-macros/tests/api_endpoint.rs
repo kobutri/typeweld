@@ -1,6 +1,6 @@
 use api_core::{
     ir::{HttpMethod, RequestBodyTransport, ResponseShape, Transport},
-    ApiType, Binary, Created, Json, Path, Query, Sse,
+    Binary, Created, Json, Path, Query, Sse,
 };
 use axum::{body::to_bytes, http::StatusCode};
 

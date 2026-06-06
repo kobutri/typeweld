@@ -1,6 +1,6 @@
 use api_axum::{ApiRouter, Body, Created, Json, Path, Sse};
 use api_collector::{collect_contract, CollectorInput};
-use api_core::{ir::ApiContract, ApiType};
+use api_core::ir::ApiContract;
 use axum::Router;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};

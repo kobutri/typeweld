@@ -310,7 +310,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     .split("::")
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
-                path.push(Self::RUST_NAME.to_owned());
+                path.push(<Self as ::api_core::ApiType>::RUST_NAME.to_owned());
                 path
             }
 
@@ -320,7 +320,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
 
                 ::api_core::ir::TypeRef {
                     id: ::api_core::ir::SymbolId::from_parts("type", &parts),
-                    name: Self::TS_NAME.to_owned(),
+                    name: <Self as ::api_core::ApiType>::TS_NAME.to_owned(),
                 }
             }
 
@@ -328,8 +328,8 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                 ::api_core::ir::TypeDef {
                     id: <Self as ::api_core::ApiType>::type_ref().id,
                     rust_path: <Self as ::api_core::ApiType>::rust_path(),
-                    rust_name: Self::RUST_NAME.to_owned(),
-                    ts_name: Self::TS_NAME.to_owned(),
+                    rust_name: <Self as ::api_core::ApiType>::RUST_NAME.to_owned(),
+                    ts_name: <Self as ::api_core::ApiType>::TS_NAME.to_owned(),
                     shape: #shape,
                     source: ::api_core::ir::SourceRange {
                         file: file!().to_owned(),
@@ -459,7 +459,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     .split("::")
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
-                path.push(Self::RUST_NAME.to_owned());
+                path.push(<Self as ::api_core::ApiType>::RUST_NAME.to_owned());
                 path
             }
 
@@ -469,7 +469,7 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 
                 ::api_core::ir::TypeRef {
                     id: ::api_core::ir::SymbolId::from_parts("type", &parts),
-                    name: Self::TS_NAME.to_owned(),
+                    name: <Self as ::api_core::ApiType>::TS_NAME.to_owned(),
                 }
             }
 
@@ -477,8 +477,8 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 ::api_core::ir::TypeDef {
                     id: <Self as ::api_core::ApiType>::type_ref().id,
                     rust_path: <Self as ::api_core::ApiType>::rust_path(),
-                    rust_name: Self::RUST_NAME.to_owned(),
-                    ts_name: Self::TS_NAME.to_owned(),
+                    rust_name: <Self as ::api_core::ApiType>::RUST_NAME.to_owned(),
+                    ts_name: <Self as ::api_core::ApiType>::TS_NAME.to_owned(),
                     shape: ::api_core::ir::TypeShape::Enum(::api_core::ir::EnumShape {
                         variants: vec![#(#api_type_variants),*],
                     }),
@@ -511,8 +511,8 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 ::api_core::ir::ErrorDef {
                     id: <Self as ::api_core::ApiError>::error_ref().id,
                     rust_path: <Self as ::api_core::ApiType>::rust_path(),
-                    rust_name: Self::RUST_NAME.to_owned(),
-                    ts_name: Self::TS_NAME.to_owned(),
+                    rust_name: <Self as ::api_core::ApiType>::RUST_NAME.to_owned(),
+                    ts_name: <Self as ::api_core::ApiType>::TS_NAME.to_owned(),
                     variants: vec![#(#error_variants),*],
                     source: ::api_core::ir::SourceRange {
                         file: file!().to_owned(),
