@@ -719,7 +719,7 @@ Acceptance criteria:
 - Stale generated output fails with actionable instructions.
 - `--deny-unused-endpoints` fails when an exported endpoint has no strong TS usage.
 
-### G2. Strengthen build lint bridge
+### G2. Strengthen build lint bridge [done]
 
 Goal: make Rust-side unused endpoint feedback reliable.
 

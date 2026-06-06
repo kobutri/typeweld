@@ -159,8 +159,9 @@ pub fn check_usage_lints(config: &UsageLintConfig) -> Result<UsageLintReport, Us
                 route: None,
                 accessor: None,
                 message: format!(
-                    "missing Effect usage index `{}`; run `api check-usages` or start api-ls to generate target/api-contract/graph/effect-usage-index.json",
-                    config.usage_index.display()
+                    "missing Effect usage index `{}`; {}",
+                    config.usage_index.display(),
+                    regeneration_hint(config)
                 ),
             }],
             stale: false,
@@ -173,8 +174,9 @@ pub fn check_usage_lints(config: &UsageLintConfig) -> Result<UsageLintReport, Us
                 route: None,
                 accessor: None,
                 message: format!(
-                    "missing API symbol graph `{}`; regenerate the API contract before checking endpoint usage",
-                    config.symbol_graph.display()
+                    "missing API symbol graph `{}`; {}",
+                    config.symbol_graph.display(),
+                    regeneration_hint(config)
                 ),
             }],
             stale: false,
@@ -192,9 +194,10 @@ pub fn check_usage_lints(config: &UsageLintConfig) -> Result<UsageLintReport, Us
             route: None,
             accessor: None,
             message: format!(
-                "stale Effect usage index `{}`; regenerate it because its metadata does not match symbol graph `{}`",
+                "stale Effect usage index `{}` because its metadata does not match symbol graph `{}`; {}",
                 config.usage_index.display(),
-                config.symbol_graph.display()
+                config.symbol_graph.display(),
+                regeneration_hint(config)
             ),
         });
     }
@@ -286,6 +289,32 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T
 
 fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name).map(PathBuf::from)
+}
+
+fn regeneration_hint(config: &UsageLintConfig) -> String {
+    format!(
+        "run `{}` to regenerate the API contract, generated package, symbol graph, and usage index",
+        regeneration_command(config)
+    )
+}
+
+fn regeneration_command(config: &UsageLintConfig) -> String {
+    format!(
+        "api check --target-dir {} --ts-dir <ts-source-dir>",
+        shell_arg(&target_dir_from_symbol_graph(&config.symbol_graph))
+    )
+}
+
+fn target_dir_from_symbol_graph(symbol_graph: &Path) -> PathBuf {
+    symbol_graph
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+fn shell_arg(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 fn rust_string(value: &str) -> String {
@@ -452,6 +481,31 @@ mod tests {
     }
 
     #[test]
+    fn warn_mode_writes_no_compile_error_glue() {
+        let root = test_root("warn-glue");
+        let config = write_inputs(
+            &root,
+            UsageLintLevel::Warn,
+            json!({
+                "symbols": [
+                    endpoint_symbol("endpoint:unused", "GET", "/unused", ["api", "unused"], false)
+                ]
+            }),
+            json!({
+                "endpoints": [
+                    { "endpoint_id": "endpoint:unused", "accessor_path": ["api", "unused"], "strong": 0 }
+                ]
+            }),
+        );
+
+        let report = emit_usage_lints_with_config(&config).expect("emit usage lints");
+        let glue = fs::read_to_string(&config.generated_lint_path).expect("read glue");
+
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(!glue.contains("compile_error!"));
+    }
+
+    #[test]
     fn missing_usage_index_reports_actionable_instruction() {
         let root = test_root("missing-index");
         fs::create_dir_all(&root).expect("create root");
@@ -468,7 +522,35 @@ mod tests {
         assert!(report.diagnostics[0]
             .message
             .contains("missing Effect usage index"));
-        assert!(report.diagnostics[0].message.contains("api check-usages"));
+        assert!(report.diagnostics[0]
+            .message
+            .contains("api check --target-dir"));
+        assert!(report.diagnostics[0].message.contains("--ts-dir"));
+    }
+
+    #[test]
+    fn missing_symbol_graph_reports_actionable_instruction() {
+        let root = test_root("missing-graph");
+        fs::create_dir_all(root.join("target/api-contract/graph")).expect("create graph dir");
+        let usage_index = with_default_usage_metadata(json!({ "endpoints": [] }));
+        let usage_index_path = root.join("target/api-contract/graph/effect-usage-index.json");
+        fs::write(&usage_index_path, usage_index.to_string()).expect("write usage index");
+        let config = UsageLintConfig {
+            usage_index: usage_index_path,
+            symbol_graph: root.join("target/api-contract/rust-ts-symbols.json"),
+            lint_level: UsageLintLevel::Warn,
+            generated_lint_path: root.join("out/api_usage_lints.rs"),
+        };
+
+        let report = check_usage_lints(&config).expect("check usage lints");
+
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(report.diagnostics[0]
+            .message
+            .contains("missing API symbol graph"));
+        assert!(report.diagnostics[0]
+            .message
+            .contains("api check --target-dir"));
     }
 
     #[test]
@@ -488,6 +570,9 @@ mod tests {
         assert!(report.diagnostics[0]
             .message
             .contains("stale Effect usage index"));
+        assert!(report.diagnostics[0]
+            .message
+            .contains("api check --target-dir"));
     }
 
     #[test]
