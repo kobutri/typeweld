@@ -844,7 +844,7 @@ Acceptance criteria:
 - Fresh checkout can run documented TS commands.
 - CI uses the same commands as developers.
 
-### I3. Document gateway-only editor setup
+### I3. Document gateway-only editor setup [done]
 
 Goal: prevent duplicate language servers.
 
