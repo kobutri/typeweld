@@ -94,6 +94,7 @@ jobs:
       - name: Run npm checks
         run: |
           npm run typecheck:workspaces
+          npm run test:cli
           npm run test:runtime
           npm run test:lsp-wrapper
           npm run test:vscode
@@ -115,10 +116,10 @@ jobs:
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
         working-directory: npm
-      - run: cargo build --release -p api-ls -p api-collector --bins
-      - run: npm run prepare:server --workspace rust-ts-integration -- --binary "$GITHUB_WORKSPACE/target/release/api-ls" --api-binary "$GITHUB_WORKSPACE/target/release/api" --platform-dir linux-x64
+      - run: cargo build --release -p typeweld-ls -p typeweld-cli --bins
+      - run: npm run prepare:server --workspace typeweld-vscode -- --binary "$GITHUB_WORKSPACE/target/release/typeweld-ls" --typeweld-binary "$GITHUB_WORKSPACE/target/release/typeweld" --platform-dir linux-x64
         working-directory: npm
-      - run: npm run package:vsix --workspace rust-ts-integration -- --target linux-x64 --out out/rust-ts-integration-ci-linux-x64.vsix
+      - run: npm run package:vsix --workspace typeweld-vscode -- --target linux-x64 --out out/typeweld-vscode-ci-linux-x64.vsix
         working-directory: npm
 
   validate:

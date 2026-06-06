@@ -3,6 +3,7 @@
 /npm/**/node_modules/
 /npm/vscode-extension/bin/
 /npm/cli/bin/
+/npm/language-server-wrapper/bin/
 /npm/vscode-extension/dist/
 /npm/vscode-extension/server/
 /npm/vscode-extension/out/

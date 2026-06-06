@@ -1,6 +1,13 @@
 {
   "name": "typeweld",
   "version": "0.0.0",
+  "description": "CLI for Typeweld Rust-to-TypeScript API contract tooling.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/typeweld/typeweld",
+    "directory": "npm/cli"
+  },
   "type": "module",
   "bin": {
     "typeweld": "./src/index.mjs"

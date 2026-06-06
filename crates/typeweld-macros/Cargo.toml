@@ -1,7 +1,12 @@
 [package]
 name = "typeweld-macros"
+description.workspace = true
+documentation.workspace = true
 edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
@@ -15,9 +20,9 @@ quote = "1.0.45"
 syn = { version = "2.0.117", features = ["derive", "full", "visit-mut"] }
 
 [dev-dependencies]
-typeweld-axum = { path = "../typeweld-axum" }
-typeweld-core = { path = "../typeweld-core" }
-typeweld-gen-effect-v4 = { path = "../typeweld-gen-effect-v4" }
+typeweld-axum = { version = "0.0.0", path = "../typeweld-axum" }
+typeweld-core = { version = "0.0.0", path = "../typeweld-core" }
+typeweld-gen-effect-v4 = { version = "0.0.0", path = "../typeweld-gen-effect-v4" }
 axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }
 bytes = "1.11.1"
 futures-util = "0.3.32"

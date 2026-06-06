@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url"
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(scriptDir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
-const binaryName = process.platform === "win32" ? "typeweld.exe" : "typeweld"
+const binaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
 const platformDir =
   parseOption(process.argv.slice(2), "--platform-dir") ??
   `${process.platform}-${process.arch}`
@@ -23,7 +23,9 @@ const outDir = join(packageRoot, "bin", platformDir)
 const outFile = join(outDir, binaryName)
 
 const explicitBinary =
-  parseOption(process.argv.slice(2), "--typeweld-binary") ?? process.env.TYPEWELD_BINARY
+  parseOption(process.argv.slice(2), "--binary") ??
+  process.env.TYPEWELD_LS_BINARY ??
+  process.env.TYPEWELD_LS
 const candidates = [
   explicitBinary,
   join(repoRoot, "target", "release", binaryName),
@@ -35,13 +37,13 @@ const source = candidates.find((candidate) => isExecutable(candidate))
 if (source === undefined) {
   console.error(
     [
-      "could not find a typeweld binary to package.",
+      "could not find a typeweld-ls binary to package.",
       "",
       "Build one first:",
-      "  cargo build -p typeweld-cli --bin typeweld --release",
+      "  cargo build -p typeweld-ls --bin typeweld-ls --release",
       "",
       "Or pass it explicitly:",
-      "  npm run prepare:binary --workspace typeweld -- --typeweld-binary /path/to/typeweld",
+      "  npm run prepare:binary --workspace @typeweld/language-server -- --binary /path/to/typeweld-ls",
       "",
       "Checked:",
       ...candidates.map((candidate) => `  - ${candidate}`),

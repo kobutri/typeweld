@@ -7,6 +7,7 @@ Start here:
 - [Axum example guide](axum-example.md)
 - [Effect client guide](effect-client.md)
 - [LSP setup guide](lsp-setup.md)
+- [Publishing guide](publishing.md)
 - [Rename and unused endpoint behavior](rename-and-unused-endpoints.md)
 - [Current limitations](limitations.md)
 

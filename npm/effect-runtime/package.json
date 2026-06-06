@@ -1,11 +1,24 @@
 {
   "name": "@typeweld/effect-runtime",
   "version": "0.0.0",
+  "description": "Runtime helpers for Typeweld-generated Effect clients.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/typeweld/typeweld",
+    "directory": "npm/effect-runtime"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./compat": "./src/compat.ts"
   },
+  "files": [
+    "src"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:runtime": "npm run test",

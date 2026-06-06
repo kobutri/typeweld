@@ -24,23 +24,23 @@ jobs:
           - os: ubuntu-latest
             rust-target: x86_64-unknown-linux-gnu
             vscode-target: linux-x64
-            binary-name: api-ls
-            cli-binary-name: api
+            binary-name: typeweld-ls
+            cli-binary-name: typeweld
           - os: macos-latest
             rust-target: x86_64-apple-darwin
             vscode-target: darwin-x64
-            binary-name: api-ls
-            cli-binary-name: api
+            binary-name: typeweld-ls
+            cli-binary-name: typeweld
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             vscode-target: darwin-arm64
-            binary-name: api-ls
-            cli-binary-name: api
+            binary-name: typeweld-ls
+            cli-binary-name: typeweld
           - os: windows-latest
             rust-target: x86_64-pc-windows-msvc
             vscode-target: win32-x64
-            binary-name: api-ls.exe
-            cli-binary-name: api.exe
+            binary-name: typeweld-ls.exe
+            cli-binary-name: typeweld.exe
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag_name }}
     steps:
@@ -83,14 +83,17 @@ jobs:
           manifest.version = process.env.EXTENSION_VERSION
           fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
           NODE
-      - run: cargo build -p api-ls --bin api-ls --release --target "${{ matrix.rust-target }}"
-      - run: cargo build -p api-collector --bin api --release --target "${{ matrix.rust-target }}"
+      - run: cargo build -p typeweld-ls --bin typeweld-ls --release --target "${{ matrix.rust-target }}"
+      - run: cargo build -p typeweld-cli --bin typeweld --release --target "${{ matrix.rust-target }}"
+        env:
+          TYPEWELD_TEMPLATE_SOURCE: github
+          TYPEWELD_TEMPLATE_VERSION: ${{ steps.extension-version.outputs.value }}
       - name: Prepare bundled language server
         shell: bash
         run: |
-          npm run prepare:server --workspace rust-ts-integration -- \
+          npm run prepare:server --workspace typeweld-vscode -- \
             --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.binary-name }}" \
-            --api-binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.cli-binary-name }}" \
+            --typeweld-binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.cli-binary-name }}" \
             --platform-dir "${{ matrix.vscode-target }}"
         working-directory: npm
       - name: Package CLI release asset
@@ -113,7 +116,7 @@ jobs:
           binary_name = os.environ["CLI_BINARY_NAME"]
           release_target = os.environ["RELEASE_TARGET"]
           release_version = os.environ["RELEASE_VERSION"]
-          asset_base = f"rust-ts-integration-api-{release_version}-{release_target}"
+          asset_base = f"typeweld-cli-{release_version}-{release_target}"
           out_dir = Path("release-assets/cli")
           staging = Path(os.environ["RUNNER_TEMP"]) / asset_base
 
@@ -148,9 +151,9 @@ jobs:
       - name: Package VSIX
         shell: bash
         run: |
-          npm run package:vsix --workspace rust-ts-integration -- \
+          npm run package:vsix --workspace typeweld-vscode -- \
             --target "${{ matrix.vscode-target }}" \
-            --out "out/rust-ts-integration-${{ steps.extension-version.outputs.value }}-${{ matrix.vscode-target }}.vsix"
+            --out "out/typeweld-vscode-${{ steps.extension-version.outputs.value }}-${{ matrix.vscode-target }}.vsix"
         working-directory: npm
       - uses: actions/upload-artifact@v4
         with:
@@ -159,7 +162,7 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: api-cli-${{ matrix.vscode-target }}
+          name: typeweld-cli-${{ matrix.vscode-target }}
           path: release-assets/cli/*
           if-no-files-found: error
 
@@ -181,6 +184,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
-          pattern: api-cli-*
+          pattern: typeweld-cli-*
           merge-multiple: true
       - run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber

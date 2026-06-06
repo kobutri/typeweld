@@ -1,7 +1,12 @@
 [package]
 name = "typeweld-core"
+description.workspace = true
+documentation.workspace = true
 edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
@@ -9,7 +14,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-typeweld-ir = { path = "../typeweld-ir" }
+typeweld-ir = { version = "0.0.0", path = "../typeweld-ir" }
 bytes = { version = "1.11.1", default-features = false, features = ["serde"] }
 chrono = { version = "0.4.45", default-features = false }
 rust_decimal = { version = "1.42.0", default-features = false }

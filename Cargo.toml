@@ -17,8 +17,13 @@ members = [
 resolver = "2"
 
 [workspace.package]
+description = "Rust-to-TypeScript API contract tooling for Effect clients"
+documentation = "https://github.com/typeweld/typeweld/tree/main/docs"
 edition = "2021"
+homepage = "https://github.com/typeweld/typeweld"
+keywords = ["api", "effect", "lsp", "rust", "typescript"]
 license = "MIT OR Apache-2.0"
+readme = "docs/README.md"
 repository = "https://github.com/typeweld/typeweld"
 version = "0.0.0"
 

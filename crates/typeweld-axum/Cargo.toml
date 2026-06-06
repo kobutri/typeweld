@@ -1,7 +1,12 @@
 [package]
 name = "typeweld-axum"
+description.workspace = true
+documentation.workspace = true
 edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
@@ -9,7 +14,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-typeweld-core = { path = "../typeweld-core" }
+typeweld-core = { version = "0.0.0", path = "../typeweld-core" }
 axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }
 futures-util = "0.3.32"
 http = "1.4.1"

@@ -25,6 +25,15 @@ fn main() {
     let out_file =
         PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("semantic_usage_scanner.js");
 
+    if !scanner_dir.join("package.json").is_file() {
+        write_scanner_stub(&out_file);
+        println!(
+            "cargo:warning=semantic usage scanner sources were not found at {}; embedded scanner will report a setup error",
+            scanner_dir.display()
+        );
+        return;
+    }
+
     println!(
         "cargo:rerun-if-changed={}",
         npm_dir.join("package.json").display()
@@ -59,6 +68,24 @@ fn main() {
         ],
         Some(("SEMANTIC_USAGE_SCANNER_OUT", out_file.as_os_str())),
     );
+}
+
+fn write_scanner_stub(out_file: &Path) {
+    fs::write(
+        out_file,
+        r#"globalThis.__semanticUsageScanner = {
+  scan() {
+    throw new Error("semantic TypeScript usage scanning is unavailable in this build");
+  },
+};
+"#,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to write semantic usage scanner stub `{}`: {error}",
+            out_file.display()
+        )
+    });
 }
 
 struct NpmBuildLock {
