@@ -87,6 +87,34 @@ pub struct EndpointUsage {
     pub diagnostics: Vec<EffectUsageDiagnostic>,
 }
 
+/// One generated error symbol reference found in TypeScript.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ErrorUsage {
+    pub symbol_id: SymbolId,
+    pub file: String,
+    pub source: SourceRange,
+    pub reason: String,
+    pub diagnostics: Vec<EffectUsageDiagnostic>,
+}
+
+/// Read/write shape of a generated API field reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum FieldUsageAccess {
+    Read,
+    Write,
+}
+
+/// One generated field reference found in TypeScript.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FieldUsage {
+    pub field_id: SymbolId,
+    pub file: String,
+    pub source: SourceRange,
+    pub access: FieldUsageAccess,
+    pub reason: String,
+    pub diagnostics: Vec<EffectUsageDiagnostic>,
+}
+
 /// Per-endpoint usage counters.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EndpointUsageSummary {
@@ -104,6 +132,10 @@ pub struct EffectUsageIndex {
     pub package_name: String,
     pub endpoints: Vec<EndpointUsageSummary>,
     pub usages: Vec<EndpointUsage>,
+    #[serde(default)]
+    pub error_usages: Vec<ErrorUsage>,
+    #[serde(default)]
+    pub field_usages: Vec<FieldUsage>,
 }
 
 #[must_use]
@@ -291,6 +323,37 @@ pub fn try_scan_effect_usages_with_config(
             diagnostics,
         });
     }
+    let error_usages = semantic_output
+        .error_references
+        .into_iter()
+        .map(|reference| {
+            let diagnostics =
+                diagnostics_for_usage(&all_diagnostics, &reference.file, &reference.source);
+            ErrorUsage {
+                symbol_id: reference.symbol_id,
+                file: reference.file,
+                source: reference.source,
+                reason: reference.reason,
+                diagnostics,
+            }
+        })
+        .collect::<Vec<_>>();
+    let field_usages = semantic_output
+        .field_references
+        .into_iter()
+        .map(|reference| {
+            let diagnostics =
+                diagnostics_for_usage(&all_diagnostics, &reference.file, &reference.source);
+            FieldUsage {
+                field_id: reference.field_id,
+                file: reference.file,
+                source: reference.source,
+                access: reference.access,
+                reason: reference.reason,
+                diagnostics,
+            }
+        })
+        .collect::<Vec<_>>();
 
     for file in files {
         let import_aliases = import_aliases(file);
@@ -336,6 +399,8 @@ pub fn try_scan_effect_usages_with_config(
         package_name: contract.package_name.clone(),
         endpoints,
         usages,
+        error_usages,
+        field_usages,
     })
 }
 
@@ -402,6 +467,9 @@ struct EndpointAccessor {
     accessor_path: Vec<String>,
     namespace: String,
     transport: api_ir::Transport,
+    request: api_ir::RequestShape,
+    response: ResponseShape,
+    errors: Vec<api_ir::ErrorRef>,
 }
 
 impl EndpointAccessor {
@@ -414,6 +482,9 @@ impl EndpointAccessor {
             accessor_path: vec![namespace.clone(), function_name.clone()],
             namespace,
             transport: endpoint.transport,
+            request: endpoint.request.clone(),
+            response: endpoint.response.clone(),
+            errors: endpoint.errors.clone(),
         }
     }
 }
@@ -422,6 +493,8 @@ impl EndpointAccessor {
 struct SemanticScannerInput<'a> {
     package_name: &'a str,
     endpoints: Vec<SemanticScannerEndpoint<'a>>,
+    types: &'a [TypeDef],
+    errors: Vec<SemanticScannerError<'a>>,
     files: &'a [TypeScriptSourceFile],
 }
 
@@ -430,11 +503,32 @@ struct SemanticScannerEndpoint<'a> {
     endpoint_id: &'a SymbolId,
     accessor_path: &'a [String],
     transport: api_ir::Transport,
+    request: &'a api_ir::RequestShape,
+    response: &'a ResponseShape,
+    errors: &'a [api_ir::ErrorRef],
+}
+
+#[derive(Serialize)]
+struct SemanticScannerError<'a> {
+    error_id: &'a SymbolId,
+    ts_name: &'a str,
+    variants: Vec<SemanticScannerErrorVariant<'a>>,
+}
+
+#[derive(Serialize)]
+struct SemanticScannerErrorVariant<'a> {
+    variant_id: &'a SymbolId,
+    tag_symbol_id: SymbolId,
+    rust_name: &'a str,
+    tag: &'a str,
+    fields: &'a [Field],
 }
 
 #[derive(Deserialize)]
 struct SemanticScannerOutput {
     references: Vec<SemanticEndpointReference>,
+    error_references: Vec<SemanticErrorReference>,
+    field_references: Vec<SemanticFieldReference>,
     diagnostics: Vec<EffectUsageDiagnostic>,
 }
 
@@ -448,6 +542,23 @@ struct SemanticEndpointReference {
     reason: String,
 }
 
+#[derive(Deserialize)]
+struct SemanticErrorReference {
+    symbol_id: SymbolId,
+    file: String,
+    source: SourceRange,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct SemanticFieldReference {
+    field_id: SymbolId,
+    file: String,
+    source: SourceRange,
+    access: FieldUsageAccess,
+    reason: String,
+}
+
 fn semantic_endpoint_references(
     contract: &ApiContract,
     files: &[TypeScriptSourceFile],
@@ -456,6 +567,8 @@ fn semantic_endpoint_references(
     if files.is_empty() {
         return Ok(SemanticScannerOutput {
             references: Vec::new(),
+            error_references: Vec::new(),
+            field_references: Vec::new(),
             diagnostics: Vec::new(),
         });
     }
@@ -468,6 +581,29 @@ fn semantic_endpoint_references(
                 endpoint_id: &accessor.endpoint_id,
                 accessor_path: &accessor.accessor_path,
                 transport: accessor.transport,
+                request: &accessor.request,
+                response: &accessor.response,
+                errors: &accessor.errors,
+            })
+            .collect(),
+        types: &contract.types,
+        errors: contract
+            .errors
+            .iter()
+            .map(|error| SemanticScannerError {
+                error_id: &error.id,
+                ts_name: &error.ts_name,
+                variants: error
+                    .variants
+                    .iter()
+                    .map(|variant| SemanticScannerErrorVariant {
+                        variant_id: &variant.id,
+                        tag_symbol_id: error_tag_symbol_id(variant),
+                        rust_name: &variant.rust_name,
+                        tag: &variant.tag,
+                        fields: &variant.fields,
+                    })
+                    .collect(),
             })
             .collect(),
         files,
@@ -700,6 +836,10 @@ fn endpoint_function_name(endpoint: &Endpoint, namespace: &str) -> String {
         .cloned()
         .filter(|name| name != namespace)
         .unwrap_or_else(|| endpoint.rust_name.clone())
+}
+
+fn error_tag_symbol_id(variant: &api_ir::ErrorVariant) -> SymbolId {
+    SymbolId::from_parts("error_tag", &[variant.id.as_str()])
 }
 
 fn is_identifier(value: &str) -> bool {
@@ -1150,6 +1290,66 @@ export const program = Effect.gen(function* () {
         assert_eq!(usage.strength, UsageStrength::Invalid);
         assert!(usage.reason.contains("effect/no-floating"));
         assert_eq!(usage.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn effect_usage_scanner_indexes_error_handlers_and_typed_fields() {
+        let contract = api_test_fixtures::basic_contract();
+
+        let index = scan_effect_usages(
+            &contract,
+            &[TypeScriptSourceFile {
+                path: "client/use-api.ts".to_owned(),
+                contents: r#"
+import { Effect } from "effect"
+import { users } from "@workspace/server-api"
+
+export const program = Effect.gen(function* () {
+  const user = yield* users.getUser({ id: 1 })
+  const name = user.displayName
+  const unrelated = { displayName: "not typed" }
+  unrelated.displayName
+  return user.displayName
+}).pipe(
+  Effect.catchTag("UserNotFound", (error) => Effect.succeed(error.id)),
+  Effect.catchTags({
+    PermissionDenied: () => Effect.succeed(undefined),
+  }),
+)
+"#
+                .to_owned(),
+            }],
+        );
+
+        let display_name = SymbolId::new("fixture:field:User:displayName");
+        let route_id = SymbolId::new("fixture:field:getUser:id");
+        let error_id = SymbolId::new("fixture:field:GetUserError:UserNotFound:id");
+        let user_not_found = SymbolId::new("fixture:error:GetUserError:UserNotFound");
+        let permission_denied = SymbolId::new("fixture:error:GetUserError:PermissionDenied");
+
+        assert_eq!(
+            index
+                .field_usages
+                .iter()
+                .filter(|usage| usage.field_id == display_name)
+                .count(),
+            2
+        );
+        assert!(index.field_usages.iter().any(|usage| {
+            usage.field_id == route_id && usage.access == FieldUsageAccess::Write
+        }));
+        assert!(index
+            .field_usages
+            .iter()
+            .any(|usage| { usage.field_id == error_id && usage.access == FieldUsageAccess::Read }));
+        assert!(index
+            .error_usages
+            .iter()
+            .any(|usage| usage.symbol_id == user_not_found));
+        assert!(index
+            .error_usages
+            .iter()
+            .any(|usage| usage.symbol_id == permission_denied));
     }
 
     #[test]

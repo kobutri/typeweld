@@ -8,7 +8,8 @@ use std::{
 
 use api_collector::{
     collect_empty_contract, discover_workspace, try_scan_effect_usages, write_contract_json,
-    write_effect_usage_index, EffectUsageIndex, EndpointUsage, TypeScriptSourceFile,
+    write_effect_usage_index, EffectUsageIndex, EndpointUsage, ErrorUsage, FieldUsage,
+    TypeScriptSourceFile,
 };
 use api_gen_effect_v4::{render_generated_package, render_symbol_graph, GeneratedPackage};
 use api_ir::{ApiContract, Field, SourceRange, SourceSpan, TypeShape};
@@ -1458,25 +1459,37 @@ fn update_symbol_graph_usage_locations(
         summaries.insert(endpoint.endpoint_id.as_str().to_owned(), endpoint.strong);
     }
 
-    let mut usages = BTreeMap::<String, Vec<&EndpointUsage>>::new();
+    let mut usages = BTreeMap::<String, Vec<serde_json::Value>>::new();
     for usage in &index.usages {
         usages
             .entry(usage.endpoint_id.as_str().to_owned())
             .or_default()
-            .push(usage);
+            .push(endpoint_usage_location_json(usage));
+    }
+    for usage in &index.error_usages {
+        usages
+            .entry(usage.symbol_id.as_str().to_owned())
+            .or_default()
+            .push(error_usage_location_json(usage));
+    }
+    for usage in &index.field_usages {
+        usages
+            .entry(usage.field_id.as_str().to_owned())
+            .or_default()
+            .push(field_usage_location_json(usage));
     }
 
     for symbol in symbols {
         let Some(symbol_object) = symbol.as_object_mut() else {
             continue;
         };
-        if symbol_object
+        let Some(kind) = symbol_object
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            != Some("endpoint")
-        {
+            .map(str::to_owned)
+        else {
             continue;
-        }
+        };
         let Some(id) = symbol_object
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -1485,14 +1498,20 @@ fn update_symbol_graph_usage_locations(
             continue;
         };
 
-        if let Some(strong) = summaries.get(&id) {
-            let metadata = symbol_object
-                .entry("metadata")
-                .or_insert_with(|| serde_json::json!({}));
-            let Some(metadata) = metadata.as_object_mut() else {
-                continue;
-            };
-            metadata.insert("usageCount".to_owned(), serde_json::json!(strong));
+        if kind == "endpoint" {
+            if let Some(strong) = summaries.get(&id) {
+                let metadata = symbol_object
+                    .entry("metadata")
+                    .or_insert_with(|| serde_json::json!({}));
+                let Some(metadata) = metadata.as_object_mut() else {
+                    continue;
+                };
+                metadata.insert("usageCount".to_owned(), serde_json::json!(strong));
+            }
+        }
+
+        if !is_usage_enriched_symbol_kind(&kind) {
+            continue;
         }
 
         let typescript = symbol_object
@@ -1507,10 +1526,8 @@ fn update_symbol_graph_usage_locations(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         });
-        if let Some(endpoint_usages) = usages.get(&id) {
-            for usage in endpoint_usages {
-                typescript.push(usage_location_json(usage));
-            }
+        if let Some(symbol_usages) = usages.get(&id) {
+            typescript.extend(symbol_usages.iter().cloned());
         }
     }
 
@@ -1524,10 +1541,39 @@ fn update_symbol_graph_usage_locations(
     })
 }
 
-fn usage_location_json(usage: &EndpointUsage) -> serde_json::Value {
-    let range = source_range_json(&usage.source);
+fn is_usage_enriched_symbol_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "endpoint"
+            | "errorVariant"
+            | "errorTag"
+            | "field"
+            | "routeParam"
+            | "queryParam"
+            | "errorField"
+    )
+}
+
+fn endpoint_usage_location_json(usage: &EndpointUsage) -> serde_json::Value {
+    usage_location_json(&usage.file, &usage.source)
+}
+
+fn error_usage_location_json(usage: &ErrorUsage) -> serde_json::Value {
+    usage_location_json(&usage.file, &usage.source)
+}
+
+fn field_usage_location_json(usage: &FieldUsage) -> serde_json::Value {
+    let mut location = usage_location_json(&usage.file, &usage.source);
+    if let Some(object) = location.as_object_mut() {
+        object.insert("access".to_owned(), serde_json::json!(usage.access));
+    }
+    location
+}
+
+fn usage_location_json(file: &str, source: &api_ir::SourceRange) -> serde_json::Value {
+    let range = source_range_json(source);
     serde_json::json!({
-        "file": usage.file.clone(),
+        "file": file,
         "range": range.clone(),
         "nameRange": range.clone(),
         "fullRange": range,
@@ -1732,11 +1778,15 @@ mod tests {
         .expect("write contract");
         fs::write(
             &ts_path,
-            r#"import { users } from "@workspace/server-api"
+            r#"import { Effect } from "effect"
+import { users } from "@workspace/server-api"
 
 export const program = Effect.gen(function* () {
-  yield* users.getUser({ id: 1 })
-})
+  const user = yield* users.getUser({ id: 1n })
+  return user.displayName
+}).pipe(
+  Effect.catchTag("UserNotFound", (error) => Effect.succeed(error.id)),
+)
 "#,
         )
         .expect("write ts");
@@ -1783,11 +1833,15 @@ export const program = Effect.gen(function* () {
 
         fs::write(
             &ts_path,
-            r#"import { users } from "@workspace/server-api"
+            r#"import { Effect } from "effect"
+import { users } from "@workspace/server-api"
 
 export const program = Effect.gen(function* () {
-  yield* users.getUser({ id: 1 })
-})
+  const user = yield* users.getUser({ id: 1n })
+  return user.displayName
+}).pipe(
+  Effect.catchTag("UserNotFound", (error) => Effect.succeed(error.id)),
+)
 "#,
         )
         .expect("write ts");
@@ -1809,6 +1863,17 @@ export const program = Effect.gen(function* () {
         assert!(symbol_graph.contains("src/client.ts"));
         assert!(symbol_graph.contains("\"generated\": false"));
         assert!(symbol_graph.contains("\"renamable\": false"));
+        let graph: serde_json::Value =
+            serde_json::from_str(&symbol_graph).expect("parse symbol graph");
+        assert!(symbol_has_user_location(
+            &graph,
+            "fixture:field:User:displayName"
+        ));
+        assert!(symbol_has_user_location(&graph, "fixture:field:getUser:id"));
+        assert!(symbol_has_user_location(
+            &graph,
+            "fixture:error:GetUserError:UserNotFound"
+        ));
     }
 
     #[test]
@@ -2386,6 +2451,23 @@ pub fn api() -> ApiModule {{
                 symbol["kind"] == kind && symbol["metadata"]["rustPath"] == expected_path
             })
             .unwrap_or_else(|| panic!("missing {kind} symbol for rust path {rust_path:?}"))
+    }
+
+    fn symbol_has_user_location(graph: &serde_json::Value, symbol_id: &str) -> bool {
+        graph["symbols"]
+            .as_array()
+            .expect("symbols array")
+            .iter()
+            .find(|symbol| symbol["id"] == symbol_id)
+            .and_then(|symbol| symbol["typescript"].as_array())
+            .is_some_and(|locations| {
+                locations.iter().any(|location| {
+                    !location["generated"].as_bool().unwrap_or(true)
+                        && location["file"]
+                            .as_str()
+                            .is_some_and(|file| file.ends_with("src/client.ts"))
+                })
+            })
     }
 
     fn expected_lsp_range(contents: &str, needle: &str) -> serde_json::Value {

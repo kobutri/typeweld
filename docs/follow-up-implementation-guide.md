@@ -564,7 +564,7 @@ Acceptance criteria:
 - Returning an endpoint Effect is strong usage.
 - Piped/composed endpoint effects are strong only when semantic analysis confirms the value is an Effect.
 
-### E3. Index error handling and field usage
+### E3. Index error handling and field usage [done]
 
 Goal: support references beyond endpoints.
 
