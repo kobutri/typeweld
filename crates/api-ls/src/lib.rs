@@ -9,11 +9,7 @@ use std::{
     time::Duration,
 };
 
-use lsp_types::{
-    HoverProviderCapability, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
-    RenameOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkDoneProgressOptions,
-};
+use lsp_types::InitializeParams;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
@@ -151,10 +147,12 @@ struct AsyncLspServer {
     rust_analyzer: Option<AsyncBackend>,
     typescript: Option<AsyncBackend>,
     pending_requests: HashMap<BackendRequestKey, PendingRequest>,
-    client_requests: HashMap<String, BackendRequestKey>,
+    client_requests: HashMap<String, Vec<BackendRequestKey>>,
     backend_requests_by_client_id: HashMap<String, BackendRequestKey>,
     backend_request_client_ids: HashMap<BackendRequestKey, Value>,
+    workspace_symbol_requests: HashMap<String, WorkspaceSymbolRequest>,
     pending_shutdown: Option<PendingShutdown>,
+    semantic_tokens: Option<MergedSemanticTokens>,
     exit_received: bool,
     client_eof: bool,
     next_backend_client_id: u64,
@@ -177,7 +175,9 @@ impl AsyncLspServer {
             client_requests: HashMap::new(),
             backend_requests_by_client_id: HashMap::new(),
             backend_request_client_ids: HashMap::new(),
+            workspace_symbol_requests: HashMap::new(),
             pending_shutdown: None,
+            semantic_tokens: None,
             exit_received: false,
             client_eof: false,
             next_backend_client_id: 1,
@@ -292,10 +292,20 @@ impl AsyncLspServer {
                                 return Ok(());
                             }
                         };
+                        let semantic_tokens = MergedSemanticTokens::new(
+                            &rust_backend.capabilities,
+                            &typescript_backend.capabilities,
+                        );
+                        let initialize_result = initialize_result(
+                            &rust_backend.capabilities,
+                            &typescript_backend.capabilities,
+                            semantic_tokens.as_ref(),
+                        );
                         self.workspace = Some(workspace);
+                        self.semantic_tokens = semantic_tokens;
                         self.rust_analyzer = Some(rust_backend);
                         self.typescript = Some(typescript_backend);
-                        self.write_response(id, initialize_result())?;
+                        self.write_response(id, initialize_result)?;
                     }
                     Err(error) => self.write_error(id, -32_602, error)?,
                 }
@@ -364,6 +374,11 @@ impl AsyncLspServer {
                         }
                         Err(error) => self.write_error(id, -32_602, error)?,
                     }
+                }
+            }
+            "workspace/symbol" => {
+                if let Some(id) = message.id {
+                    self.handle_workspace_symbol_request(message.params, id)?;
                 }
             }
             _ => match message.id {
@@ -507,6 +522,39 @@ impl AsyncLspServer {
         }
     }
 
+    fn handle_workspace_symbol_request(&mut self, params: Value, id: Value) -> Result<(), String> {
+        let backends = [BackendKind::Rust, BackendKind::TypeScript]
+            .into_iter()
+            .filter(|kind| self.backend_supports(*kind, "workspaceSymbolProvider"))
+            .collect::<BTreeSet<_>>();
+        if backends.is_empty() {
+            return self.write_response(id, json!([]));
+        }
+
+        let request_id = rpc_id_key(&id);
+        self.workspace_symbol_requests.insert(
+            request_id.clone(),
+            WorkspaceSymbolRequest {
+                client_id: id.clone(),
+                remaining: backends.clone(),
+                results: Vec::new(),
+            },
+        );
+        for kind in backends {
+            self.forward_request_to_backend(
+                kind,
+                "workspace/symbol",
+                params.clone(),
+                id.clone(),
+                PendingRequestKind::WorkspaceSymbols {
+                    request_id: request_id.clone(),
+                },
+                true,
+            )?;
+        }
+        Ok(())
+    }
+
     fn route_backend(&self, method: &str, params: &Value) -> Option<BackendKind> {
         if is_rust_message(method, params) {
             Some(BackendKind::Rust)
@@ -539,7 +587,9 @@ impl AsyncLspServer {
         backend.send_request(backend_id, method, params)?;
         if track_client_request {
             self.client_requests
-                .insert(rpc_id_key(&client_id), key.clone());
+                .entry(rpc_id_key(&client_id))
+                .or_default()
+                .push(key.clone());
         }
         self.pending_requests.insert(
             key,
@@ -556,12 +606,15 @@ impl AsyncLspServer {
         let Some(cancelled_id) = params.get("id") else {
             return Ok(());
         };
-        let Some(key) = self.client_requests.get(&rpc_id_key(cancelled_id)).cloned() else {
+        let Some(keys) = self.client_requests.get(&rpc_id_key(cancelled_id)).cloned() else {
             return Ok(());
         };
-        let mut backend_params = params;
-        backend_params["id"] = rpc_id_from_key(&key.id);
-        self.forward_notification_to_backend(key.kind, "$/cancelRequest", backend_params)
+        for key in keys {
+            let mut backend_params = params.clone();
+            backend_params["id"] = rpc_id_from_key(&key.id);
+            self.forward_notification_to_backend(key.kind, "$/cancelRequest", backend_params)?;
+        }
+        Ok(())
     }
 
     fn forward_client_response_to_backend(
@@ -650,10 +703,11 @@ impl AsyncLspServer {
         let Some(pending) = self.pending_requests.remove(&key) else {
             return Ok(());
         };
-        self.client_requests.remove(&rpc_id_key(&pending.client_id));
+        self.untrack_client_request(&pending.client_id, &key);
 
         match pending.kind {
             PendingRequestKind::Forward => {
+                self.translate_semantic_tokens_response(kind, &pending.method, &mut raw);
                 raw["id"] = pending.client_id;
                 self.emit(raw)
             }
@@ -672,8 +726,38 @@ impl AsyncLspServer {
                     dedupe_locations(local_locations, workspace.as_ref()),
                 )
             }
+            PendingRequestKind::WorkspaceSymbols { request_id } => {
+                self.finish_workspace_symbol_backend(kind, &request_id, raw)
+            }
             PendingRequestKind::Shutdown => self.finish_backend_shutdown(kind),
         }
+    }
+
+    fn finish_workspace_symbol_backend(
+        &mut self,
+        kind: BackendKind,
+        request_id: &str,
+        raw: Value,
+    ) -> Result<(), String> {
+        let Some(request) = self.workspace_symbol_requests.get_mut(request_id) else {
+            return Ok(());
+        };
+        request.remaining.remove(&kind);
+        request.results.extend(
+            raw.get("result")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        if request.remaining.is_empty() {
+            let mut request = self
+                .workspace_symbol_requests
+                .remove(request_id)
+                .expect("workspace symbol request exists");
+            request.results.sort_by_key(workspace_symbol_sort_key);
+            self.write_response(request.client_id, Value::Array(request.results))?;
+        }
+        Ok(())
     }
 
     fn begin_shutdown(&mut self, id: Value) -> Result<(), String> {
@@ -735,7 +819,7 @@ impl AsyncLspServer {
             .collect::<Vec<_>>();
         for key in failed_keys {
             if let Some(pending) = self.pending_requests.remove(&key) {
-                self.client_requests.remove(&rpc_id_key(&pending.client_id));
+                self.untrack_client_request(&pending.client_id, &key);
                 match pending.kind {
                     PendingRequestKind::Forward | PendingRequestKind::References { .. } => {
                         self.write_error(
@@ -746,6 +830,13 @@ impl AsyncLspServer {
                                 kind.display_name(),
                                 pending.method
                             ),
+                        )?;
+                    }
+                    PendingRequestKind::WorkspaceSymbols { request_id } => {
+                        self.finish_workspace_symbol_backend(
+                            kind,
+                            &request_id,
+                            json!({ "result": [] }),
                         )?;
                     }
                     PendingRequestKind::Shutdown => {
@@ -792,6 +883,32 @@ impl AsyncLspServer {
             BackendKind::Rust => self.rust_analyzer.as_mut(),
             BackendKind::TypeScript => self.typescript.as_mut(),
         }
+    }
+
+    fn backend_supports(&self, kind: BackendKind, capability: &str) -> bool {
+        self.backend(kind)
+            .and_then(|backend| backend.capabilities.get(capability))
+            .is_some_and(capability_enabled)
+    }
+
+    fn untrack_client_request(&mut self, client_id: &Value, key: &BackendRequestKey) {
+        let client_id = rpc_id_key(client_id);
+        if let Some(keys) = self.client_requests.get_mut(&client_id) {
+            keys.retain(|candidate| candidate != key);
+            if keys.is_empty() {
+                self.client_requests.remove(&client_id);
+            }
+        }
+    }
+
+    fn translate_semantic_tokens_response(&self, kind: BackendKind, method: &str, raw: &mut Value) {
+        let Some(semantic_tokens) = &self.semantic_tokens else {
+            return;
+        };
+        if !is_semantic_tokens_method(method) {
+            return;
+        }
+        semantic_tokens.translate_response(kind, raw);
     }
 
     fn read_generated_package_file(&mut self, params: Value, id: Value) -> Result<(), String> {
@@ -1006,6 +1123,9 @@ enum PendingRequestKind {
         local_locations: Vec<Value>,
         workspace: Box<WorkspaceConfig>,
     },
+    WorkspaceSymbols {
+        request_id: String,
+    },
     Shutdown,
 }
 
@@ -1013,6 +1133,13 @@ enum PendingRequestKind {
 struct PendingShutdown {
     client_id: Value,
     remaining: BTreeSet<BackendKind>,
+}
+
+#[derive(Debug)]
+struct WorkspaceSymbolRequest {
+    client_id: Value,
+    remaining: BTreeSet<BackendKind>,
+    results: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1476,6 +1603,7 @@ impl TextPositionQuery {
 
 struct AsyncBackend {
     name: String,
+    capabilities: Value,
     child: Child,
     stdin_tx: mpsc::UnboundedSender<Value>,
     next_id: u64,
@@ -1542,12 +1670,20 @@ impl AsyncBackend {
             terminate_child(&mut child).await;
             return Err(error);
         }
-        if let Err(error) =
-            read_initialize_response(name, &mut stdout, initialize_id, kind, &event_tx).await
-        {
-            terminate_child(&mut child).await;
-            return Err(error);
-        }
+        let initialize_response =
+            match read_initialize_response(name, &mut stdout, initialize_id, kind, &event_tx).await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    terminate_child(&mut child).await;
+                    return Err(error);
+                }
+            };
+        let capabilities = initialize_response
+            .get("result")
+            .and_then(|result| result.get("capabilities"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
         spawn_backend_writer(kind, name.to_owned(), stdin, stdin_rx, event_tx.clone());
@@ -1555,6 +1691,7 @@ impl AsyncBackend {
 
         Ok(Self {
             name: name.to_owned(),
+            capabilities,
             child,
             stdin_tx,
             next_id: initialize_id + 1,
@@ -1621,7 +1758,7 @@ async fn read_initialize_response(
     initialize_id: u64,
     kind: BackendKind,
     event_tx: &mpsc::UnboundedSender<GatewayEvent>,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     loop {
         let message = read_message_async(stdout)
             .await?
@@ -1630,7 +1767,7 @@ async fn read_initialize_response(
             if let Some(error) = message.raw.get("error") {
                 return Err(format!("initialize returned error: {error}"));
             }
-            return Ok(());
+            return Ok(message.raw);
         }
         event_tx
             .send(GatewayEvent::BackendMessage(kind, message))
@@ -1801,30 +1938,328 @@ fn typescript_initialize_params(params: &Value, workspace: &WorkspaceConfig) -> 
     params
 }
 
-fn initialize_result() -> Value {
-    let capabilities = ServerCapabilities {
-        position_encoding: Some(PositionEncodingKind::UTF16),
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
-        )),
-        definition_provider: Some(OneOf::Left(true)),
-        references_provider: Some(OneOf::Left(true)),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        rename_provider: Some(OneOf::Right(RenameOptions {
-            prepare_provider: Some(true),
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        })),
-        ..ServerCapabilities::default()
-    };
+fn initialize_result(
+    rust_capabilities: &Value,
+    typescript_capabilities: &Value,
+    semantic_tokens: Option<&MergedSemanticTokens>,
+) -> Value {
+    let mut capabilities = merge_capabilities(rust_capabilities, typescript_capabilities);
+    if let Some(semantic_tokens) = semantic_tokens {
+        capabilities["semanticTokensProvider"] = semantic_tokens.provider.clone();
+    }
+    capabilities["positionEncoding"] = json!("utf-16");
+    capabilities["textDocumentSync"] = json!(2);
+    capabilities["definitionProvider"] = json!(true);
+    capabilities["referencesProvider"] = json!(true);
+    capabilities["hoverProvider"] = json!(true);
+    capabilities["renameProvider"] = json!({
+        "prepareProvider": true,
+    });
 
-    serde_json::to_value(InitializeResult {
-        capabilities,
-        server_info: Some(ServerInfo {
-            name: "api-ls".to_owned(),
-            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-        }),
+    json!({
+        "capabilities": capabilities,
+        "serverInfo": {
+            "name": "api-ls",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
     })
-    .expect("initialize result serializes")
+}
+
+fn merge_capabilities(rust_capabilities: &Value, typescript_capabilities: &Value) -> Value {
+    let mut merged = match rust_capabilities {
+        Value::Object(_) => rust_capabilities.clone(),
+        _ => json!({}),
+    };
+    merge_json_values(&mut merged, typescript_capabilities);
+    merged
+}
+
+fn merge_json_values(target: &mut Value, incoming: &Value) {
+    match (target, incoming) {
+        (Value::Object(target), Value::Object(incoming)) => {
+            for (key, value) in incoming {
+                match target.get_mut(key) {
+                    Some(existing) => merge_json_values(existing, value),
+                    None => {
+                        target.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (Value::Bool(target), Value::Bool(incoming)) => {
+            *target = *target || *incoming;
+        }
+        (Value::Array(target), Value::Array(incoming)) => {
+            for value in incoming {
+                if !target.iter().any(|existing| existing == value) {
+                    target.push(value.clone());
+                }
+            }
+        }
+        (target, incoming) => {
+            if target.is_null() || target == &json!(false) {
+                *target = incoming.clone();
+            }
+        }
+    }
+}
+
+fn capability_enabled(value: &Value) -> bool {
+    match value {
+        Value::Bool(enabled) => *enabled,
+        Value::Null => false,
+        _ => true,
+    }
+}
+
+fn workspace_symbol_sort_key(value: &Value) -> String {
+    serde_json::to_string(&json!({
+        "name": value.get("name").cloned().unwrap_or(Value::Null),
+        "kind": value.get("kind").cloned().unwrap_or(Value::Null),
+        "uri": value
+            .get("location")
+            .and_then(|location| location.get("uri"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    }))
+    .expect("workspace symbol sort key serializes")
+}
+
+fn is_semantic_tokens_method(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/full/delta"
+            | "textDocument/semanticTokens/range"
+    )
+}
+
+#[derive(Clone, Debug)]
+struct MergedSemanticTokens {
+    provider: Value,
+    rust: Option<SemanticTokenMapping>,
+    typescript: Option<SemanticTokenMapping>,
+}
+
+impl MergedSemanticTokens {
+    fn new(rust_capabilities: &Value, typescript_capabilities: &Value) -> Option<Self> {
+        let rust_legend = SemanticTokenLegend::from_capabilities(rust_capabilities);
+        let typescript_legend = SemanticTokenLegend::from_capabilities(typescript_capabilities);
+        if rust_legend.is_none() && typescript_legend.is_none() {
+            return None;
+        }
+
+        let legend =
+            SemanticTokenLegend::merged([rust_legend.as_ref(), typescript_legend.as_ref()]);
+        let provider =
+            merged_semantic_tokens_provider(rust_capabilities, typescript_capabilities, &legend);
+        Some(Self {
+            provider,
+            rust: rust_legend
+                .as_ref()
+                .map(|backend_legend| SemanticTokenMapping::new(backend_legend, &legend)),
+            typescript: typescript_legend
+                .as_ref()
+                .map(|backend_legend| SemanticTokenMapping::new(backend_legend, &legend)),
+        })
+    }
+
+    fn translate_response(&self, kind: BackendKind, raw: &mut Value) {
+        let mapping = match kind {
+            BackendKind::Rust => self.rust.as_ref(),
+            BackendKind::TypeScript => self.typescript.as_ref(),
+        };
+        let Some(mapping) = mapping else {
+            return;
+        };
+        let Some(data) = raw
+            .get_mut("result")
+            .and_then(|result| result.get_mut("data"))
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+
+        for token in data.chunks_mut(5) {
+            if token.len() < 5 {
+                continue;
+            }
+            if let Some(token_type) = token[3]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+            {
+                if let Some(mapped) = mapping.token_types.get(token_type) {
+                    token[3] = json!(mapped);
+                }
+            }
+            if let Some(modifiers) = token[4]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                token[4] = json!(mapping.translate_modifiers(modifiers));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SemanticTokenLegend {
+    token_types: Vec<String>,
+    token_modifiers: Vec<String>,
+}
+
+impl SemanticTokenLegend {
+    fn from_capabilities(capabilities: &Value) -> Option<Self> {
+        let legend = semantic_tokens_provider(capabilities)?.get("legend")?;
+        Some(Self {
+            token_types: string_array(legend.get("tokenTypes")?),
+            token_modifiers: string_array(legend.get("tokenModifiers")?),
+        })
+    }
+
+    fn merged<'a>(legends: impl IntoIterator<Item = Option<&'a Self>>) -> Self {
+        let mut token_types = Vec::new();
+        let mut token_modifiers = Vec::new();
+        for legend in legends.into_iter().flatten() {
+            extend_unique(&mut token_types, &legend.token_types);
+            extend_unique(&mut token_modifiers, &legend.token_modifiers);
+        }
+        Self {
+            token_types,
+            token_modifiers,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SemanticTokenMapping {
+    token_types: Vec<u32>,
+    token_modifiers: Vec<u32>,
+}
+
+impl SemanticTokenMapping {
+    fn new(source: &SemanticTokenLegend, merged: &SemanticTokenLegend) -> Self {
+        Self {
+            token_types: source
+                .token_types
+                .iter()
+                .map(|token_type| merged_index(&merged.token_types, token_type))
+                .collect(),
+            token_modifiers: source
+                .token_modifiers
+                .iter()
+                .map(|modifier| {
+                    1_u32
+                        .checked_shl(merged_index(&merged.token_modifiers, modifier))
+                        .unwrap_or(0)
+                })
+                .collect(),
+        }
+    }
+
+    fn translate_modifiers(&self, modifiers: u32) -> u32 {
+        let mut translated = 0;
+        for (source_index, merged_bit) in self.token_modifiers.iter().enumerate() {
+            let Some(source_bit) = u32::try_from(source_index)
+                .ok()
+                .and_then(|index| 1_u32.checked_shl(index))
+            else {
+                continue;
+            };
+            if modifiers & source_bit != 0 {
+                translated |= merged_bit;
+            }
+        }
+        translated
+    }
+}
+
+fn merged_semantic_tokens_provider(
+    rust_capabilities: &Value,
+    typescript_capabilities: &Value,
+    legend: &SemanticTokenLegend,
+) -> Value {
+    let mut provider = json!({
+        "legend": {
+            "tokenTypes": legend.token_types.clone(),
+            "tokenModifiers": legend.token_modifiers.clone(),
+        },
+    });
+    if let Some(full) =
+        merged_semantic_provider_property(rust_capabilities, typescript_capabilities, "full")
+    {
+        provider["full"] = full;
+    }
+    if let Some(range) =
+        merged_semantic_provider_property(rust_capabilities, typescript_capabilities, "range")
+    {
+        provider["range"] = range;
+    }
+    provider
+}
+
+fn merged_semantic_provider_property(
+    rust_capabilities: &Value,
+    typescript_capabilities: &Value,
+    property: &str,
+) -> Option<Value> {
+    let values = [
+        semantic_tokens_provider(rust_capabilities).and_then(|provider| provider.get(property)),
+        semantic_tokens_provider(typescript_capabilities)
+            .and_then(|provider| provider.get(property)),
+    ];
+    let mut object = json!({});
+    let mut has_object = false;
+    let mut has_true = false;
+    for value in values.into_iter().flatten() {
+        match value {
+            Value::Object(_) => {
+                has_object = true;
+                merge_json_values(&mut object, value);
+            }
+            Value::Bool(true) => has_true = true,
+            _ => {}
+        }
+    }
+    if has_object {
+        Some(object)
+    } else if has_true {
+        Some(json!(true))
+    } else {
+        None
+    }
+}
+
+fn semantic_tokens_provider(capabilities: &Value) -> Option<&Value> {
+    capabilities
+        .get("semanticTokensProvider")
+        .filter(|provider| capability_enabled(provider))
+}
+
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn extend_unique(target: &mut Vec<String>, source: &[String]) {
+    for value in source {
+        if !target.iter().any(|existing| existing == value) {
+            target.push(value.clone());
+        }
+    }
+}
+
+fn merged_index(values: &[String], value: &str) -> u32 {
+    values
+        .iter()
+        .position(|candidate| candidate == value)
+        .and_then(|index| u32::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 fn discover_workspace_root(start: &Path, cwd: &Path) -> Option<PathBuf> {
@@ -2761,6 +3196,139 @@ mod tests {
     }
 
     #[test]
+    fn initialize_merges_backend_capabilities_with_cross_language_overrides() {
+        let root = test_root("capability-merge");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(
+            &root,
+            RUST_CAPABILITY_BACKEND,
+            TYPESCRIPT_CAPABILITY_BACKEND,
+            None,
+        );
+
+        let messages = run_output_messages([initialize_request(&root)].join(""));
+        let capabilities = &messages[0]["result"]["capabilities"];
+
+        assert_eq!(capabilities["positionEncoding"], json!("utf-16"));
+        assert_eq!(capabilities["textDocumentSync"], json!(2));
+        assert_eq!(capabilities["definitionProvider"], json!(true));
+        assert_eq!(capabilities["referencesProvider"], json!(true));
+        assert_eq!(capabilities["hoverProvider"], json!(true));
+        assert_eq!(
+            capabilities["renameProvider"]["prepareProvider"],
+            json!(true)
+        );
+        assert_eq!(capabilities["documentFormattingProvider"], json!(true));
+        assert_eq!(capabilities["codeActionProvider"], json!(true));
+        assert_eq!(capabilities["callHierarchyProvider"], json!(true));
+        assert_eq!(
+            capabilities["completionProvider"]["triggerCharacters"],
+            json!([".", "?"])
+        );
+        assert_eq!(
+            capabilities["semanticTokensProvider"]["legend"]["tokenTypes"],
+            json!(["namespace", "function", "class"])
+        );
+        assert_eq!(
+            capabilities["semanticTokensProvider"]["legend"]["tokenModifiers"],
+            json!(["declaration", "async"])
+        );
+        assert_eq!(capabilities["semanticTokensProvider"]["range"], json!(true));
+        assert_eq!(
+            capabilities["semanticTokensProvider"]["full"]["delta"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_requests_fan_out_to_supporting_backends() {
+        let root = test_root("workspace-symbols");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(
+            &root,
+            RUST_CAPABILITY_BACKEND,
+            TYPESCRIPT_CAPABILITY_BACKEND,
+            None,
+        );
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "workspace/symbol",
+                    "params": { "query": "Thing" }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let workspace_symbols = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("workspace symbol response");
+
+        assert_eq!(
+            workspace_symbols["result"]
+                .as_array()
+                .expect("workspace symbol array")
+                .len(),
+            2
+        );
+        assert!(workspace_symbols["result"]
+            .as_array()
+            .expect("workspace symbol array")
+            .iter()
+            .any(|symbol| symbol["name"] == "RustThing"));
+        assert!(workspace_symbols["result"]
+            .as_array()
+            .expect("workspace symbol array")
+            .iter()
+            .any(|symbol| symbol["name"] == "TsThing"));
+    }
+
+    #[test]
+    fn semantic_tokens_are_translated_to_merged_legend() {
+        let root = test_root("semantic-tokens");
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(
+            &root,
+            RUST_CAPABILITY_BACKEND,
+            TYPESCRIPT_CAPABILITY_BACKEND,
+            None,
+        );
+        let ts_uri = path_to_file_uri(&root.join("src/client.ts"));
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/semanticTokens/full",
+                    "params": {
+                        "textDocument": { "uri": ts_uri }
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let semantic_tokens = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("semantic token response");
+
+        assert_eq!(semantic_tokens["result"]["data"], json!([0, 0, 4, 2, 2]));
+    }
+
+    #[test]
     fn redirects_generated_typescript_definition_to_rust_source() {
         let root = test_root("cross-definition");
         let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
@@ -3405,6 +3973,45 @@ mod tests {
         format!("Content-Length: {}\r\n\r\n{body}", body.len())
     }
 
+    fn initialize_request(root: &Path) -> String {
+        framed(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": path_to_file_uri(root),
+                "capabilities": {}
+            }
+        }))
+    }
+
+    fn shutdown_request(id: u64) -> String {
+        framed(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "shutdown"
+        }))
+    }
+
+    fn exit_notification() -> String {
+        framed(&json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        }))
+    }
+
+    fn run_output_messages(input: String) -> Vec<Value> {
+        let mut output = Vec::new();
+        run(input.as_bytes(), &mut output).expect("run server");
+        let mut reader = StdBufReader::new(output.as_slice());
+        let mut messages = Vec::new();
+        while let Some(message) = read_message(&mut reader).expect("read output message") {
+            messages.push(message.raw);
+        }
+        messages
+    }
+
     fn assert_output_order(output: &str, first: &str, second: &str) {
         let first_index = output.find(first).expect("first output marker");
         let second_index = output.find(second).expect("second output marker");
@@ -3849,6 +4456,146 @@ while True:
         sys.stderr.write("backend stderr hello\n")
         sys.stderr.flush()
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const RUST_CAPABILITY_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":{
+                "capabilities":{
+                    "completionProvider":{"triggerCharacters":["."]},
+                    "documentFormattingProvider":True,
+                    "callHierarchyProvider":True,
+                    "workspaceSymbolProvider":True,
+                    "semanticTokensProvider":{
+                        "legend":{
+                            "tokenTypes":["namespace","function"],
+                            "tokenModifiers":["declaration"]
+                        },
+                        "full":True,
+                        "range":True
+                    }
+                }
+            }
+        })
+    elif method == "workspace/symbol":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "name":"RustThing",
+                "kind":12,
+                "location":{
+                    "uri":"file:///rust-thing.rs",
+                    "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":9}}
+                }
+            }]
+        })
+    elif method == "textDocument/semanticTokens/full":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"data":[0,0,4,1,1]}})
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const TYPESCRIPT_CAPABILITY_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":{
+                "capabilities":{
+                    "completionProvider":{"triggerCharacters":["?"]},
+                    "codeActionProvider":True,
+                    "workspaceSymbolProvider":{"resolveProvider":True},
+                    "semanticTokensProvider":{
+                        "legend":{
+                            "tokenTypes":["class"],
+                            "tokenModifiers":["async"]
+                        },
+                        "full":{"delta":True}
+                    }
+                }
+            }
+        })
+    elif method == "workspace/symbol":
+        write_message({
+            "jsonrpc":"2.0",
+            "id":message["id"],
+            "result":[{
+                "name":"TsThing",
+                "kind":5,
+                "location":{
+                    "uri":"file:///ts-thing.ts",
+                    "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":7}}
+                }
+            }]
+        })
+    elif method == "textDocument/semanticTokens/full":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"data":[0,0,4,0,1]}})
     elif method == "shutdown":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
     elif method == "exit":

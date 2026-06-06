@@ -629,7 +629,7 @@ Acceptance criteria:
 - Backend notifications are forwarded promptly.
 - `$/cancelRequest` is forwarded.
 
-### F3. Merge backend capabilities
+### F3. Merge backend capabilities [done]
 
 Goal: expose normal Rust/TS features plus cross-language behavior.
 
