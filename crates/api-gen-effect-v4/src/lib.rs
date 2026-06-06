@@ -959,15 +959,15 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
     let mut writer = TrackedWriter::new("endpoints.ts");
     writer.push(&render_package_banner(contract));
     if contract_has_stream_endpoints(contract) {
-        write_effect_compat_import(&mut writer, "Effect, Stream");
+        write_effect_compat_import(&mut writer, "Effect, Stream, Schema");
     } else {
-        write_effect_compat_import(&mut writer, "Effect");
+        write_effect_compat_import(&mut writer, "Effect, Schema");
     }
     writer.push("import { ServerApi } from \"./layer\"\n");
 
     let schema_imports = collect_endpoint_schema_imports(contract);
     if !schema_imports.is_empty() {
-        writer.push("import type { ");
+        writer.push("import { ");
         writer.push(
             &schema_imports
                 .iter()
@@ -1030,6 +1030,8 @@ fn write_tracked_endpoint(
     let namespace = endpoint_namespace(endpoint);
 
     write_tracked_endpoint_args(writer, endpoint, options);
+    writer.push("\n");
+    write_tracked_endpoint_args_schema(writer, endpoint, options);
     writer.push("\n  export const ");
     writer.mark(&endpoint.id, "endpoint", &format!("{function_name}Route"));
     writer.push(" = {\n    method: ");
@@ -1108,6 +1110,53 @@ fn write_tracked_endpoint_args(
         return;
     }
     writer.push("  }\n");
+}
+
+fn write_tracked_endpoint_args_schema(
+    writer: &mut TrackedWriter,
+    endpoint: &Endpoint,
+    options: &EffectRenderOptions,
+) {
+    let args_schema_name = endpoint_args_schema_name(endpoint);
+
+    writer.push("  export const ");
+    writer.push(&args_schema_name);
+    writer.push(" = Schema.Struct(");
+
+    if endpoint.request.path_params.is_empty()
+        && endpoint.request.query_params.is_empty()
+        && endpoint.request.body.is_none()
+    {
+        writer.push("{})\n");
+    } else {
+        writer.push("{\n");
+        for field in &endpoint.request.path_params {
+            writer.push("    ");
+            writer.push(&render_property_key(&field.ts_name));
+            writer.push(": ");
+            writer.push(&render_field_schema(field, options));
+            writer.push(",\n");
+        }
+        for field in &endpoint.request.query_params {
+            writer.push("    ");
+            writer.push(&render_property_key(&field.ts_name));
+            writer.push(": ");
+            writer.push(&render_field_schema(field, options));
+            writer.push(",\n");
+        }
+        if let Some(body) = &endpoint.request.body {
+            writer.push("    body: ");
+            writer.push(&render_type_ref(body, options));
+            writer.push(",\n");
+        }
+        writer.push("  })\n");
+    }
+
+    writer.push("  export type ");
+    writer.push(&endpoint_args_encoded_name(endpoint));
+    writer.push(" = Schema.Codec.Encoded<typeof ");
+    writer.push(&args_schema_name);
+    writer.push(">\n");
 }
 
 fn render_tracked_errors(contract: &ApiContract, options: &EffectRenderOptions) -> TrackedFile {
@@ -1492,7 +1541,8 @@ fn write_tracked_fetch_service_method(
     writer.push(&function_name);
     writer.push("Route.path,\n          encode: ");
     writer.push(&render_request_encoder(
-        &endpoint.request,
+        endpoint,
+        helper,
         &format!("{namespace}.{args_name}"),
     ));
     writer.push(",\n          decodeSuccess: ");
@@ -1716,16 +1766,29 @@ fn render_ts_type_ref(type_ref: &TypeRef, options: &EffectRenderOptions) -> Stri
     }
 }
 
-fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
+fn render_request_encoder(endpoint: &Endpoint, helper: &str, args_type: &str) -> String {
+    let request = &endpoint.request;
+    let namespace = endpoint_namespace(endpoint);
+    let args_schema_name = endpoint_args_schema_name(endpoint);
+
+    if request.path_params.is_empty() && request.query_params.is_empty() && request.body.is_none() {
+        return format!(
+            "(args: {args_type}) => {{
+            {helper}.encode(args, {namespace}.{args_schema_name})
+            return {{}}
+          }}"
+        );
+    }
+
     let mut lines = Vec::new();
 
     if !request.path_params.is_empty() {
         lines.push("path: {".to_owned());
         for field in &request.path_params {
             lines.push(format!(
-                "              {}: args.{},",
+                "              {}: {},",
                 render_property_key(&field.wire_name),
-                render_property_key(&field.ts_name)
+                render_property_access("encoded", &field.ts_name)
             ));
         }
         lines.push("            },".to_owned());
@@ -1735,29 +1798,28 @@ fn render_request_encoder(request: &RequestShape, args_type: &str) -> String {
         lines.push("query: {".to_owned());
         for field in &request.query_params {
             lines.push(format!(
-                "              {}: args.{},",
+                "              {}: {},",
                 render_property_key(&field.wire_name),
-                render_property_key(&field.ts_name)
+                render_property_access("encoded", &field.ts_name)
             ));
         }
         lines.push("            },".to_owned());
     }
 
     if request.body.is_some() {
-        lines.push("body: args.body,".to_owned());
+        lines.push("body: encoded.body,".to_owned());
     }
 
-    if lines.is_empty() {
-        "() => ({})".to_owned()
-    } else {
-        format!(
-            "(args: {args_type}) => ({{
+    format!(
+        "(args: {args_type}) => {{
+            const encoded = {helper}.encode(args, {namespace}.{args_schema_name})
+            return {{
             {}
-          }})",
-            lines.join("\n            "),
-            args_type = args_type,
-        )
-    }
+            }}
+          }}",
+        lines.join("\n            "),
+        args_type = args_type,
+    )
 }
 
 fn render_success_decoder(
@@ -1840,6 +1902,14 @@ fn endpoint_function_name(endpoint: &Endpoint) -> String {
 
 fn endpoint_args_name(endpoint: &Endpoint) -> String {
     format!("{}Args", to_pascal_case(&endpoint_function_name(endpoint)))
+}
+
+fn endpoint_args_schema_name(endpoint: &Endpoint) -> String {
+    format!("{}Schema", endpoint_args_name(endpoint))
+}
+
+fn endpoint_args_encoded_name(endpoint: &Endpoint) -> String {
+    format!("{}Encoded", endpoint_args_name(endpoint))
 }
 
 const fn render_transport(transport: Transport) -> &'static str {
@@ -2208,6 +2278,14 @@ fn render_property_key(key: &str) -> String {
     }
 }
 
+fn render_property_access(receiver: &str, key: &str) -> String {
+    if is_identifier(key) {
+        format!("{receiver}.{key}")
+    } else {
+        format!("{receiver}[{}]", ts_string(key))
+    }
+}
+
 fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -2523,6 +2601,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let endpoints = render_endpoints(&contract);
         assert!(endpoints.contains("readonly id: bigint;"));
+        assert!(endpoints.contains("id: Schema.BigIntFromString"));
         assert!(endpoints.contains("): Effect.Effect<bigint, ApiClientError, ServerApi> =>"));
 
         let layer = render_layer(&contract);
@@ -2715,14 +2794,18 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         let rendered = render_endpoints(&contract);
 
-        assert!(rendered
-            .contains("import { Effect } from \"@rust-ts-integration/effect-runtime/compat\""));
+        assert!(rendered.contains(
+            "import { Effect, Schema } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
         assert!(rendered.contains("import { ServerApi } from \"./layer\""));
-        assert!(rendered.contains("import type { User, UserId } from \"./schemas\""));
+        assert!(rendered.contains("import { User, UserId } from \"./schemas\""));
         assert!(rendered.contains("import type { ApiClientError, GetUserError } from \"./errors\""));
         assert!(rendered.contains("export namespace users {"));
         assert!(rendered.contains(
             "  export interface GetUserArgs {\n    readonly id: UserId;\n    readonly includePosts?: boolean;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const GetUserArgsSchema = Schema.Struct({\n    id: UserId,\n    includePosts: Schema.optionalKey(Schema.Boolean),\n  })\n  export type GetUserArgsEncoded = Schema.Codec.Encoded<typeof GetUserArgsSchema>"
         ));
         assert!(rendered.contains(
             "  export const getUserRoute = {\n    method: \"GET\",\n    path: \"/users/{id}\",\n    transport: \"UnaryHttp\",\n  } as const"
@@ -2765,6 +2848,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
 
         assert!(rendered
             .contains("  export interface CreateUserArgs {\n    readonly body: CreateUser;\n  }"));
+        assert!(rendered.contains(
+            "  export const CreateUserArgsSchema = Schema.Struct({\n    body: CreateUser,\n  })"
+        ));
         assert!(rendered.contains("): Effect.Effect<void, ApiClientError, ServerApi> =>"));
     }
 
@@ -2799,7 +2885,10 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         let rendered = render_endpoints(&contract);
 
         assert!(rendered.contains(
-            "import { Effect, Stream } from \"@rust-ts-integration/effect-runtime/compat\""
+            "import { Effect, Stream, Schema } from \"@rust-ts-integration/effect-runtime/compat\""
+        ));
+        assert!(rendered.contains(
+            "  export const EventsArgsSchema = Schema.Struct({})\n  export type EventsArgsEncoded = Schema.Codec.Encoded<typeof EventsArgsSchema>"
         ));
         assert!(rendered.contains(
             "  export const eventsRoute = {\n    method: \"GET\",\n    path: \"/events\",\n    transport: \"ServerSentEvents\",\n  } as const"
@@ -2864,6 +2953,10 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "getUser: makeUnaryHttpClient<users.GetUserArgs, User, GetUserError>(config,"
         ));
+        assert!(rendered
+            .contains("const encoded = makeUnaryHttpClient.encode(args, users.GetUserArgsSchema)"));
+        assert!(rendered.contains("path: {"));
+        assert!(rendered.contains("id: encoded.id"));
         assert!(
             rendered.contains("decodeSuccess: (input) => makeUnaryHttpClient.decode(input, User)")
         );
@@ -2911,9 +3004,9 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(rendered.contains(
             "      readonly events: (args: events.EventsArgs) => Stream.Stream<UserEvent, ApiClientError | EventError, never>"
         ));
-        assert!(rendered.contains(
-            "events: makeSseClient<events.EventsArgs, UserEvent, EventError>(config,"
-        ));
+        assert!(rendered
+            .contains("events: makeSseClient<events.EventsArgs, UserEvent, EventError>(config,"));
+        assert!(rendered.contains("makeSseClient.encode(args, events.EventsArgsSchema)"));
         assert!(
             rendered.contains("decodeSuccess: (input) => makeSseClient.decode(input, UserEvent)")
         );
@@ -3136,13 +3229,16 @@ export * from "./layer"
         assert_eq!(
             endpoints.contents,
             r#"// Generated API package for @workspace/server-api
-import { Effect, Stream } from "@rust-ts-integration/effect-runtime/compat"
+import { Effect, Stream, Schema } from "@rust-ts-integration/effect-runtime/compat"
 import { ServerApi } from "./layer"
-import type { CreateUserRequest, User, UserEvent } from "./schemas"
+import { CreateUserRequest, User, UserEvent } from "./schemas"
 import type { ApiClientError, GetUserError } from "./errors"
 
 export namespace events {
   export interface WatchUsersArgs {}
+
+  export const WatchUsersArgsSchema = Schema.Struct({})
+  export type WatchUsersArgsEncoded = Schema.Codec.Encoded<typeof WatchUsersArgsSchema>
 
   export const watchUsersRoute = {
     method: "GET",
@@ -3162,6 +3258,11 @@ export namespace users {
     readonly body: CreateUserRequest;
   }
 
+  export const CreateUserArgsSchema = Schema.Struct({
+    body: CreateUserRequest,
+  })
+  export type CreateUserArgsEncoded = Schema.Codec.Encoded<typeof CreateUserArgsSchema>
+
   export const createUserRoute = {
     method: "POST",
     path: "/users",
@@ -3176,6 +3277,11 @@ export namespace users {
   export interface GetUserArgs {
     readonly id: bigint;
   }
+
+  export const GetUserArgsSchema = Schema.Struct({
+    id: Schema.BigIntFromString,
+  })
+  export type GetUserArgsEncoded = Schema.Codec.Encoded<typeof GetUserArgsSchema>
 
   export const getUserRoute = {
     method: "GET",

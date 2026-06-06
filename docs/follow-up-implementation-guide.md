@@ -464,7 +464,7 @@ Acceptance criteria:
 - Invalid UUID/date/decimal payloads fail decoding.
 - Encoded and decoded types are explicit.
 
-### D3. Encode requests through schemas
+### D3. Encode requests through schemas [done]
 
 Goal: do not send decoded values directly when wire shape differs.
 

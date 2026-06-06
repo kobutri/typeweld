@@ -111,6 +111,11 @@ export const decodeWithSchema = <S extends Schema.Top>(
     ),
   ) as Effect.Effect<S["Type"], DecodeError>
 
+export const encodeWithSchema = <S extends Schema.Encoder<unknown>>(
+  input: S["Type"],
+  schema: S,
+): S["Encoded"] => Schema.encodeSync(schema)(input) as S["Encoded"]
+
 export const makeUnaryHttpClient = Object.assign(
   <Args, Success, DomainError>(
     config: FetchClientConfig,
@@ -149,6 +154,7 @@ export const makeUnaryHttpClient = Object.assign(
     }),
   {
     decode: decodeWithSchema,
+    encode: encodeWithSchema,
   },
 )
 
@@ -198,6 +204,7 @@ export const makeSseClient = Object.assign(
       ),
   {
     decode: decodeWithSchema,
+    encode: encodeWithSchema,
   },
 )
 
