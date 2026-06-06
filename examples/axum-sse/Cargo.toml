@@ -10,8 +10,8 @@ publish = false
 api-axum = { path = "../../crates/api-axum" }
 api-core = { path = "../../crates/api-core" }
 api-macros = { path = "../../crates/api-macros" }
-futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
+futures-util = "0.3.32"
+serde = { version = "1.0.228", features = ["derive"] }
 
 [lints]
 workspace = true

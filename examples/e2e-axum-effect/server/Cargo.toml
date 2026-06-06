@@ -15,11 +15,11 @@ api-axum = { path = "../../../crates/api-axum" }
 api-collector = { path = "../../../crates/api-collector" }
 api-core = { path = "../../../crates/api-core" }
 api-macros = { path = "../../../crates/api-macros" }
-axum = "0.8"
-clap = { version = "4.5", features = ["derive"] }
-futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
+axum = "0.8.9"
+clap = { version = "4.6.1", features = ["derive"] }
+futures-util = "0.3.32"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 
 [package.metadata.rust_ts]
 ts_package = "@workspace/e2e-api"

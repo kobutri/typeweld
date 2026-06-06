@@ -2,7 +2,7 @@
   "name": "rust-ts-integration-workspace",
   "private": true,
   "type": "module",
-  "packageManager": "npm@11.12.1",
+  "packageManager": "npm@11.16.0",
   "workspaces": [
     "effect-runtime",
     "language-server-wrapper",
