@@ -948,6 +948,8 @@ Acceptance:
 
 ### Phase 3: ApiRouter Tree
 
+Status: Done.
+
 Files:
 
 - `crates/api-core/src/lib.rs`
@@ -957,13 +959,13 @@ Files:
 
 Steps:
 
-1. Add `ApiRouteTree`, `ApiRouteNode`, and `MountedEndpoint`.
-2. Extend `ApiRouter` to store the route tree.
-3. Add `ApiRouter::new(name)`.
-4. Add hidden `endpoint_descriptor`.
-5. Mirror axum pass-through methods.
-6. Add `IntoApiRoot` compatibility trait.
-7. Flatten route trees into `ApiModule`.
+- [x] Add `ApiRouteTree`, `ApiRouteNode`, and `MountedEndpoint`.
+- [x] Extend `ApiRouter` to store the route tree.
+- [x] Add `ApiRouter::new(name)`.
+- [x] Add hidden `endpoint_descriptor`.
+- [x] Mirror axum pass-through methods.
+- [x] Add `IntoApiRoot` compatibility trait.
+- [x] Flatten route trees into `ApiModule`.
 
 Acceptance:
 

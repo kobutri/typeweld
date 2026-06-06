@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use api_core::ApiModule;
+use api_core::{ApiModule, IntoApiRoot};
 use api_ir::{
     ApiContract, Endpoint, ErrorDef, Field, ResponseShape, SourceRange, SymbolId, TypeDef, TypeRef,
     TypeShape,
@@ -32,6 +32,21 @@ pub struct CollectorInput {
     pub root_module: ApiModule,
     pub types: Vec<TypeDef>,
     pub errors: Vec<ErrorDef>,
+}
+
+impl CollectorInput {
+    #[must_use]
+    pub fn from_root<R>(package_name: impl Into<String>, root: R) -> Self
+    where
+        R: IntoApiRoot,
+    {
+        Self {
+            package_name: package_name.into(),
+            root_module: root.into_api_module(),
+            types: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
 }
 
 /// Cargo workspace summary used by build tools and diagnostics.
@@ -919,7 +934,10 @@ fn is_identifier(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use api_core::{field, ir::*, ApiType, ContractRegistry, Endpoint};
+    use api_core::{
+        field, ir::*, ApiRouteNode, ApiRouteTree, ApiType, ContractRegistry, Endpoint,
+        EndpointDescriptor, MountedEndpoint,
+    };
 
     use super::*;
 
@@ -950,6 +968,8 @@ mod tests {
     impl ApiType for Unused {
         const RUST_NAME: &'static str = "Unused";
     }
+
+    fn noop_register(_registry: &mut ContractRegistry) {}
 
     #[test]
     fn collector_exports_reachable_endpoint_and_transitive_types() {
@@ -992,6 +1012,36 @@ mod tests {
 
         assert_eq!(contract.types.len(), 1);
         assert_eq!(contract.types[0].rust_name, "User");
+    }
+
+    #[test]
+    fn collector_input_accepts_route_tree_roots() {
+        let descriptor = EndpointDescriptor::new(
+            Endpoint::new(HttpMethod::Get, "/users/{id}").named(["crate", "get_user"]),
+            noop_register,
+        );
+        let child = ApiRouteTree {
+            module_name: "users".to_owned(),
+            nodes: vec![ApiRouteNode::Endpoint(MountedEndpoint {
+                descriptor,
+                source: SourceRange::default(),
+                effective_method: HttpMethod::Get,
+                effective_path: "/users/{id}".to_owned(),
+            })],
+        };
+        let root = ApiRouteTree {
+            module_name: "server".to_owned(),
+            nodes: vec![ApiRouteNode::Nest {
+                path: "/api".to_owned(),
+                source: SourceRange::default(),
+                child: Box::new(child),
+            }],
+        };
+
+        let contract = collect_contract(CollectorInput::from_root("@workspace/server-api", root));
+
+        assert_eq!(contract.endpoints.len(), 1);
+        assert_eq!(contract.endpoints[0].route.0, "/api/users/{id}");
     }
 
     #[test]

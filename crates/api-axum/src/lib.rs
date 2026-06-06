@@ -8,39 +8,54 @@
 use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 
 use api_core::{
-    ir::{HttpMethod, HttpStatus},
-    ApiError, ApiModule, Endpoint,
+    ir::{HttpMethod, HttpStatus, SourceRange},
+    ApiError, ApiModule, ApiRouteNode, ApiRouteTree, Endpoint, EndpointDescriptor, IntoApiRoot,
+    MountedEndpoint,
 };
 pub use axum::response::Response;
 use axum::{
     body::Bytes,
-    extract::{FromRequest, FromRequestParts},
+    extract::{FromRequest, FromRequestParts, Request},
     handler::Handler,
     http::{header::CONTENT_TYPE, request::Parts, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse as AxumSse},
         IntoResponse,
     },
-    routing::{delete, get, patch, post, put, MethodRouter},
+    routing::{delete, get, patch, post, put, MethodRouter, Route},
     Router,
 };
 use futures_util::{Stream, StreamExt};
 use serde::Serialize;
+use tower_layer::Layer;
+use tower_service::Service;
 
-/// Axum router builder paired with an explicit API module.
-///
-/// The module supplies the exported endpoint metadata; each route call pairs
-/// one endpoint descriptor with the concrete Axum handler that serves it.
+/// Axum router builder paired with an API route tree.
 #[derive(Clone, Debug)]
 pub struct ApiRouter<S = ()> {
+    module_name: String,
     module: ApiModule,
     router: Router<S>,
+    tree: ApiRouteTree,
 }
 
 impl ApiRouter<()> {
     #[must_use]
-    pub fn new(module: ApiModule) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
+        let module_name = name.into();
         Self {
+            module: ApiModule::new(module_name.clone()),
+            tree: ApiRouteTree::new(module_name.clone()),
+            module_name,
+            router: Router::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_module(module: ApiModule) -> Self {
+        Self {
+            module_name: module.name.clone(),
+            tree: ApiRouteTree::new(module.name.clone()),
             module,
             router: Router::new(),
         }
@@ -52,40 +67,145 @@ where
     S: Clone + Send + Sync + 'static,
 {
     #[must_use]
-    pub fn with_state<T>(self, state: S) -> ApiRouter<T>
+    pub fn with_state<S2>(self, state: S) -> ApiRouter<S2>
     where
-        T: Clone + Send + Sync + 'static,
+        S2: Clone + Send + Sync + 'static,
     {
         ApiRouter {
+            module_name: self.module_name,
             module: self.module,
+            tree: self.tree,
             router: self.router.with_state(state),
         }
     }
 
     /// Register a handler using the endpoint descriptor's declared method and route.
     #[must_use]
-    pub fn route<H, T>(mut self, endpoint: Endpoint, handler: H) -> Self
+    pub fn endpoint_descriptor<H, T>(
+        mut self,
+        descriptor: EndpointDescriptor,
+        handler: H,
+        source: SourceRange,
+    ) -> Self
     where
         H: Handler<T, S>,
         T: 'static,
     {
-        let Endpoint { method, route, .. } = endpoint;
-        self.router = self.router.route(
-            &normalize_route_path(&route.0),
-            method_router(method, handler),
-        );
+        let endpoint = descriptor.endpoint.clone();
+        let method = endpoint.method;
+        let path = endpoint.route.0.clone();
+        self.router = self
+            .router
+            .route(&normalize_route_path(&path), method_router(method, handler));
+        self.module = self.module.with_endpoint_descriptor(descriptor.clone());
+        self.tree
+            .nodes
+            .push(ApiRouteNode::Endpoint(MountedEndpoint {
+                descriptor,
+                source,
+                effective_method: method,
+                effective_path: path,
+            }));
         self
     }
 
-    /// Register a handler under an explicitly overridden method and route.
-    ///
-    /// Prefer [`Self::route`] for ordinary API endpoints. This helper is for
-    /// deliberate adapter-level exceptions where the Axum mount point is not
-    /// the contract route.
+    #[must_use]
+    pub fn route<R, H, T>(self, route: R, handler: H) -> Self
+    where
+        R: ApiRouteRegistration<H, T, S>,
+    {
+        route.register(self, handler)
+    }
+
+    #[must_use]
+    pub fn route_service<T>(mut self, path: &str, service: T) -> Self
+    where
+        T: Service<Request, Error = Infallible> + Clone + Send + Sync + 'static,
+        T::Response: IntoResponse,
+        T::Future: Send + 'static,
+    {
+        self.router = self.router.route_service(path, service);
+        self.tree.nodes.push(ApiRouteNode::RawService {
+            path: path.to_owned(),
+            source: SourceRange::default(),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn nest(mut self, path: &str, router: ApiRouter<S>) -> Self {
+        self.router = self.router.nest(path, router.router);
+        self.tree.nodes.push(ApiRouteNode::Nest {
+            path: path.to_owned(),
+            source: SourceRange::default(),
+            child: Box::new(router.tree),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn merge(mut self, router: ApiRouter<S>) -> Self {
+        self.router = self.router.merge(router.router);
+        self.tree.nodes.push(ApiRouteNode::Merge {
+            source: SourceRange::default(),
+            child: Box::new(router.tree),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn layer<L>(mut self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        let child_count = self.tree.nodes.len();
+        self.router = self.router.layer(layer);
+        self.tree.nodes.push(ApiRouteNode::Layer {
+            source: SourceRange::default(),
+            child_count,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn route_layer<L>(mut self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request>>::Future: Send + 'static,
+    {
+        let child_count = self.tree.nodes.len();
+        self.router = self.router.route_layer(layer);
+        self.tree.nodes.push(ApiRouteNode::RouteLayer {
+            source: SourceRange::default(),
+            child_count,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn fallback<H, T>(mut self, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.router = self.router.fallback(handler);
+        self.tree.nodes.push(ApiRouteNode::Fallback {
+            source: SourceRange::default(),
+        });
+        self
+    }
+
     #[must_use]
     pub fn route_override<H, T>(
         mut self,
-        _endpoint: Endpoint,
+        endpoint: Endpoint,
         method: HttpMethod,
         path: impl AsRef<str>,
         handler: H,
@@ -94,10 +214,18 @@ where
         H: Handler<T, S>,
         T: 'static,
     {
-        self.router = self.router.route(
-            &normalize_route_path(path.as_ref()),
-            method_router(method, handler),
-        );
+        let path = path.as_ref().to_owned();
+        self.router = self
+            .router
+            .route(&normalize_route_path(&path), method_router(method, handler));
+        self.tree.nodes.push(ApiRouteNode::RawRoute {
+            path: endpoint.route.0,
+            source: SourceRange::default(),
+        });
+        self.tree.nodes.push(ApiRouteNode::RawRoute {
+            path,
+            source: SourceRange::default(),
+        });
         self
     }
 
@@ -110,11 +238,90 @@ where
     pub fn into_router(self) -> Router<S> {
         self.router
     }
+
+    #[must_use]
+    pub fn into_api_module(self) -> ApiModule {
+        if route_tree_has_mounted_endpoints(&self.tree) {
+            self.tree.into_api_module()
+        } else {
+            self.module
+        }
+    }
+
+    #[must_use]
+    pub fn into_route_tree(self) -> ApiRouteTree {
+        self.tree
+    }
 }
 
 #[must_use]
 pub fn router(module: ApiModule) -> ApiRouter {
-    ApiRouter::new(module)
+    ApiRouter::from_module(module)
+}
+
+#[doc(hidden)]
+pub trait ApiRouteRegistration<H, T, S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    fn register(self, router: ApiRouter<S>, handler: H) -> ApiRouter<S>;
+}
+
+impl<H, T, S> ApiRouteRegistration<H, T, S> for Endpoint
+where
+    H: Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    fn register(self, mut router: ApiRouter<S>, handler: H) -> ApiRouter<S> {
+        let Endpoint { method, route, .. } = self;
+        router.router = router.router.route(
+            &normalize_route_path(&route.0),
+            method_router(method, handler),
+        );
+        router
+    }
+}
+
+impl<S> ApiRouteRegistration<MethodRouter<S>, (), S> for &str
+where
+    S: Clone + Send + Sync + 'static,
+{
+    fn register(self, mut router: ApiRouter<S>, method_router: MethodRouter<S>) -> ApiRouter<S> {
+        router.router = router.router.route(self, method_router);
+        router.tree.nodes.push(ApiRouteNode::RawRoute {
+            path: self.to_owned(),
+            source: SourceRange::default(),
+        });
+        router
+    }
+}
+
+impl<S> IntoApiRoot for ApiRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    fn into_api_module(self) -> ApiModule {
+        Self::into_api_module(self)
+    }
+
+    fn into_route_tree(self) -> Option<ApiRouteTree> {
+        Some(self.into_route_tree())
+    }
+}
+
+fn route_tree_has_mounted_endpoints(tree: &ApiRouteTree) -> bool {
+    tree.nodes.iter().any(|node| match node {
+        ApiRouteNode::Endpoint(_) => true,
+        ApiRouteNode::Nest { child, .. } | ApiRouteNode::Merge { child, .. } => {
+            route_tree_has_mounted_endpoints(child)
+        }
+        ApiRouteNode::Layer { .. }
+        | ApiRouteNode::RouteLayer { .. }
+        | ApiRouteNode::RawRoute { .. }
+        | ApiRouteNode::RawService { .. }
+        | ApiRouteNode::Fallback { .. } => false,
+    })
 }
 
 #[must_use]
@@ -611,11 +818,12 @@ struct ErrorFrame<E> {
 
 #[cfg(test)]
 mod tests {
-    use api_core::{ir::HttpMethod, ApiType};
+    use api_core::{ir::HttpMethod, ApiType, ContractRegistry, EndpointDescriptor};
     use axum::{
         body::{to_bytes, Body as AxumBody},
         extract::Request,
         http::{Method, StatusCode},
+        routing::get as axum_get,
     };
     use serde::{Deserialize, Serialize};
     use tower::ServiceExt;
@@ -718,6 +926,12 @@ mod tests {
         filter: String,
     }
 
+    fn noop_register(_registry: &mut ContractRegistry) {}
+
+    fn descriptor(method: HttpMethod, path: &str) -> EndpointDescriptor {
+        EndpointDescriptor::new(Endpoint::new(method, path), noop_register)
+    }
+
     #[tokio::test]
     async fn registers_handlers_from_endpoint_metadata() {
         let module = ApiModule::new("users");
@@ -743,6 +957,94 @@ mod tests {
             std::str::from_utf8(&body).expect("utf8"),
             r#"{"id":42,"filter":"active","name":"Ada"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_descriptor_mounts_runtime_handler_and_contract_node() {
+        let router = ApiRouter::new("users").endpoint_descriptor(
+            descriptor(HttpMethod::Get, "/users/{id}"),
+            get_user,
+            api_core::ir::SourceRange::default(),
+        );
+        let module = router.clone().into_api_module();
+
+        assert_eq!(module.name, "users");
+        assert_eq!(module.endpoints.len(), 1);
+        assert_eq!(module.endpoints[0].route.0, "/users/{id}");
+
+        let response = router
+            .into_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/users/42?filter=active")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn nested_api_router_prefixes_collected_endpoint_paths() {
+        let child = ApiRouter::new("users").endpoint_descriptor(
+            descriptor(HttpMethod::Get, "/users/{id}"),
+            get_user,
+            api_core::ir::SourceRange::default(),
+        );
+        let router = ApiRouter::new("server").nest("/api", child);
+        let module = router.clone().into_api_module();
+
+        assert_eq!(module.name, "server");
+        assert_eq!(module.endpoints.len(), 1);
+        assert_eq!(module.endpoints[0].route.0, "/api/users/{id}");
+
+        let response = router
+            .into_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/users/42?filter=active")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn raw_axum_routes_stay_runtime_only() {
+        let router = ApiRouter::new("server").route(
+            "/healthz",
+            axum_get(|| async {
+                Json(User {
+                    id: 0,
+                    filter: String::new(),
+                    name: "ok".to_owned(),
+                })
+            }),
+        );
+        let module = router.clone().into_api_module();
+
+        assert!(module.endpoints.is_empty());
+
+        let response = router
+            .into_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/healthz")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

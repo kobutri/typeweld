@@ -404,6 +404,112 @@ impl EndpointDescriptor {
     }
 }
 
+/// Route tree collected from a mounted API router.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApiRouteTree {
+    pub module_name: String,
+    pub nodes: Vec<ApiRouteNode>,
+}
+
+/// One node in a mounted API route tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApiRouteNode {
+    Endpoint(MountedEndpoint),
+    Nest {
+        path: String,
+        source: SourceRange,
+        child: Box<ApiRouteTree>,
+    },
+    Merge {
+        source: SourceRange,
+        child: Box<ApiRouteTree>,
+    },
+    Layer {
+        source: SourceRange,
+        child_count: usize,
+    },
+    RouteLayer {
+        source: SourceRange,
+        child_count: usize,
+    },
+    RawRoute {
+        path: String,
+        source: SourceRange,
+    },
+    RawService {
+        path: String,
+        source: SourceRange,
+    },
+    Fallback {
+        source: SourceRange,
+    },
+}
+
+/// Endpoint metadata at a concrete router mount point.
+#[derive(Clone, Debug)]
+pub struct MountedEndpoint {
+    pub descriptor: EndpointDescriptor,
+    pub source: SourceRange,
+    pub effective_method: HttpMethod,
+    pub effective_path: String,
+}
+
+impl PartialEq for MountedEndpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor.endpoint == other.descriptor.endpoint
+            && self.source == other.source
+            && self.effective_method == other.effective_method
+            && self.effective_path == other.effective_path
+    }
+}
+
+impl Eq for MountedEndpoint {}
+
+impl ApiRouteTree {
+    #[must_use]
+    pub fn new(module_name: impl Into<String>) -> Self {
+        Self {
+            module_name: module_name.into(),
+            nodes: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn into_api_module(self) -> ApiModule {
+        let mut module = ApiModule::new(self.module_name.clone());
+        flatten_route_tree(&self, "", &mut module);
+        module
+    }
+}
+
+/// A collected root that can be flattened into an API module.
+pub trait IntoApiRoot {
+    fn into_api_module(self) -> ApiModule;
+
+    fn into_route_tree(self) -> Option<ApiRouteTree>
+    where
+        Self: Sized,
+    {
+        None
+    }
+}
+
+impl IntoApiRoot for ApiModule {
+    fn into_api_module(self) -> ApiModule {
+        self
+    }
+}
+
+impl IntoApiRoot for ApiRouteTree {
+    fn into_api_module(self) -> ApiModule {
+        ApiRouteTree::into_api_module(self)
+    }
+
+    fn into_route_tree(self) -> Option<ApiRouteTree> {
+        Some(self)
+    }
+}
+
 /// JSON response wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Json<T>(pub T);
@@ -508,6 +614,48 @@ impl ApiModule {
                 .map(|endpoint| endpoint.id.clone())
                 .collect(),
         }
+    }
+}
+
+fn flatten_route_tree(tree: &ApiRouteTree, path_prefix: &str, module: &mut ApiModule) {
+    for node in &tree.nodes {
+        match node {
+            ApiRouteNode::Endpoint(mounted) => {
+                let mut endpoint = mounted.descriptor.endpoint.clone();
+                endpoint.method = mounted.effective_method;
+                endpoint.route =
+                    RoutePattern(join_route_paths(path_prefix, &mounted.effective_path));
+                mounted
+                    .descriptor
+                    .register_types_and_errors(module.registry_mut());
+                module.endpoints.push(endpoint);
+            }
+            ApiRouteNode::Nest { path, child, .. } => {
+                let prefix = join_route_paths(path_prefix, path);
+                flatten_route_tree(child, &prefix, module);
+            }
+            ApiRouteNode::Merge { child, .. } => {
+                flatten_route_tree(child, path_prefix, module);
+            }
+            ApiRouteNode::Layer { .. }
+            | ApiRouteNode::RouteLayer { .. }
+            | ApiRouteNode::RawRoute { .. }
+            | ApiRouteNode::RawService { .. }
+            | ApiRouteNode::Fallback { .. } => {}
+        }
+    }
+}
+
+#[must_use]
+pub fn join_route_paths(prefix: &str, path: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+
+    match (prefix.is_empty(), path.is_empty()) {
+        (true, true) => "/".to_owned(),
+        (true, false) => format!("/{path}"),
+        (false, true) => prefix.to_owned(),
+        (false, false) => format!("{prefix}/{path}"),
     }
 }
 

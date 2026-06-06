@@ -2366,13 +2366,10 @@ path = {package_dir}
     let root_call = format!("target_api_package::{}()", resolved.api_root.join("::"));
     let main_rs = format!(
         r#"fn main() {{
-    let root_module: api_core::ApiModule = {root_call};
-    let contract = api_collector::collect_contract(api_collector::CollectorInput {{
-        package_name: {ts_package_name}.to_owned(),
-        root_module,
-        types: Vec::new(),
-        errors: Vec::new(),
-    }});
+    let contract = api_collector::collect_contract(api_collector::CollectorInput::from_root(
+        {ts_package_name}.to_owned(),
+        {root_call},
+    ));
     println!(
         "{{}}",
         api_collector::contract_to_json(&contract).expect("collected contract should serialize")
@@ -3666,9 +3663,13 @@ api_root = "server::api"
 features = ["extra"]
 
 [dependencies]
+api-axum = {{ path = {api_axum_path} }}
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
+serde = {{ version = "1.0", features = ["derive"] }}
 "#,
+                api_axum_path =
+                    toml_string(&repo_root().join("crates/api-axum").display().to_string()),
                 api_core_path =
                     toml_string(&repo_root().join("crates/api-core").display().to_string()),
                 api_macros_path =
@@ -3679,19 +3680,20 @@ api-macros = {{ path = {api_macros_path} }}
         fs::write(
             server_dir.join("src/lib.rs"),
             r#"use api_core::{api_module, ApiModule, ApiType, Json, Path};
+use serde::Serialize;
 
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, Serialize)]
 pub struct User {
     id: i64,
 }
 
 #[cfg(feature = "extra")]
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, Serialize)]
 pub struct AuditEvent {
     id: i64,
 }
 
-#[derive(api_macros::ApiError)]
+#[derive(api_macros::ApiError, Serialize)]
 #[serde(tag = "_tag")]
 pub enum GetUserError {
     #[api_error(status = 404)]
@@ -3826,9 +3828,13 @@ ts_package = "@workspace/server-api"
 api_root = "server::api"
 
 [dependencies]
+api-axum = {{ path = {api_axum_path} }}
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
+serde = {{ version = "1.0", features = ["derive"] }}
 "#,
+                api_axum_path =
+                    toml_string(&repo_root().join("crates/api-axum").display().to_string()),
                 api_core_path =
                     toml_string(&repo_root().join("crates/api-core").display().to_string()),
                 api_macros_path =
@@ -3847,14 +3853,15 @@ pub fn api() -> api_core::ApiModule {
         )
         .expect("write lib");
         let users_rs = r#"use api_core::{api_module, ApiModule, ApiType, Json, Path};
+use serde::Serialize;
 
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, Serialize)]
 pub struct User {
     pub id: i64,
     pub display_name: String,
 }
 
-#[derive(api_macros::ApiError)]
+#[derive(api_macros::ApiError, Serialize)]
 #[serde(tag = "_tag")]
 pub enum GetUserError {
     #[api_error(status = 404)]
@@ -4118,10 +4125,14 @@ ts_package = "{ts_package}"
 api_root = "{package}::api"
 
 [dependencies]
+api-axum = {{ path = {api_axum_path} }}
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
+serde = {{ version = "1.0", features = ["derive"] }}
 {dependency_lines}
 "#,
+                api_axum_path =
+                    toml_string(&repo_root().join("crates/api-axum").display().to_string()),
                 api_core_path =
                     toml_string(&repo_root().join("crates/api-core").display().to_string()),
                 api_macros_path =
@@ -4133,8 +4144,9 @@ api-macros = {{ path = {api_macros_path} }}
             package_dir.join("src/lib.rs"),
             format!(
                 r#"use api_core::{{api_module, ApiModule, Json}};
+use serde::Serialize;
 
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, Serialize)]
 pub struct {dto} {{
     id: i64,
 }}

@@ -84,6 +84,8 @@ dependencies = [
  "serde",
  "tokio",
  "tower",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
