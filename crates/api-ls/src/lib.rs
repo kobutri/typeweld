@@ -49,7 +49,7 @@ impl Default for ApiLsConfig {
                 command: "typescript-language-server".to_owned(),
                 args: vec!["--stdio".to_owned()],
             },
-            effect_language_service_plugin: Some("@effect/language-service".to_owned()),
+            effect_language_service_plugin: None,
             generated_cache_dir: PathBuf::from("target/api-contract/effect-v4/packages"),
             symbol_graph: PathBuf::from("target/api-contract/rust-ts-symbols.json"),
             usage_index: PathBuf::from("target/api-contract/graph/effect-usage-index.json"),

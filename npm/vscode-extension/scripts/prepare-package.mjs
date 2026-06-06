@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs"
+import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -24,11 +24,13 @@ const launcherSource = resolve(
   "index.js",
 )
 const launcherTarget = join(extensionRoot, "server", "index.js")
+const launcherPackageTarget = join(extensionRoot, "server", "package.json")
 const binaryTarget = join(extensionRoot, "bin", platformDir, binaryName)
 
 mkdirSync(dirname(launcherTarget), { recursive: true })
 mkdirSync(dirname(binaryTarget), { recursive: true })
 copyFileSync(launcherSource, launcherTarget)
+writeFileSync(launcherPackageTarget, `${JSON.stringify({ type: "module" }, null, 2)}\n`)
 copyFileSync(binaryPath, binaryTarget)
 
 if (process.platform !== "win32") {

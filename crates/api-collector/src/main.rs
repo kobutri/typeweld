@@ -1164,7 +1164,7 @@ fn render_new_api_ls_json() -> String {
     "command": "npm",
     "args": ["exec", "--", "typescript-language-server", "--stdio"]
   },
-  "effectLanguageServicePlugin": "@effect/language-service",
+  "effectLanguageServicePlugin": null,
   "generatedCacheDir": "target/api-contract/effect-v4/packages",
   "symbolGraph": "target/api-contract/rust-ts-symbols.json",
   "usageIndex": "target/api-contract/graph/effect-usage-index.json",
@@ -1385,6 +1385,11 @@ fn render_new_app_tsconfig(project: &NewProject) -> String {
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
+    "plugins": [
+      {{
+        "name": "@effect/language-service"
+      }}
+    ],
     "paths": {{
       {ts_package}: [
         {package_index}
@@ -3005,7 +3010,12 @@ mod tests {
 
         let lsp = fs::read_to_string(root.join(".api-ls.json")).expect("read lsp config");
         assert!(lsp.contains("typescript-language-server"));
+        assert!(lsp.contains("\"effectLanguageServicePlugin\": null"));
         assert!(lsp.contains("target/api-contract/rust-ts-symbols.json"));
+
+        let tsconfig = fs::read_to_string(root.join("app/tsconfig.json")).expect("read tsconfig");
+        assert!(tsconfig.contains("\"plugins\""));
+        assert!(tsconfig.contains("\"@effect/language-service\""));
     }
 
     #[test]
