@@ -676,7 +676,7 @@ Acceptance criteria:
 - Definition and references work bidirectionally for the core symbol kinds.
 - Results are deduplicated and hide generated locations by default.
 
-### F6. Implement wire-contract rename
+### F6. Implement wire-contract rename [done]
 
 Goal: rename from either language changes the public API contract intentionally.
 

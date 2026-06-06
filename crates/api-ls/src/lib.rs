@@ -369,10 +369,17 @@ impl AsyncLspServer {
             }
             "textDocument/prepareRename" => {
                 if let Some(id) = message.id {
-                    if let Some(rename) = self.cross_language_prepare_rename(&message.params)? {
-                        self.write_response(id, rename)?;
-                    } else {
-                        self.route_or_default_response(method, message.params, id, Value::Null)?;
+                    match self.cross_language_prepare_rename(&message.params) {
+                        Ok(Some(rename)) => self.write_response(id, rename)?,
+                        Ok(None) => {
+                            self.route_or_default_response(
+                                method,
+                                message.params,
+                                id,
+                                Value::Null,
+                            )?;
+                        }
+                        Err(error) => self.write_error(id, -32_602, error)?,
                     }
                 }
             }
@@ -1151,6 +1158,9 @@ impl AsyncLspServer {
         let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
             return Ok(None);
         };
+        if let Some(reason) = graph.rename_block_reason(&query, workspace) {
+            return Err(reason);
+        }
         Ok(graph.prepare_rename(&query, workspace))
     }
 
@@ -1167,6 +1177,9 @@ impl AsyncLspServer {
         let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
             return Ok(None);
         };
+        if let Some(reason) = graph.rename_block_reason(&query, workspace) {
+            return Err(reason);
+        }
         graph.rename(&query, new_name, workspace)
     }
 
@@ -1445,7 +1458,7 @@ impl SymbolGraph {
     ) -> Option<Value> {
         let (symbol, location) = self.rename_symbol_at(query, workspace)?;
         Some(json!({
-            "range": location.range,
+            "range": location.rename_range(),
             "placeholder": symbol.rename_placeholder(),
         }))
     }
@@ -1459,12 +1472,18 @@ impl SymbolGraph {
         let Some((symbol, _)) = self.rename_symbol_at(query, workspace) else {
             return Ok(None);
         };
-        validate_rename_name(new_name)?;
+        symbol.validate_rename_name(new_name)?;
+        let source = if symbol.rust.matches(query, workspace) {
+            RenameSource::Rust
+        } else {
+            RenameSource::TypeScript
+        };
+        let rename_texts = symbol.rename_texts(new_name, source);
         if symbol
             .metadata
             .reserved_names
             .iter()
-            .any(|reserved| reserved == new_name)
+            .any(|reserved| rename_texts.conflicts_with(reserved))
         {
             return Err(format!(
                 "rename `{new_name}` conflicts with an existing API symbol"
@@ -1472,22 +1491,78 @@ impl SymbolGraph {
         }
 
         let mut changes = serde_json::Map::new();
-        for location in symbol.rename_locations() {
-            let Some(uri) = location.resolved_uri(workspace) else {
-                continue;
-            };
-            changes
-                .entry(uri)
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .expect("change entry is an array")
-                .push(json!({
-                    "range": location.range,
-                    "newText": new_name,
-                }));
+        if symbol.rust.is_renamable() {
+            add_rename_change(&mut changes, &symbol.rust, workspace, &rename_texts.rust);
+            symbol.add_supporting_rust_rename_changes(&mut changes, workspace, &rename_texts)?;
+        }
+        for location in symbol
+            .typescript
+            .iter()
+            .filter(|location| location.is_renamable())
+        {
+            add_rename_change(&mut changes, location, workspace, &rename_texts.typescript);
         }
 
         Ok(Some(json!({ "changes": changes })))
+    }
+
+    fn rename_block_reason(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Option<String> {
+        for symbol in &self.symbols {
+            if symbol.rust.is_generated_match(query, workspace) {
+                return Some(format!(
+                    "generated API files are read-only; rename API {} `{}` from Rust source or a non-generated TypeScript usage instead",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol
+                .typescript
+                .iter()
+                .any(|location| location.is_generated_match(query, workspace))
+            {
+                return Some(format!(
+                    "generated API files are read-only; rename API {} `{}` from Rust source or a non-generated TypeScript usage instead",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol.rust.is_surrounding_match(query, workspace) {
+                return Some(format!(
+                    "API {} `{}` can only be renamed from its identifier, not surrounding attributes or type syntax",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol.rust.matches(query, workspace) && !symbol.rust.is_renamable() {
+                return Some(format!(
+                    "API {} `{}` cannot be renamed at this Rust position",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol
+                .typescript
+                .iter()
+                .any(|location| location.is_surrounding_match(query, workspace))
+            {
+                return Some(format!(
+                    "API {} `{}` can only be renamed from its identifier, not surrounding TypeScript syntax",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol
+                .typescript
+                .iter()
+                .any(|location| location.matches(query, workspace) && !location.is_renamable())
+            {
+                return Some(format!(
+                    "generated API {} `{}` cannot be renamed directly; rename the Rust source symbol or a non-generated TypeScript usage instead",
+                    symbol.kind, symbol.id
+                ));
+            }
+        }
+
+        None
     }
 
     fn unused_endpoint_diagnostics(
@@ -1603,10 +1678,73 @@ impl LinkedSymbol {
             .unwrap_or_else(|| self.id.clone())
     }
 
-    fn rename_locations(&self) -> impl Iterator<Item = &GraphLocation> {
-        std::iter::once(&self.rust)
-            .chain(self.typescript.iter())
-            .filter(|location| location.is_renamable())
+    fn rename_texts(&self, new_name: &str, source: RenameSource) -> RenameTexts {
+        let rust = match self.kind.as_str() {
+            "endpoint" | "field" | "routeParam" | "queryParam" | "errorField" => {
+                to_snake_case(new_name)
+            }
+            "type" | "error" | "errorVariant" | "errorTag" | "enumVariant" => {
+                to_pascal_case(new_name)
+            }
+            _ => new_name.to_owned(),
+        };
+        let typescript = match self.kind.as_str() {
+            "endpoint" | "field" | "routeParam" | "queryParam" | "errorField" => {
+                self.typescript_text_with_existing_style(source, new_name, &rust)
+            }
+            "type" | "error" | "errorVariant" => to_pascal_case(new_name),
+            "enumVariant" | "errorTag" => {
+                self.typescript_text_with_existing_style(source, new_name, &rust)
+            }
+            _ => new_name.to_owned(),
+        };
+        RenameTexts { rust, typescript }
+    }
+
+    fn typescript_text_with_existing_style(
+        &self,
+        source: RenameSource,
+        new_name: &str,
+        rust_text: &str,
+    ) -> String {
+        if source == RenameSource::TypeScript {
+            return new_name.to_owned();
+        }
+        let Some(old_rust_name) = symbol_rust_name(self) else {
+            return to_camel_case(new_name);
+        };
+        let Some(old_typescript_name) = symbol_typescript_name(self) else {
+            return to_camel_case(new_name);
+        };
+        if old_typescript_name == old_rust_name {
+            return rust_text.to_owned();
+        }
+        infer_rename_rule(old_rust_name, old_typescript_name)
+            .map(|rule| apply_rename_rule(rust_text, rule))
+            .unwrap_or_else(|| to_camel_case(new_name))
+    }
+
+    fn add_supporting_rust_rename_changes(
+        &self,
+        changes: &mut serde_json::Map<String, Value>,
+        workspace: &WorkspaceConfig,
+        rename_texts: &RenameTexts,
+    ) -> Result<(), String> {
+        if self.kind == "routeParam" {
+            add_route_placeholder_rename_change(changes, self, workspace, &rename_texts.rust)?;
+        }
+        if matches!(self.kind.as_str(), "field" | "errorField") {
+            add_serde_field_rename_changes(changes, self, workspace, rename_texts)?;
+        }
+        Ok(())
+    }
+
+    fn validate_rename_name(&self, new_name: &str) -> Result<(), String> {
+        if matches!(self.kind.as_str(), "errorTag" | "enumVariant") {
+            validate_wire_rename_name(new_name)
+        } else {
+            validate_identifier_rename_name(new_name)
+        }
     }
 
     fn unused_endpoint_diagnostic(&self, workspace: &WorkspaceConfig) -> Value {
@@ -1647,6 +1785,27 @@ struct SymbolMetadata {
     allow_unused: bool,
     rename_placeholder: Option<String>,
     reserved_names: Vec<String>,
+    rust_name: Option<String>,
+    wire_name: Option<String>,
+    ts_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RenameSource {
+    Rust,
+    TypeScript,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenameTexts {
+    rust: String,
+    typescript: String,
+}
+
+impl RenameTexts {
+    fn conflicts_with(&self, reserved: &str) -> bool {
+        reserved == self.rust || reserved == self.typescript
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1696,6 +1855,8 @@ struct GraphLocation {
     uri: Option<String>,
     file: Option<PathBuf>,
     range: GraphRange,
+    name_range: Option<GraphRange>,
+    full_range: Option<GraphRange>,
     #[serde(default)]
     generated: bool,
     renamable: Option<bool>,
@@ -1705,6 +1866,24 @@ impl GraphLocation {
     fn matches(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
         self.resolved_uri(workspace)
             .is_some_and(|uri| same_uri(&uri, &query.uri) && self.range.contains(query.position))
+    }
+
+    fn is_generated_match(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
+        self.generated && self.matches_any_range(query, workspace)
+    }
+
+    fn is_surrounding_match(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
+        self.matches_any_range(query, workspace) && !self.range.contains(query.position)
+    }
+
+    fn matches_any_range(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> bool {
+        self.resolved_uri(workspace).is_some_and(|uri| {
+            same_uri(&uri, &query.uri)
+                && self
+                    .full_range
+                    .unwrap_or(self.range)
+                    .contains(query.position)
+        })
     }
 
     fn to_lsp_location(&self, workspace: &WorkspaceConfig) -> Value {
@@ -1744,7 +1923,11 @@ impl GraphLocation {
     }
 
     fn is_renamable(&self) -> bool {
-        self.renamable.unwrap_or(!self.generated)
+        !self.generated && self.renamable.unwrap_or(true)
+    }
+
+    fn rename_range(&self) -> GraphRange {
+        self.name_range.unwrap_or(self.range)
     }
 }
 
@@ -2782,7 +2965,7 @@ fn diagnostic_message(diagnostic: &Value) -> String {
         .to_owned()
 }
 
-fn validate_rename_name(new_name: &str) -> Result<(), String> {
+fn validate_identifier_rename_name(new_name: &str) -> Result<(), String> {
     let mut chars = new_name.chars();
     let Some(first) = chars.next() else {
         return Err("rename target cannot be empty".to_owned());
@@ -2798,6 +2981,559 @@ fn validate_rename_name(new_name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn validate_wire_rename_name(new_name: &str) -> Result<(), String> {
+    let mut chars = new_name.chars();
+    let Some(first) = chars.next() else {
+        return Err("rename target cannot be empty".to_owned());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!(
+            "rename target `{new_name}` must start with a letter or underscore"
+        ));
+    }
+    if chars.any(|character| {
+        !(character == '_' || character == '-' || character.is_ascii_alphanumeric())
+    }) {
+        return Err(format!(
+            "rename target `{new_name}` must be an API wire tag or identifier"
+        ));
+    }
+    Ok(())
+}
+
+fn add_rename_change(
+    changes: &mut serde_json::Map<String, Value>,
+    location: &GraphLocation,
+    workspace: &WorkspaceConfig,
+    new_text: &str,
+) {
+    let Some(uri) = location.resolved_uri(workspace) else {
+        return;
+    };
+    add_text_edit(changes, uri, location.rename_range(), new_text);
+}
+
+fn add_text_edit(
+    changes: &mut serde_json::Map<String, Value>,
+    uri: String,
+    range: GraphRange,
+    new_text: &str,
+) {
+    changes
+        .entry(uri)
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("rename changes entry is an array")
+        .push(json!({
+            "range": range,
+            "newText": new_text,
+        }));
+}
+
+fn add_route_placeholder_rename_change(
+    changes: &mut serde_json::Map<String, Value>,
+    symbol: &LinkedSymbol,
+    workspace: &WorkspaceConfig,
+    new_rust_name: &str,
+) -> Result<(), String> {
+    let Some(old_name) = symbol_rust_name(symbol) else {
+        return Err(format!(
+            "cannot rename route parameter `{}` because its Rust name is missing from the API graph",
+            symbol.id
+        ));
+    };
+    if old_name == new_rust_name {
+        return Ok(());
+    }
+    let Some(uri) = symbol.rust.resolved_uri(workspace) else {
+        return Err(format!(
+            "cannot rename route parameter `{}` because its Rust source URI is missing",
+            symbol.id
+        ));
+    };
+    let path = file_uri_to_path(&uri).ok_or_else(|| {
+        format!(
+            "cannot rename route parameter `{}` because `{uri}` is not a file URI",
+            symbol.id
+        )
+    })?;
+    let contents = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "cannot rename route parameter `{}` because `{}` could not be read: {error}",
+            symbol.id,
+            path.display()
+        )
+    })?;
+    let Some(route_range) = route_placeholder_range(&contents, &symbol.rust, old_name) else {
+        return Err(format!(
+            "cannot rename route parameter `{old_name}` because the matching `{{{old_name}}}` route placeholder was not found near the endpoint"
+        ));
+    };
+    add_text_edit(changes, uri, route_range, new_rust_name);
+    Ok(())
+}
+
+fn add_serde_field_rename_changes(
+    changes: &mut serde_json::Map<String, Value>,
+    symbol: &LinkedSymbol,
+    workspace: &WorkspaceConfig,
+    rename_texts: &RenameTexts,
+) -> Result<(), String> {
+    let Some(old_rust_name) = symbol_rust_name(symbol) else {
+        return Ok(());
+    };
+    let Some(old_wire_name) = symbol_wire_name(symbol) else {
+        return Ok(());
+    };
+    let desired_wire_name = &rename_texts.typescript;
+    let serde_rename_needed = serde_rename_needed(
+        old_rust_name,
+        old_wire_name,
+        &rename_texts.rust,
+        desired_wire_name,
+    );
+    let Some(uri) = symbol.rust.resolved_uri(workspace) else {
+        return if serde_rename_needed {
+            Err(format!(
+                "cannot rename API field `{}` because its Rust source URI is missing and a Serde rename is required",
+                symbol.id
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let path = file_uri_to_path(&uri).ok_or_else(|| {
+        format!(
+            "cannot rename API field `{}` because `{uri}` is not a file URI",
+            symbol.id
+        )
+    })?;
+    let contents = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "cannot rename API field `{}` because `{}` could not be read: {error}",
+            symbol.id,
+            path.display()
+        )
+    })?;
+    let Some(full_range) = symbol.rust.full_range else {
+        return if serde_rename_needed {
+            Err(format!(
+                "cannot add Serde rename for API field `{}` because its full Rust field range is missing",
+                symbol.id
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let Some(full_start) = byte_offset_from_position(&contents, full_range.start) else {
+        return Ok(());
+    };
+    let Some(name_start) = byte_offset_from_position(&contents, symbol.rust.range.start) else {
+        return Ok(());
+    };
+    let source_rule = source_container_rename_rule(&contents, full_start, symbol);
+    let serde_rename_needed = source_rule
+        .map(|rule| apply_rename_rule(&rename_texts.rust, rule) != *desired_wire_name)
+        .unwrap_or(serde_rename_needed);
+    let existing = serde_rename_attr(&contents, full_start, name_start);
+
+    match (serde_rename_needed, existing) {
+        (true, Some(attr)) => {
+            if let Some(range) =
+                range_from_byte_offsets(&contents, attr.value_start, attr.value_end)
+            {
+                add_text_edit(changes, uri, range, desired_wire_name);
+            }
+        }
+        (true, None) => {
+            let Some(range) = range_from_byte_offsets(&contents, full_start, full_start) else {
+                return Ok(());
+            };
+            let indent = line_indent_at_offset(&contents, full_start);
+            add_text_edit(
+                changes,
+                uri,
+                range,
+                &format!("{indent}#[serde(rename = \"{desired_wire_name}\")]\n"),
+            );
+        }
+        (false, Some(attr)) => {
+            if let Some((start, end)) = serde_rename_removal_offsets(&contents, &attr) {
+                if let Some(range) = range_from_byte_offsets(&contents, start, end) {
+                    add_text_edit(changes, uri, range, "");
+                }
+            }
+        }
+        (false, None) => {}
+    }
+
+    Ok(())
+}
+
+fn symbol_rust_name(symbol: &LinkedSymbol) -> Option<&str> {
+    symbol
+        .metadata
+        .rust_name
+        .as_deref()
+        .or_else(|| symbol.metadata.rust_path.last().map(String::as_str))
+}
+
+fn symbol_wire_name(symbol: &LinkedSymbol) -> Option<&str> {
+    symbol
+        .metadata
+        .wire_name
+        .as_deref()
+        .or_else(|| symbol.metadata.ts_name.as_deref())
+        .or_else(|| symbol.metadata.ts_path.last().map(String::as_str))
+}
+
+fn symbol_typescript_name(symbol: &LinkedSymbol) -> Option<&str> {
+    symbol
+        .metadata
+        .ts_name
+        .as_deref()
+        .or_else(|| symbol.metadata.ts_path.last().map(String::as_str))
+}
+
+fn route_placeholder_range(
+    contents: &str,
+    location: &GraphLocation,
+    old_name: &str,
+) -> Option<GraphRange> {
+    let name_offset = byte_offset_from_position(contents, location.range.start)?;
+    let prefix = contents.get(..name_offset)?;
+    let attr_start = prefix.rfind("#[api")?;
+    let search = contents.get(attr_start..name_offset)?;
+    let placeholder = format!("{{{old_name}}}");
+    let placeholder_start = attr_start + search.rfind(&placeholder)? + 1;
+    range_from_byte_offsets(
+        contents,
+        placeholder_start,
+        placeholder_start + old_name.len(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RenameRule {
+    Camel,
+    Pascal,
+    Snake,
+    Kebab,
+    ScreamingSnake,
+}
+
+fn serde_rename_needed(
+    old_rust_name: &str,
+    old_wire_name: &str,
+    new_rust_name: &str,
+    new_wire_name: &str,
+) -> bool {
+    if new_wire_name == new_rust_name {
+        return false;
+    }
+    infer_rename_rule(old_rust_name, old_wire_name)
+        .map(|rule| apply_rename_rule(new_rust_name, rule) != new_wire_name)
+        .unwrap_or(true)
+}
+
+fn infer_rename_rule(rust_name: &str, wire_name: &str) -> Option<RenameRule> {
+    [
+        RenameRule::Camel,
+        RenameRule::Pascal,
+        RenameRule::Snake,
+        RenameRule::Kebab,
+        RenameRule::ScreamingSnake,
+    ]
+    .into_iter()
+    .find(|rule| apply_rename_rule(rust_name, *rule) == wire_name)
+}
+
+fn source_container_rename_rule(
+    contents: &str,
+    full_start: usize,
+    symbol: &LinkedSymbol,
+) -> Option<RenameRule> {
+    let owner_name = field_owner_name(symbol)?;
+    let search_start = full_start.saturating_sub(8192);
+    let prefix = contents.get(search_start..full_start)?;
+    let struct_pos = prefix.rfind(&format!("struct {owner_name}"));
+    let enum_pos = prefix.rfind(&format!("enum {owner_name}"));
+    let owner_pos = match (struct_pos, enum_pos) {
+        (Some(left), Some(right)) => left.max(right),
+        (Some(pos), None) | (None, Some(pos)) => pos,
+        (None, None) => return None,
+    };
+    let attrs_start = prefix[..owner_pos]
+        .rfind("\n#")
+        .map(|pos| pos + 1)
+        .unwrap_or(owner_pos);
+    let attrs = &prefix[attrs_start..owner_pos];
+    find_serde_rename_rule(attrs, "rename_all")
+        .or_else(|| find_serde_rename_rule(attrs, "rename_all_fields"))
+}
+
+fn field_owner_name(symbol: &LinkedSymbol) -> Option<&str> {
+    let len = symbol.metadata.rust_path.len();
+    match symbol.kind.as_str() {
+        "field" if symbol.metadata.ts_path.len() >= 3 && len >= 3 => {
+            symbol.metadata.rust_path.get(len - 3).map(String::as_str)
+        }
+        "field" | "errorField" if len >= 2 => {
+            symbol.metadata.rust_path.get(len - 2).map(String::as_str)
+        }
+        _ => None,
+    }
+}
+
+fn find_serde_rename_rule(contents: &str, key: &str) -> Option<RenameRule> {
+    let key_pos = contents.rfind(key)?;
+    let after_key = contents.get(key_pos + key.len()..)?;
+    let quote_start = after_key.find('"')? + key_pos + key.len() + 1;
+    let quote_end = contents.get(quote_start..)?.find('"')? + quote_start;
+    parse_rename_rule(contents.get(quote_start..quote_end)?)
+}
+
+fn parse_rename_rule(value: &str) -> Option<RenameRule> {
+    match value {
+        "camelCase" => Some(RenameRule::Camel),
+        "PascalCase" => Some(RenameRule::Pascal),
+        "snake_case" => Some(RenameRule::Snake),
+        "kebab-case" => Some(RenameRule::Kebab),
+        "SCREAMING_SNAKE_CASE" => Some(RenameRule::ScreamingSnake),
+        _ => None,
+    }
+}
+
+fn apply_rename_rule(name: &str, rule: RenameRule) -> String {
+    match rule {
+        RenameRule::Camel => to_camel_case(name),
+        RenameRule::Pascal => to_pascal_case(name),
+        RenameRule::Snake => to_snake_case(name),
+        RenameRule::Kebab => split_words(name).join("-"),
+        RenameRule::ScreamingSnake => split_words(name).join("_").to_ascii_uppercase(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SerdeRenameAttr {
+    value_start: usize,
+    value_end: usize,
+    key_start: usize,
+    pair_end: usize,
+    attr_line_start: usize,
+    attr_line_end: usize,
+    attr_inner_start: usize,
+    attr_inner_end: usize,
+}
+
+fn serde_rename_attr(
+    contents: &str,
+    full_start: usize,
+    name_start: usize,
+) -> Option<SerdeRenameAttr> {
+    let header = contents.get(full_start..name_start)?;
+    let serde_start = header.rfind("#[serde(")? + full_start;
+    let attr_inner_start = serde_start + "#[serde(".len();
+    let attr_inner_end = contents.get(attr_inner_start..name_start)?.find(")]")? + attr_inner_start;
+    let inner = contents.get(attr_inner_start..attr_inner_end)?;
+    let rename_rel = inner.find("rename")?;
+    let key_start = attr_inner_start + rename_rel;
+    let after_key = contents.get(key_start + "rename".len()..attr_inner_end)?;
+    let equals_rel = after_key.find('=')?;
+    let after_equals_start = key_start + "rename".len() + equals_rel + 1;
+    let quote_start = contents
+        .get(after_equals_start..attr_inner_end)?
+        .find('"')?
+        + after_equals_start;
+    let value_start = quote_start + 1;
+    let value_end = contents.get(value_start..attr_inner_end)?.find('"')? + value_start;
+    let pair_end = value_end + 1;
+    let attr_line_start = line_start_offset(contents, serde_start);
+    let attr_line_end = line_end_offset(contents, serde_start);
+
+    Some(SerdeRenameAttr {
+        value_start,
+        value_end,
+        key_start,
+        pair_end,
+        attr_line_start,
+        attr_line_end,
+        attr_inner_start,
+        attr_inner_end,
+    })
+}
+
+fn serde_rename_removal_offsets(contents: &str, attr: &SerdeRenameAttr) -> Option<(usize, usize)> {
+    let inner = contents.get(attr.attr_inner_start..attr.attr_inner_end)?;
+    let before = contents.get(attr.attr_inner_start..attr.key_start)?;
+    let after = contents.get(attr.pair_end..attr.attr_inner_end)?;
+    if before.trim().is_empty() && after.trim().trim_start_matches(',').trim().is_empty() {
+        return Some((attr.attr_line_start, attr.attr_line_end));
+    }
+
+    let mut start = attr.key_start;
+    let mut end = attr.pair_end;
+    let after_pair = contents.get(end..attr.attr_inner_end).unwrap_or_default();
+    let after_trimmed = after_pair.trim_start();
+    if after_trimmed.starts_with(',') {
+        end += after_pair.len() - after_trimmed.len() + 1;
+        while contents
+            .get(end..attr.attr_inner_end)
+            .and_then(|remaining| remaining.chars().next())
+            .is_some_and(char::is_whitespace)
+        {
+            end += 1;
+        }
+    } else {
+        let before_pair = contents.get(attr.attr_inner_start..start)?;
+        let comma_rel = before_pair.rfind(',')?;
+        start = attr.attr_inner_start + comma_rel;
+        while start > attr.attr_inner_start
+            && contents
+                .get(start - 1..start)
+                .is_some_and(|character| character.chars().all(char::is_whitespace))
+        {
+            start -= 1;
+        }
+    }
+
+    if inner.get(..).is_some() {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
+fn to_snake_case(name: &str) -> String {
+    split_words(name).join("_")
+}
+
+fn to_camel_case(name: &str) -> String {
+    let mut words = split_words(name).into_iter();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let mut output = first;
+    for word in words {
+        output.push_str(&capitalize_ascii(&word));
+    }
+    output
+}
+
+fn to_pascal_case(name: &str) -> String {
+    split_words(name)
+        .into_iter()
+        .map(|word| capitalize_ascii(&word))
+        .collect()
+}
+
+fn split_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lower_or_digit = false;
+
+    for character in name.chars() {
+        if matches!(character, '_' | '-' | ' ') {
+            push_word(&mut words, &mut current);
+            previous_was_lower_or_digit = false;
+            continue;
+        }
+        if character.is_ascii_uppercase() && previous_was_lower_or_digit && !current.is_empty() {
+            push_word(&mut words, &mut current);
+        }
+        current.push(character.to_ascii_lowercase());
+        previous_was_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+    push_word(&mut words, &mut current);
+    words
+}
+
+fn push_word(words: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        words.push(std::mem::take(current));
+    }
+}
+
+fn capitalize_ascii(word: &str) -> String {
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut output = String::new();
+    output.push(first.to_ascii_uppercase());
+    output.extend(chars);
+    output
+}
+
+fn byte_offset_from_position(contents: &str, position: GraphPosition) -> Option<usize> {
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (offset, item) in contents.char_indices() {
+        if line == position.line && character == position.character {
+            return Some(offset);
+        }
+        if item == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += u32::try_from(item.len_utf16()).ok()?;
+        }
+    }
+    (line == position.line && character == position.character).then_some(contents.len())
+}
+
+fn range_from_byte_offsets(contents: &str, start: usize, end: usize) -> Option<GraphRange> {
+    Some(GraphRange {
+        start: position_from_byte_offset(contents, start)?,
+        end: position_from_byte_offset(contents, end)?,
+    })
+}
+
+fn position_from_byte_offset(contents: &str, target: usize) -> Option<GraphPosition> {
+    if target > contents.len() || !contents.is_char_boundary(target) {
+        return None;
+    }
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (offset, item) in contents.char_indices() {
+        if offset == target {
+            return Some(GraphPosition { line, character });
+        }
+        if item == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += u32::try_from(item.len_utf16()).ok()?;
+        }
+    }
+    (target == contents.len()).then_some(GraphPosition { line, character })
+}
+
+fn line_start_offset(contents: &str, offset: usize) -> usize {
+    contents
+        .get(..offset)
+        .and_then(|prefix| prefix.rfind('\n').map(|position| position + 1))
+        .unwrap_or(0)
+}
+
+fn line_end_offset(contents: &str, offset: usize) -> usize {
+    let line_end = contents
+        .get(offset..)
+        .and_then(|suffix| suffix.find('\n').map(|position| offset + position + 1))
+        .unwrap_or(contents.len());
+    line_end
+}
+
+fn line_indent_at_offset(contents: &str, offset: usize) -> String {
+    let start = line_start_offset(contents, offset);
+    contents
+        .get(start..offset)
+        .unwrap_or_default()
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect()
 }
 
 fn document_uris(value: &Value) -> BTreeSet<String> {
@@ -4212,8 +4948,365 @@ mod tests {
         assert!(output.contains(&rust_uri));
         assert!(output.contains(&usage_uri));
         assert!(!output.contains(&generated_uri));
-        assert_eq!(output.matches("\"newText\":\"fetchUser\"").count(), 2);
+        assert_eq!(output.matches("\"newText\":\"fetch_user\"").count(), 1);
+        assert_eq!(output.matches("\"newText\":\"fetchUser\"").count(), 1);
         assert!(!output.contains("/users/{id}\\\",\\\"newText"));
+    }
+
+    #[test]
+    fn rejects_rename_from_generated_api_file() {
+        let root = test_root("rename-generated");
+        let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
+        fs::create_dir_all(&generated_cache_dir).expect("create generated cache");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let generated_uri = path_to_file_uri(&generated_cache_dir.join("endpoints.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 10, "character": 9 },
+                            "end": { "line": 10, "character": 17 }
+                        }
+                    },
+                    "typescript": [{
+                        "uri": generated_uri,
+                        "generated": true,
+                        "range": {
+                            "start": { "line": 4, "character": 15 },
+                            "end": { "line": 4, "character": 22 }
+                        }
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let input = [
+            initialize_request(&root),
+            framed(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/prepareRename",
+                "params": {
+                    "textDocument": { "uri": generated_uri },
+                    "position": { "line": 4, "character": 18 }
+                }
+            })),
+            shutdown_request(3),
+            exit_notification(),
+        ]
+        .join("");
+        let messages = run_output_messages(input);
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("prepare rename response");
+
+        assert!(response.get("error").is_some());
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("generated API files are read-only"));
+    }
+
+    #[test]
+    fn rejects_prepare_rename_on_surrounding_rust_syntax() {
+        let root = test_root("rename-surrounding");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "field:display_name",
+                    "kind": "field",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 4, "character": 8 },
+                            "end": { "line": 4, "character": 20 }
+                        },
+                        "fullRange": {
+                            "start": { "line": 4, "character": 4 },
+                            "end": { "line": 4, "character": 28 }
+                        }
+                    },
+                    "typescript": []
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/prepareRename",
+                    "params": {
+                        "textDocument": { "uri": rust_uri },
+                        "position": { "line": 4, "character": 5 }
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("prepare rename response");
+
+        assert!(response.get("error").is_some());
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("only be renamed from its identifier"));
+    }
+
+    #[test]
+    fn route_param_rename_updates_route_path_rust_arg_and_ts_usage() {
+        let root = test_root("rename-route-param");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_file = root.join("src/lib.rs");
+        let rust_source = concat!(
+            "#[api_macros::api(method = \"GET\", path = \"/users/{user_id}\")]\n",
+            "pub async fn get_user(user_id: Path<UserId>) {}\n",
+        );
+        fs::write(&rust_file, rust_source).expect("write rust source");
+        let rust_uri = path_to_file_uri(&rust_file);
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "field:get_user:user_id",
+                    "kind": "routeParam",
+                    "rust": {
+                        "uri": rust_uri,
+                        "range": {
+                            "start": { "line": 1, "character": 22 },
+                            "end": { "line": 1, "character": 29 }
+                        },
+                        "fullRange": {
+                            "start": { "line": 1, "character": 22 },
+                            "end": { "line": 1, "character": 43 }
+                        }
+                    },
+                    "typescript": [{
+                        "uri": usage_uri,
+                        "range": {
+                            "start": { "line": 0, "character": 16 },
+                            "end": { "line": 0, "character": 22 }
+                        }
+                    }],
+                    "metadata": {
+                        "rustPath": ["crate", "users", "get_user", "user_id"],
+                        "tsPath": ["users", "getUser", "userId"],
+                        "rustName": "user_id",
+                        "wireName": "user_id",
+                        "tsName": "userId"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/rename",
+                    "params": {
+                        "textDocument": { "uri": rust_uri },
+                        "position": { "line": 1, "character": 25 },
+                        "newName": "accountId"
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("rename response");
+        let response = serde_json::to_string(response).expect("serialize response");
+
+        assert!(response.contains(&rust_uri));
+        assert!(response.contains(&usage_uri));
+        assert_eq!(response.matches("\"newText\":\"account_id\"").count(), 2);
+        assert_eq!(response.matches("\"newText\":\"accountId\"").count(), 1);
+    }
+
+    #[test]
+    fn field_rename_updates_serde_attribute_only_when_needed() {
+        let root = test_root("rename-serde-field");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join("client")).expect("create client");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_file = root.join("src/lib.rs");
+        let rust_source = concat!(
+            "#[derive(Serialize)]\n",
+            "pub struct User {\n",
+            "    pub display_name: String,\n",
+            "}\n",
+            "\n",
+            "#[derive(Serialize)]\n",
+            "#[serde(rename_all = \"camelCase\")]\n",
+            "pub struct Profile {\n",
+            "    pub display_name: String,\n",
+            "}\n",
+        );
+        fs::write(&rust_file, rust_source).expect("write rust source");
+        let rust_uri = path_to_file_uri(&rust_file);
+        let user_usage_uri = path_to_file_uri(&root.join("client/user.ts"));
+        let profile_usage_uri = path_to_file_uri(&root.join("client/profile.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [
+                    {
+                        "id": "field:User:display_name",
+                        "kind": "field",
+                        "rust": {
+                            "uri": rust_uri,
+                            "range": {
+                                "start": { "line": 2, "character": 8 },
+                                "end": { "line": 2, "character": 20 }
+                            },
+                            "fullRange": {
+                                "start": { "line": 2, "character": 4 },
+                                "end": { "line": 2, "character": 29 }
+                            }
+                        },
+                        "typescript": [{
+                            "uri": user_usage_uri,
+                            "range": {
+                                "start": { "line": 0, "character": 5 },
+                                "end": { "line": 0, "character": 17 }
+                            }
+                        }],
+                        "metadata": {
+                            "rustPath": ["crate", "User", "display_name"],
+                            "tsPath": ["User", "display_name"],
+                            "rustName": "display_name",
+                            "wireName": "display_name",
+                            "tsName": "display_name"
+                        }
+                    },
+                    {
+                        "id": "field:Profile:display_name",
+                        "kind": "field",
+                        "rust": {
+                            "uri": rust_uri,
+                            "range": {
+                                "start": { "line": 8, "character": 8 },
+                                "end": { "line": 8, "character": 20 }
+                            },
+                            "fullRange": {
+                                "start": { "line": 8, "character": 4 },
+                                "end": { "line": 8, "character": 29 }
+                            }
+                        },
+                        "typescript": [{
+                            "uri": profile_usage_uri,
+                            "range": {
+                                "start": { "line": 0, "character": 5 },
+                                "end": { "line": 0, "character": 16 }
+                            }
+                        }],
+                        "metadata": {
+                            "rustPath": ["crate", "Profile", "display_name"],
+                            "tsPath": ["Profile", "displayName"],
+                            "rustName": "display_name",
+                            "wireName": "displayName",
+                            "tsName": "displayName"
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let user_response = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/rename",
+                    "params": {
+                        "textDocument": { "uri": user_usage_uri },
+                        "position": { "line": 0, "character": 8 },
+                        "newName": "displayLabel"
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let user_response = user_response
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("user rename response");
+        let user_response = serde_json::to_string(user_response).expect("serialize response");
+        assert!(user_response.contains("#[serde(rename = \\\"displayLabel\\\")]"));
+        assert!(user_response.contains("\"newText\":\"display_label\""));
+
+        let profile_response = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/rename",
+                    "params": {
+                        "textDocument": { "uri": profile_usage_uri },
+                        "position": { "line": 0, "character": 8 },
+                        "newName": "displayLabel"
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let profile_response = profile_response
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("profile rename response");
+        let profile_response = serde_json::to_string(profile_response).expect("serialize response");
+        assert!(!profile_response.contains("#[serde(rename"));
+        assert!(profile_response.contains("\"newText\":\"display_label\""));
+        assert!(profile_response.contains("\"newText\":\"displayLabel\""));
     }
 
     #[test]

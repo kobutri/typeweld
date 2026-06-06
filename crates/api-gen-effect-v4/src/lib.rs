@@ -328,6 +328,7 @@ impl SymbolGraph {
                     field,
                     path_with(&endpoint.rust_path, &[&field.rust_name]),
                     path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    sibling_field_names(&endpoint.request.path_params, field),
                 ));
             }
             for field in &endpoint.request.query_params {
@@ -337,6 +338,7 @@ impl SymbolGraph {
                     field,
                     path_with(&endpoint.rust_path, &[&field.rust_name]),
                     path_with(&endpoint.ts_path, &[&field.ts_name]),
+                    sibling_field_names(&endpoint.request.query_params, field),
                 ));
             }
         }
@@ -359,6 +361,7 @@ impl SymbolGraph {
                         field,
                         path_with(&error.rust_path, &[&variant.rust_name, &field.rust_name]),
                         path_from(&[&class_name, &field.ts_name]),
+                        sibling_field_names(&variant.fields, field),
                     ));
                 }
             }
@@ -430,6 +433,12 @@ struct SymbolMetadata {
     rename_placeholder: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reserved_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rust_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wire_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -487,6 +496,9 @@ fn endpoint_symbol(
             allow_unused: endpoint.allow_unused,
             rename_placeholder: Some(function_name),
             reserved_names: sibling_endpoint_names(contract, endpoint),
+            rust_name: Some(endpoint.rust_name.clone()),
+            wire_name: None,
+            ts_name: endpoint.ts_path.last().cloned(),
         },
     }
 }
@@ -501,6 +513,9 @@ fn type_symbol(package: &GeneratedPackage, type_def: &TypeDef) -> LinkedSymbol {
             rust_path: type_def.rust_path.clone(),
             ts_path: vec![type_def.ts_name.clone()],
             rename_placeholder: Some(type_def.ts_name.clone()),
+            rust_name: Some(type_def.rust_name.clone()),
+            wire_name: None,
+            ts_name: Some(type_def.ts_name.clone()),
             ..SymbolMetadata::default()
         },
     }
@@ -516,6 +531,9 @@ fn error_type_symbol(package: &GeneratedPackage, error: &ErrorDef) -> LinkedSymb
             rust_path: error.rust_path.clone(),
             ts_path: vec![error.ts_name.clone()],
             rename_placeholder: Some(error.ts_name.clone()),
+            rust_name: Some(error.rust_name.clone()),
+            wire_name: None,
+            ts_name: Some(error.ts_name.clone()),
             ..SymbolMetadata::default()
         },
     }
@@ -541,6 +559,10 @@ fn error_variant_symbol(
                 .collect(),
             ts_path: vec![class_name.clone()],
             rename_placeholder: Some(class_name),
+            reserved_names: sibling_error_variant_names(error, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.tag.clone()),
+            ts_name: Some(error_variant_class_name(error, variant)),
             ..SymbolMetadata::default()
         },
     }
@@ -562,6 +584,10 @@ fn error_tag_symbol(
             rust_path: path_with(&error.rust_path, &[&variant.rust_name]),
             ts_path: path_from(&[&class_name, &variant.tag]),
             rename_placeholder: Some(variant.tag.clone()),
+            reserved_names: sibling_error_variant_names(error, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.tag.clone()),
+            ts_name: Some(variant.tag.clone()),
             ..SymbolMetadata::default()
         },
     }
@@ -573,6 +599,7 @@ fn field_symbol(
     field: &Field,
     rust_path: Vec<String>,
     ts_path: Vec<String>,
+    reserved_names: Vec<String>,
 ) -> LinkedSymbol {
     LinkedSymbol {
         id: field.id.as_str().to_owned(),
@@ -583,6 +610,10 @@ fn field_symbol(
             rust_path,
             ts_path,
             rename_placeholder: Some(field.ts_name.clone()),
+            reserved_names,
+            rust_name: Some(field.rust_name.clone()),
+            wire_name: Some(field.wire_name.clone()),
+            ts_name: Some(field.ts_name.clone()),
             ..SymbolMetadata::default()
         },
     }
@@ -602,12 +633,13 @@ fn collect_type_shape_symbols(
                     field,
                     path_with(&type_def.rust_path, &[&field.rust_name]),
                     path_from(&[&type_def.ts_name, &field.ts_name]),
+                    sibling_field_names(fields, field),
                 ));
             }
         }
         TypeShape::Enum(EnumShape { variants }) => {
             for variant in variants {
-                symbols.push(enum_variant_symbol(package, type_def, variant));
+                symbols.push(enum_variant_symbol(package, type_def, variant, variants));
                 for field in &variant.fields {
                     symbols.push(field_symbol(
                         "field",
@@ -615,6 +647,7 @@ fn collect_type_shape_symbols(
                         field,
                         path_with(&type_def.rust_path, &[&variant.rust_name, &field.rust_name]),
                         path_from(&[&type_def.ts_name, &variant.wire_name, &field.ts_name]),
+                        sibling_field_names(&variant.fields, field),
                     ));
                 }
             }
@@ -633,6 +666,7 @@ fn enum_variant_symbol(
     package: &GeneratedPackage,
     type_def: &TypeDef,
     variant: &EnumVariant,
+    variants: &[EnumVariant],
 ) -> LinkedSymbol {
     LinkedSymbol {
         id: variant.id.as_str().to_owned(),
@@ -643,6 +677,10 @@ fn enum_variant_symbol(
             rust_path: path_with(&type_def.rust_path, &[&variant.rust_name]),
             ts_path: path_from(&[&type_def.ts_name, &variant.wire_name]),
             rename_placeholder: Some(variant.wire_name.clone()),
+            reserved_names: sibling_enum_variant_names(variants, variant),
+            rust_name: Some(variant.rust_name.clone()),
+            wire_name: Some(variant.wire_name.clone()),
+            ts_name: Some(variant.wire_name.clone()),
             ..SymbolMetadata::default()
         },
     }
@@ -656,7 +694,60 @@ fn sibling_endpoint_names(contract: &ApiContract, endpoint: &Endpoint) -> Vec<St
         .filter(|candidate| {
             candidate.id != endpoint.id && endpoint_namespace(candidate) == namespace
         })
-        .map(endpoint_function_name)
+        .flat_map(|candidate| {
+            [
+                endpoint_function_name(candidate),
+                candidate.rust_name.clone(),
+                candidate.ts_path.last().cloned().unwrap_or_default(),
+            ]
+        })
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_field_names(fields: &[Field], field: &Field) -> Vec<String> {
+    let mut names = fields
+        .iter()
+        .filter(|candidate| candidate.id != field.id)
+        .flat_map(|candidate| {
+            [
+                candidate.rust_name.clone(),
+                candidate.wire_name.clone(),
+                candidate.ts_name.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_error_variant_names(error: &ErrorDef, variant: &ErrorVariant) -> Vec<String> {
+    let mut names = error
+        .variants
+        .iter()
+        .filter(|candidate| candidate.id != variant.id)
+        .flat_map(|candidate| {
+            [
+                candidate.rust_name.clone(),
+                candidate.tag.clone(),
+                error_variant_class_name(error, candidate),
+            ]
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn sibling_enum_variant_names(variants: &[EnumVariant], variant: &EnumVariant) -> Vec<String> {
+    let mut names = variants
+        .iter()
+        .filter(|candidate| candidate.id != variant.id)
+        .flat_map(|candidate| [candidate.rust_name.clone(), candidate.wire_name.clone()])
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();
@@ -691,7 +782,7 @@ fn generated_locations(
                 name_range: Some(range),
                 full_range: Some(range),
                 generated: true,
-                renamable: Some(true),
+                renamable: Some(false),
             }
         })
         .collect()
@@ -3425,9 +3516,15 @@ export * from "./layer.js"
             .expect("endpoint ts locations")
             .iter()
             .any(|location| location["generated"] == true
+                && location["renamable"] == false
                 && location["file"]
                     .as_str()
                     .is_some_and(|file| file.ends_with("endpoints.ts"))));
+        assert!(endpoint["metadata"]["reservedNames"]
+            .as_array()
+            .expect("endpoint reserved names")
+            .iter()
+            .any(|name| name.as_str() == Some("createUser")));
         assert!(endpoint["typescript"]
             .as_array()
             .expect("endpoint ts locations")
@@ -3452,11 +3549,26 @@ export * from "./layer.js"
             find_symbol(symbols, "fixture:field:User:displayName")["kind"],
             "field"
         );
+        assert!(
+            find_symbol(symbols, "fixture:field:User:displayName")["metadata"]["reservedNames"]
+                .as_array()
+                .expect("field reserved names")
+                .iter()
+                .any(|name| name.as_str() == Some("id"))
+        );
         assert_eq!(
             find_symbol(symbols, "fixture:error:GetUserError:UserNotFound")["kind"],
             "errorVariant"
         );
-        assert!(symbols.iter().any(|symbol| symbol["kind"] == "errorTag"));
+        let error_tag = symbols
+            .iter()
+            .find(|symbol| symbol["kind"] == "errorTag")
+            .expect("error tag symbol");
+        assert!(error_tag["metadata"]["reservedNames"]
+            .as_array()
+            .expect("error tag reserved names")
+            .iter()
+            .any(|name| name.as_str() == Some("PermissionDenied")));
         for symbol in symbols {
             assert!(
                 !symbol["typescript"]
