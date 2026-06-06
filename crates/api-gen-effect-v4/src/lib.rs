@@ -2144,6 +2144,28 @@ const fn primitive_is_unsafe_integer(primitive: Primitive) -> bool {
 }
 
 fn render_external(external: &ExternalType) -> String {
+    if external_rust_path_is(external, &["uuid", "Uuid"]) {
+        return render_branded_string_schema("Uuid", "Schema.check(Schema.isUUID())");
+    }
+    if external_rust_path_is(external, &["chrono", "DateTime", "Utc"]) {
+        return render_branded_string_schema(
+            "DateTimeUtc",
+            "Schema.refine((value): value is string => Schema.decodeUnknownOption(Schema.DateTimeUtcFromString)(value)._tag === \"Some\", { expected: \"a valid UTC date-time string\" })",
+        );
+    }
+    if external_rust_path_is(external, &["rust_decimal", "Decimal"]) {
+        return render_branded_string_schema(
+            "Decimal",
+            "Schema.check(Schema.isPattern(/^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$/))",
+        );
+    }
+    if external_rust_path_is(external, &["serde_json", "Value"]) {
+        return "Schema.Json".to_owned();
+    }
+    if external_rust_path_is(external, &["bytes", "Bytes"]) {
+        return render_branded_string_schema("Bytes", "Schema.check(Schema.isBase64())");
+    }
+
     if external.encoded_ts_name == external.decoded_ts_name {
         format!(
             "Schema.declare<{}>((value): value is {} => true)",
@@ -2155,6 +2177,23 @@ fn render_external(external: &ExternalType) -> String {
             external.decoded_ts_name, external.decoded_ts_name
         )
     }
+}
+
+fn render_branded_string_schema(brand: &str, validation: &str) -> String {
+    format!(
+        "Schema.String.pipe({validation}, Schema.brand({brand}))",
+        brand = ts_string(brand)
+    )
+}
+
+fn external_rust_path_is(external: &ExternalType, expected: &[&str]) -> bool {
+    external.rust_path.len() == expected.len()
+        && external
+            .rust_path
+            .iter()
+            .map(String::as_str)
+            .zip(expected.iter().copied())
+            .all(|(actual, expected)| actual == expected)
 }
 
 fn render_indent(width: usize) -> String {
@@ -2502,6 +2541,52 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         let unsafe_endpoints = render_endpoints_with_options(&contract, &unsafe_number_options);
         assert!(unsafe_endpoints.contains("readonly id: number;"));
         assert!(unsafe_endpoints.contains("): Effect.Effect<number, ApiClientError, ServerApi> =>"));
+    }
+
+    #[test]
+    fn renders_standard_external_schemas_with_validation() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            types: vec![
+                external_type("Uuid", &["uuid", "Uuid"], "string", "Uuid"),
+                external_type(
+                    "DateTimeUtc",
+                    &["chrono", "DateTime", "Utc"],
+                    "string",
+                    "DateTimeUtc",
+                ),
+                external_type("Decimal", &["rust_decimal", "Decimal"], "string", "Decimal"),
+                external_type(
+                    "JsonValue",
+                    &["serde_json", "Value"],
+                    "unknown",
+                    "JsonValue",
+                ),
+                external_type("Bytes", &["bytes", "Bytes"], "string", "Bytes"),
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_schemas(&contract);
+
+        assert!(rendered.contains(
+            "export const Uuid = Schema.String.pipe(Schema.check(Schema.isUUID()), Schema.brand(\"Uuid\"))"
+        ));
+        assert!(rendered.contains("export const DateTimeUtc = Schema.String.pipe("));
+        assert!(rendered.contains("Schema.DateTimeUtcFromString"));
+        assert!(rendered.contains("Schema.brand(\"DateTimeUtc\")"));
+        assert!(rendered.contains(
+            "export const Decimal = Schema.String.pipe(Schema.check(Schema.isPattern(/^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$/)), Schema.brand(\"Decimal\"))"
+        ));
+        assert!(rendered.contains("export const JsonValue = Schema.Json"));
+        assert!(rendered.contains(
+            "export const Bytes = Schema.String.pipe(Schema.check(Schema.isBase64()), Schema.brand(\"Bytes\"))"
+        ));
+        assert!(!rendered.contains("Schema.declare<Uuid>"));
+        assert!(!rendered.contains("Schema.declare<DateTimeUtc>"));
+        assert!(!rendered.contains("Schema.declare<Decimal>"));
+        assert!(!rendered.contains("Schema.declare<JsonValue>"));
+        assert!(!rendered.contains("Schema.declare<Bytes>"));
     }
 
     #[test]
@@ -3115,6 +3200,28 @@ export namespace users {
             rust_name: name.to_owned(),
             ts_name: name.to_owned(),
             shape: TypeShape::Primitive(Primitive::String),
+            source: source(),
+        }
+    }
+
+    fn external_type(
+        ts_name: &str,
+        rust_path: &[&str],
+        encoded_ts_name: &str,
+        decoded_ts_name: &str,
+    ) -> TypeDef {
+        TypeDef {
+            id: symbol("external", rust_path),
+            rust_path: rust_path.iter().map(|part| (*part).to_owned()).collect(),
+            rust_name: rust_path.last().expect("external rust path").to_string(),
+            ts_name: ts_name.to_owned(),
+            shape: TypeShape::External(ExternalType {
+                rust_path: rust_path.iter().map(|part| (*part).to_owned()).collect(),
+                ts_import: "@api/external".to_owned(),
+                ts_name: ts_name.to_owned(),
+                encoded_ts_name: encoded_ts_name.to_owned(),
+                decoded_ts_name: decoded_ts_name.to_owned(),
+            }),
             source: source(),
         }
     }

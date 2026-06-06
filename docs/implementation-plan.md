@@ -144,13 +144,13 @@ Defaults:
 | `i8`, `i16`, `i32`, `u8`, `u16`, `u32` | `number` | `number` |
 | `i64`, `u64`, `i128`, `u128`, `usize`, `isize` | `string` | `bigint` |
 | `uuid::Uuid` | `string` | branded string |
-| `chrono::DateTime<Utc>` | `string` | branded ISO string initially |
+| `chrono::DateTime<Utc>` | `string` | branded ISO string (`DateTimeUtc`) initially |
 | `rust_decimal::Decimal` | `string` | branded decimal string initially |
 | `Option<T>` | `T | null` | `T | null` |
 | `Option<T>` with Serde omit-if-none behavior | optional property | optional property |
 | `Vec<T>` | `ReadonlyArray<T>` | `ReadonlyArray<T>` |
 | `HashMap<String, V>` | `Record<string, V>` | `Record<string, V>` |
-| JSON bytes | base64 string | branded base64 string |
+| `bytes::Bytes` JSON bytes | base64 string | branded base64 string (`Bytes`) |
 | binary endpoint bytes | `Uint8Array` / `Blob` | `Uint8Array` / `Blob` |
 | newtype struct | underlying encoded type | branded decoded type |
 | `serde_json::Value` | `JsonValue` | `JsonValue` |

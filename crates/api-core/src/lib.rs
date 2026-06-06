@@ -905,7 +905,7 @@ impl ApiType for uuid::Uuid {
 
 impl ApiType for chrono::DateTime<chrono::Utc> {
     const RUST_NAME: &'static str = "DateTimeUtc";
-    const TS_NAME: &'static str = "Date";
+    const TS_NAME: &'static str = "DateTimeUtc";
 
     fn rust_path() -> Vec<String> {
         vec!["chrono".to_owned(), "DateTime".to_owned(), "Utc".to_owned()]
@@ -914,12 +914,12 @@ impl ApiType for chrono::DateTime<chrono::Utc> {
     fn type_ref() -> TypeRef {
         TypeRef {
             id: SymbolId::from_parts("external", &["chrono", "DateTime", "Utc"]),
-            name: "Date".to_owned(),
+            name: "DateTimeUtc".to_owned(),
         }
     }
 
     fn type_def() -> TypeDef {
-        external_type_def::<Self>("@api/external", "Date", "string", "Date")
+        external_type_def::<Self>("@api/external", "DateTimeUtc", "string", "DateTimeUtc")
     }
 }
 
@@ -959,6 +959,25 @@ impl ApiType for serde_json::Value {
 
     fn type_def() -> TypeDef {
         external_type_def::<Self>("@api/external", "JsonValue", "unknown", "JsonValue")
+    }
+}
+
+impl ApiType for bytes::Bytes {
+    const RUST_NAME: &'static str = "Bytes";
+
+    fn rust_path() -> Vec<String> {
+        vec!["bytes".to_owned(), "Bytes".to_owned()]
+    }
+
+    fn type_ref() -> TypeRef {
+        TypeRef {
+            id: SymbolId::from_parts("external", &["bytes", "Bytes"]),
+            name: "Bytes".to_owned(),
+        }
+    }
+
+    fn type_def() -> TypeDef {
+        external_type_def::<Self>("@api/external", "Bytes", "string", "Bytes")
     }
 }
 
@@ -1116,13 +1135,23 @@ mod tests {
         let TypeShape::External(decimal) = rust_decimal::Decimal::type_def().shape else {
             panic!("expected external decimal mapping");
         };
+        let TypeShape::External(json) = serde_json::Value::type_def().shape else {
+            panic!("expected external json mapping");
+        };
+        let TypeShape::External(bytes) = bytes::Bytes::type_def().shape else {
+            panic!("expected external bytes mapping");
+        };
 
         assert_eq!(uuid.encoded_ts_name, "string");
         assert_eq!(uuid.decoded_ts_name, "Uuid");
         assert_eq!(date.encoded_ts_name, "string");
-        assert_eq!(date.decoded_ts_name, "Date");
+        assert_eq!(date.decoded_ts_name, "DateTimeUtc");
         assert_eq!(decimal.encoded_ts_name, "string");
         assert_eq!(decimal.decoded_ts_name, "Decimal");
+        assert_eq!(json.encoded_ts_name, "unknown");
+        assert_eq!(json.decoded_ts_name, "JsonValue");
+        assert_eq!(bytes.encoded_ts_name, "string");
+        assert_eq!(bytes.decoded_ts_name, "Bytes");
     }
 
     #[test]

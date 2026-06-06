@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 api-ir = { path = "../api-ir" }
+bytes = { version = "1.11", default-features = false, features = ["serde"] }
 chrono = { version = "0.4", default-features = false }
 paste = "1.0"
 rust_decimal = { version = "1.36", default-features = false }

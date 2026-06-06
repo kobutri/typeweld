@@ -449,7 +449,7 @@ Acceptance criteria:
 - `i64` no longer renders as `Schema.Number` by default.
 - Request encoding and response decoding preserve large integers.
 
-### D2. Replace permissive external schemas
+### D2. Replace permissive external schemas [done]
 
 Goal: validate important wire types.
 
