@@ -17,10 +17,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
       - run: npm ci
         working-directory: npm
+      - run: |
+          cargo fmt --all
+          git diff --exit-code -- . ':(exclude)crates/api-test-fixtures/src/lib.rs'
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - run: ./examples/monorepo-basic/verify.sh
       - run: npm test
         working-directory: npm

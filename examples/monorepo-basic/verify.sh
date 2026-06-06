@@ -17,23 +17,13 @@ echo "2. Emitting the Rust API contract JSON"
 mkdir -p target/api-contract
 cargo run -q -p monorepo-basic > target/api-contract/server-api.json
 
-echo "3. Generating the hidden TypeScript package"
-cargo run -q -p api-collector --bin api -- gen \
-  --contract target/api-contract/server-api.json \
-  --target-dir target
-
-echo "4. Scanning TypeScript Effect usages"
-cargo run -q -p api-collector --bin api -- check-usages \
-  --contract target/api-contract/server-api.json \
-  --out target/api-contract/graph/effect-usage-index.json \
-  --ts-dir examples/monorepo-basic/app/src
-
-echo "5. Verifying generated files are current"
+echo "3. Running the full API check workflow"
 cargo run -q -p api-collector --bin api -- check \
   --contract target/api-contract/server-api.json \
-  --target-dir target
+  --target-dir target \
+  --ts-dir examples/monorepo-basic/app/src
 
-echo "6. Typechecking the TypeScript app against the generated package"
+echo "4. Typechecking the TypeScript app against the generated package"
 npm --prefix examples/monorepo-basic/app run typecheck
 
 echo "monorepo-basic works"

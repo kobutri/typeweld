@@ -441,7 +441,7 @@ fn generated_typecheck_tsconfig(packages: &[GeneratedPackage]) -> String {
     let mut paths = Vec::new();
     let mut include = Vec::new();
     for package in packages {
-        let package_dir = normalize_path(&package.package_dir);
+        let package_dir = normalize_path(&absolute_repo_path(&package.package_dir));
         let package_name = &package.tsconfig_paths.package_name;
         paths.push(format!(
             "      {}: [{}]",
@@ -472,10 +472,18 @@ fn generated_typecheck_tsconfig(packages: &[GeneratedPackage]) -> String {
         json_string(&format!("{runtime_dir}/*"))
     ));
     format!(
-        "{{\n  \"compilerOptions\": {{\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"compilerOptions\": {{\n    \"baseUrl\": \".\",\n    \"composite\": false,\n    \"exactOptionalPropertyTypes\": true,\n    \"lib\": [\"DOM\", \"ES2022\", \"ESNext.Disposable\"],\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"noEmit\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"skipLibCheck\": true,\n    \"strict\": true,\n    \"target\": \"ES2022\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\n{}\n  ]\n}}\n",
         paths.join(",\n"),
         include.join(",\n"),
     )
+}
+
+fn absolute_repo_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root().join(path)
+    }
 }
 
 fn write_packages_tsconfig_paths(
@@ -1698,7 +1706,11 @@ fn normalize_path(path: &Path) -> String {
 }
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("api-collector is under crates/")
+        .to_path_buf()
 }
 
 #[derive(Debug)]

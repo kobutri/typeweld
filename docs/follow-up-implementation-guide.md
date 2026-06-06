@@ -737,7 +737,7 @@ Acceptance criteria:
 - Deny mode fails builds only for configured hard failures.
 - Diagnostics point to the exact regeneration command.
 
-### G3. Add CI workflows
+### G3. Add CI workflows [done]
 
 Goal: prevent regressions.
 

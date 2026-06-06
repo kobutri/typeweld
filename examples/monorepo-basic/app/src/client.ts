@@ -4,13 +4,13 @@
 // directory. `@workspace/server-api` is generated from the Rust contract and
 // resolved through `app/tsconfig.json`.
 
-import { Effect } from "effect"
+import { Effect } from "@rust-ts-integration/effect-runtime/compat"
 import { ServerApi, users } from "@workspace/server-api"
 
 // Application code writes ordinary functions around generated endpoint
 // accessors. The generated `users.getUser` signature is derived from the Rust
 // `get_user(Path<i64>) -> Result<Json<User>, UserError>` signature.
-export const loadUserDisplayName = (id: number) =>
+export const loadUserDisplayName = (id: bigint) =>
   Effect.gen(function* () {
     // `yield*` is important: this is a strong usage. The unused endpoint
     // scanner can see that the endpoint Effect is actually composed into a
@@ -24,7 +24,7 @@ export const loadUserDisplayName = (id: number) =>
 
 // Domain errors are handled with normal Effect error-channel tools. They are
 // not thrown promises and they are not wrapped in a success-channel Result.
-export const loadUserOrGuest = (id: number) =>
+export const loadUserOrGuest = (id: bigint) =>
   loadUserDisplayName(id).pipe(
     Effect.catchTag("UserNotFound", () => Effect.succeed("Guest")),
   )
@@ -36,7 +36,7 @@ export const createUser = (displayName: string) =>
 
 // The generated service is supplied once at the edge of the program. Tests can
 // use `ServerApi.mock`; production code usually uses `ServerApi.layer`.
-export const program = loadUserOrGuest(1).pipe(
+export const program = loadUserOrGuest(1n).pipe(
   Effect.provide(
     ServerApi.layer({
       baseUrl: "http://localhost:3000",

@@ -9,6 +9,12 @@
       "@rust-ts-integration/effect-runtime": [
         "../../../npm/effect-runtime/src/index.ts"
       ],
+      "@rust-ts-integration/effect-runtime/compat": [
+        "../../../npm/effect-runtime/src/compat.ts"
+      ],
+      "@rust-ts-integration/effect-runtime/*": [
+        "../../../npm/effect-runtime/src/*"
+      ],
       "@workspace/server-api": [
         "../../../target/api-contract/effect-v4/packages/_workspace_server-api/index.ts"
       ],
