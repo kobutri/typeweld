@@ -660,7 +660,7 @@ Acceptance criteria:
 - TS backend resolves generated imports.
 - User go-to-definition does not land in generated files by default.
 
-### F5. Implement semantic cross-language definition and references
+### F5. Implement semantic cross-language definition and references [done]
 
 Goal: make navigation work without hand-authored graph fixtures.
 

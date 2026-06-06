@@ -151,12 +151,14 @@ struct AsyncLspServer {
     client_requests: HashMap<String, Vec<BackendRequestKey>>,
     backend_requests_by_client_id: HashMap<String, BackendRequestKey>,
     backend_request_client_ids: HashMap<BackendRequestKey, Value>,
+    reference_requests: HashMap<String, ReferenceRequest>,
     workspace_symbol_requests: HashMap<String, WorkspaceSymbolRequest>,
     pending_shutdown: Option<PendingShutdown>,
     semantic_tokens: Option<MergedSemanticTokens>,
     exit_received: bool,
     client_eof: bool,
     next_backend_client_id: u64,
+    next_reference_request_id: u64,
 }
 
 impl AsyncLspServer {
@@ -176,12 +178,14 @@ impl AsyncLspServer {
             client_requests: HashMap::new(),
             backend_requests_by_client_id: HashMap::new(),
             backend_request_client_ids: HashMap::new(),
+            reference_requests: HashMap::new(),
             workspace_symbol_requests: HashMap::new(),
             pending_shutdown: None,
             semantic_tokens: None,
             exit_received: false,
             client_eof: false,
             next_backend_client_id: 1,
+            next_reference_request_id: 1,
         }
     }
 
@@ -519,24 +523,59 @@ impl AsyncLspServer {
 
     fn handle_references_request(&mut self, params: Value, id: Value) -> Result<(), String> {
         if let Some((locations, workspace)) = self.cross_language_references_base(&params)? {
+            let mut backend_queries = Vec::new();
             if let Some(kind) = self.route_backend("textDocument/references", &params) {
-                self.forward_request_to_backend(
-                    kind,
-                    "textDocument/references",
-                    params,
-                    id,
-                    PendingRequestKind::References {
-                        local_locations: locations,
-                        workspace: Box::new(workspace),
-                    },
-                    true,
-                )
-            } else {
+                backend_queries.push((kind, params.clone()));
+            }
+            if is_rust_message("textDocument/references", &params) {
+                if let Some(query) = TextPositionQuery::from_lsp_params(&params) {
+                    if let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? {
+                        backend_queries.extend(
+                            graph
+                                .generated_typescript_reference_params(&query, &workspace)
+                                .into_iter()
+                                .map(|params| (BackendKind::TypeScript, params)),
+                        );
+                    }
+                }
+            }
+
+            if backend_queries.is_empty() {
                 self.write_response(id, dedupe_locations(locations, &workspace))
+            } else {
+                let request_id = self.allocate_reference_request_id();
+                self.reference_requests.insert(
+                    request_id.clone(),
+                    ReferenceRequest {
+                        client_id: id.clone(),
+                        workspace,
+                        remaining: backend_queries.len(),
+                        locations,
+                    },
+                );
+                for (kind, params) in backend_queries {
+                    self.forward_request_to_backend(
+                        kind,
+                        "textDocument/references",
+                        params,
+                        id.clone(),
+                        PendingRequestKind::References {
+                            request_id: request_id.clone(),
+                        },
+                        true,
+                    )?;
+                }
+                Ok(())
             }
         } else {
             self.route_or_default_response("textDocument/references", params, id, json!([]))
         }
+    }
+
+    fn allocate_reference_request_id(&mut self) -> String {
+        let id = self.next_reference_request_id;
+        self.next_reference_request_id += 1;
+        format!("references:{id}")
     }
 
     fn handle_workspace_symbol_request(&mut self, params: Value, id: Value) -> Result<(), String> {
@@ -753,20 +792,8 @@ impl AsyncLspServer {
                 raw["id"] = pending.client_id;
                 self.emit(raw)
             }
-            PendingRequestKind::References {
-                mut local_locations,
-                workspace,
-            } => {
-                local_locations.extend(
-                    raw.get("result")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-                self.write_response(
-                    pending.client_id,
-                    dedupe_locations(local_locations, workspace.as_ref()),
-                )
+            PendingRequestKind::References { request_id } => {
+                self.finish_reference_backend(&request_id, raw)
             }
             PendingRequestKind::WorkspaceSymbols { request_id } => {
                 self.finish_workspace_symbol_backend(kind, &request_id, raw)
@@ -798,6 +825,30 @@ impl AsyncLspServer {
                 .expect("workspace symbol request exists");
             request.results.sort_by_key(workspace_symbol_sort_key);
             self.write_response(request.client_id, Value::Array(request.results))?;
+        }
+        Ok(())
+    }
+
+    fn finish_reference_backend(&mut self, request_id: &str, raw: Value) -> Result<(), String> {
+        let Some(request) = self.reference_requests.get_mut(request_id) else {
+            return Ok(());
+        };
+        request.locations.extend(
+            raw.get("result")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        request.remaining = request.remaining.saturating_sub(1);
+        if request.remaining == 0 {
+            let request = self
+                .reference_requests
+                .remove(request_id)
+                .expect("reference request exists");
+            self.write_response(
+                request.client_id,
+                dedupe_locations(request.locations, &request.workspace),
+            )?;
         }
         Ok(())
     }
@@ -863,7 +914,7 @@ impl AsyncLspServer {
             if let Some(pending) = self.pending_requests.remove(&key) {
                 self.untrack_client_request(&pending.client_id, &key);
                 match pending.kind {
-                    PendingRequestKind::Forward | PendingRequestKind::References { .. } => {
+                    PendingRequestKind::Forward => {
                         self.write_error(
                             pending.client_id,
                             -32_003,
@@ -873,6 +924,9 @@ impl AsyncLspServer {
                                 pending.method
                             ),
                         )?;
+                    }
+                    PendingRequestKind::References { request_id } => {
+                        self.finish_reference_backend(&request_id, json!({ "result": [] }))?;
                     }
                     PendingRequestKind::WorkspaceSymbols { request_id } => {
                         self.finish_workspace_symbol_backend(
@@ -1205,13 +1259,8 @@ struct PendingRequest {
 #[derive(Debug)]
 enum PendingRequestKind {
     Forward,
-    References {
-        local_locations: Vec<Value>,
-        workspace: Box<WorkspaceConfig>,
-    },
-    WorkspaceSymbols {
-        request_id: String,
-    },
+    References { request_id: String },
+    WorkspaceSymbols { request_id: String },
     Shutdown,
 }
 
@@ -1226,6 +1275,14 @@ struct WorkspaceSymbolRequest {
     client_id: Value,
     remaining: BTreeSet<BackendKind>,
     results: Vec<Value>,
+}
+
+#[derive(Debug)]
+struct ReferenceRequest {
+    client_id: Value,
+    workspace: WorkspaceConfig,
+    remaining: usize,
+    locations: Vec<Value>,
 }
 
 #[derive(Debug)]
@@ -1332,6 +1389,26 @@ impl SymbolGraph {
         }
 
         None
+    }
+
+    fn generated_typescript_reference_params(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Vec<Value> {
+        for symbol in &self.symbols {
+            if !symbol.rust.matches(query, workspace) {
+                continue;
+            }
+            return symbol
+                .typescript
+                .iter()
+                .filter(|location| location.generated)
+                .filter_map(|location| location.to_reference_params(workspace, query))
+                .collect();
+        }
+
+        Vec::new()
     }
 
     fn hover(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> Option<Value> {
@@ -1635,6 +1712,22 @@ impl GraphLocation {
             "uri": self.resolved_uri(workspace).unwrap_or_default(),
             "range": self.range,
         })
+    }
+
+    fn to_reference_params(
+        &self,
+        workspace: &WorkspaceConfig,
+        query: &TextPositionQuery,
+    ) -> Option<Value> {
+        Some(json!({
+            "textDocument": {
+                "uri": self.resolved_uri(workspace)?,
+            },
+            "position": self.range.start,
+            "context": {
+                "includeDeclaration": query.include_declaration,
+            },
+        }))
     }
 
     fn resolved_uri(&self, workspace: &WorkspaceConfig) -> Option<String> {
@@ -3710,6 +3803,46 @@ mod tests {
     }
 
     #[test]
+    fn rust_references_use_generated_typescript_semantics_and_hide_generated_files() {
+        let root = test_root("semantic-cross-references");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("crates/server/src")).expect("create rust dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_backend_config(
+            &root,
+            SEMANTIC_REFERENCES_BACKEND,
+            SEMANTIC_REFERENCES_BACKEND,
+            None,
+        );
+        let contract = api_test_fixtures::basic_contract();
+        let package = api_gen_effect_v4::render_generated_package(&contract, &root.join("target"));
+        write_generated_package_files(&package);
+        let symbol_graph = api_gen_effect_v4::render_symbol_graph(&contract, &package);
+        let graph_value: Value = serde_json::from_str(&symbol_graph).expect("parse graph");
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            symbol_graph,
+        )
+        .expect("write symbol graph");
+        let endpoint_symbol = graph_symbol(&graph_value, "fixture:endpoint:getUser");
+        let field_symbol = graph_symbol(&graph_value, "fixture:field:User:displayName");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                reference_request_for_symbol(&root, endpoint_symbol, 2),
+                reference_request_for_symbol(&root, field_symbol, 3),
+                shutdown_request(4),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+
+        assert_semantic_reference_response(&messages, 2, &root);
+        assert_semantic_reference_response(&messages, 3, &root);
+    }
+
+    #[test]
     fn redirects_generated_typescript_definition_to_rust_source() {
         let root = test_root("cross-definition");
         let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
@@ -4397,6 +4530,70 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
+    fn write_generated_package_files(package: &api_gen_effect_v4::GeneratedPackage) {
+        for file in &package.files {
+            let path = package.package_dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create generated package dir");
+            }
+            fs::write(path, &file.contents).expect("write generated package file");
+        }
+    }
+
+    fn graph_symbol<'a>(graph: &'a Value, symbol_id: &str) -> &'a Value {
+        graph["symbols"]
+            .as_array()
+            .expect("symbols array")
+            .iter()
+            .find(|symbol| symbol["id"] == symbol_id)
+            .expect("graph symbol")
+    }
+
+    fn reference_request_for_symbol(root: &Path, symbol: &Value, id: u64) -> String {
+        let rust = &symbol["rust"];
+        let uri = rust
+            .get("uri")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let file = rust["file"].as_str().expect("rust file");
+                path_to_file_uri(&root.join(file))
+            });
+        framed(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": rust["range"]["start"],
+                "context": { "includeDeclaration": true }
+            }
+        }))
+    }
+
+    fn assert_semantic_reference_response(messages: &[Value], id: u64, root: &Path) {
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(id)))
+            .expect("reference response");
+        let result = response["result"].as_array().expect("reference array");
+        let user_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        assert!(
+            result
+                .iter()
+                .any(|location| location["uri"].as_str() == Some(&user_uri)),
+            "expected semantic user location in {result:?}"
+        );
+        assert!(
+            result.iter().all(|location| {
+                location["uri"].as_str().map_or(true, |uri| {
+                    !uri.contains("target/api-contract/effect-v4/packages")
+                })
+            }),
+            "generated locations should be hidden in {result:?}"
+        );
+    }
+
     fn assert_output_order(output: &str, first: &str, second: &str) {
         let first_index = output.find(first).expect("first output marker");
         let second_index = output.find(second).expect("second output marker");
@@ -5043,6 +5240,65 @@ while True:
         })
     elif method == "textDocument/semanticTokens/full":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"data":[0,0,4,0,1]}})
+    elif method == "shutdown":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
+    elif method == "exit":
+        break
+"#;
+
+    const SEMANTIC_REFERENCES_BACKEND: &str = r#"
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if line == "":
+            break
+        name, value = line.split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(content_length))
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+def user_uri_for_generated(uri):
+    return uri.split("/target/")[0] + "/client/use-api.ts"
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "textDocument/references":
+        uri = message["params"]["textDocument"]["uri"]
+        if "/target/api-contract/effect-v4/packages/" in uri:
+            write_message({
+                "jsonrpc":"2.0",
+                "id":message["id"],
+                "result":[
+                    {
+                        "uri":uri,
+                        "range":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}
+                    },
+                    {
+                        "uri":user_uri_for_generated(uri),
+                        "range":{"start":{"line":7,"character":2},"end":{"line":7,"character":9}}
+                    }
+                ]
+            })
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":[]})
     elif method == "shutdown":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":None})
     elif method == "exit":
