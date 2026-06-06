@@ -1,7 +1,7 @@
 //! Effect v4 TypeScript generator backend.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -1419,17 +1419,22 @@ fn write_tracked_error_status_by_code_metadata(writer: &mut TrackedWriter, error
         &format!("{}StatusByCode", error.ts_name),
     );
     writer.push(" = {\n");
-    for variant in &error.variants {
+    for (status, variants) in error_variants_by_status(error) {
         writer.push("  ");
-        writer.push(&variant.status.0.to_string());
-        writer.push(": ");
-        mark_ts_string(
-            writer,
-            error_tag_symbol_id(variant),
-            "errorTag",
-            &variant.tag,
-        );
-        writer.push(",\n");
+        writer.push(&status.to_string());
+        writer.push(": [");
+        for (index, variant) in variants.iter().enumerate() {
+            if index > 0 {
+                writer.push(", ");
+            }
+            mark_ts_string(
+                writer,
+                error_tag_symbol_id(variant),
+                "errorTag",
+                &variant.tag,
+            );
+        }
+        writer.push("],\n");
     }
     writer.push("} as const\n");
 }
@@ -1442,18 +1447,49 @@ fn write_tracked_error_schema_by_status_metadata(writer: &mut TrackedWriter, err
         &format!("{}SchemaByStatus", error.ts_name),
     );
     writer.push(" = {\n");
-    for variant in &error.variants {
+    for (status, variants) in error_variants_by_status(error) {
         writer.push("  ");
-        writer.push(&variant.status.0.to_string());
+        writer.push(&status.to_string());
         writer.push(": ");
-        writer.mark(
-            &variant.id,
-            "errorVariant",
-            &error_variant_class_name(error, variant),
-        );
+        if variants.len() == 1 {
+            let variant = variants[0];
+            writer.mark(
+                &variant.id,
+                "errorVariant",
+                &error_variant_class_name(error, variant),
+            );
+        } else {
+            writer.push("Schema.Union([");
+            for (index, variant) in variants.iter().enumerate() {
+                if index > 0 {
+                    writer.push(", ");
+                }
+                writer.mark(
+                    &variant.id,
+                    "errorVariant",
+                    &error_variant_class_name(error, variant),
+                );
+            }
+            writer.push("])");
+        }
         writer.push(",\n");
     }
     writer.push("} as const\n");
+}
+
+fn error_variants_by_status(error: &ErrorDef) -> BTreeMap<u16, Vec<&ErrorVariant>> {
+    let mut by_status = BTreeMap::<u16, Vec<&ErrorVariant>>::new();
+    for variant in &error.variants {
+        by_status.entry(variant.status.0).or_default().push(variant);
+    }
+    for variants in by_status.values_mut() {
+        variants.sort_by(|left, right| {
+            left.tag
+                .cmp(&right.tag)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+    }
+    by_status
 }
 
 fn write_tracked_error_symbol_metadata(writer: &mut TrackedWriter, error: &ErrorDef) {
@@ -2867,6 +2903,66 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
     }
 
     #[test]
+    fn renders_domain_error_unions_for_variants_sharing_status() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            errors: vec![ErrorDef {
+                id: symbol("error", &["LookupError"]),
+                rust_path: vec!["server".to_owned(), "LookupError".to_owned()],
+                rust_name: "LookupError".to_owned(),
+                ts_name: "LookupError".to_owned(),
+                variants: vec![
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "Missing"]),
+                        rust_name: "Missing".to_owned(),
+                        tag: "Missing".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "message",
+                            "message",
+                            type_ref("String"),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "Hidden"]),
+                        rust_name: "Hidden".to_owned(),
+                        tag: "Hidden".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "message",
+                            "message",
+                            type_ref("String"),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
+                        id: symbol("error_variant", &["LookupError", "RateLimited"]),
+                        rust_name: "RateLimited".to_owned(),
+                        tag: "RateLimited".to_owned(),
+                        status: HttpStatus(429),
+                        fields: Vec::new(),
+                        source: source(),
+                    },
+                ],
+                source: source(),
+            }],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_errors(&contract);
+
+        assert!(rendered.contains(
+            "export const LookupErrorStatusByCode = {\n  404: [\"Hidden\", \"Missing\"],\n  429: [\"RateLimited\"],\n} as const"
+        ));
+        assert!(rendered.contains(
+            "export const LookupErrorSchemaByStatus = {\n  404: Schema.Union([LookupHidden, LookupMissing]),\n  429: LookupRateLimited,\n} as const"
+        ));
+    }
+
+    #[test]
     fn renders_generated_client_error_union() {
         let rendered = render_errors(&ApiContract {
             package_name: "example-api".to_owned(),
@@ -3635,6 +3731,19 @@ export namespace users {
                         source: source(),
                     },
                     ErrorVariant {
+                        id: symbol("error_variant", &["CatalogError", "Hidden"]),
+                        rust_name: "Hidden".to_owned(),
+                        tag: "Hidden".to_owned(),
+                        status: HttpStatus(404),
+                        fields: vec![field(
+                            "reason",
+                            "reason",
+                            string.clone(),
+                            Optionality::Required,
+                        )],
+                        source: source(),
+                    },
+                    ErrorVariant {
                         id: symbol("error_variant", &["CatalogError", "RateLimited"]),
                         rust_name: "RateLimited".to_owned(),
                         tag: "RateLimited".to_owned(),
@@ -3843,6 +3952,7 @@ const handledGet = catalog.getItem({
   at,
 }).pipe(
   Effect.catchTag("NotFound", (error) => Effect.succeed(error.reason)),
+  Effect.catchTag("Hidden", (error) => Effect.succeed(error.reason)),
   Effect.catchTag("Conflict", (error) => Effect.succeed(String(error.itemId))),
 )
 

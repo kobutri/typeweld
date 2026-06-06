@@ -495,7 +495,7 @@ Acceptance criteria:
 - Unary endpoints, domain errors, SSE streams, optional fields, newtypes, external types, and multiple namespaces typecheck.
 - Generated domain errors are catchable under the pinned beta.
 
-### D5. Harden domain error decoding
+### D5. Harden domain error decoding [done]
 
 Goal: decode declared errors exactly.
 
