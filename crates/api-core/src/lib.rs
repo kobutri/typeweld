@@ -420,6 +420,10 @@ pub struct NoContent;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Sse<T>(pub T);
 
+/// Raw binary request or response wrapper.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Binary<T>(pub T);
+
 /// Path extractor marker.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Path<T>(pub T);
@@ -596,6 +600,27 @@ impl ApiType for NoContent {
 }
 
 impl<T: ApiType> ApiType for Sse<T> {
+    const RUST_NAME: &'static str = T::RUST_NAME;
+    const TS_NAME: &'static str = T::TS_NAME;
+
+    fn rust_path() -> Vec<String> {
+        T::rust_path()
+    }
+
+    fn type_ref() -> TypeRef {
+        T::type_ref()
+    }
+
+    fn type_def() -> TypeDef {
+        T::type_def()
+    }
+
+    fn register_types(registry: &mut TypeRegistry) {
+        T::register_types(registry);
+    }
+}
+
+impl<T: ApiType> ApiType for Binary<T> {
     const RUST_NAME: &'static str = T::RUST_NAME;
     const TS_NAME: &'static str = T::TS_NAME;
 

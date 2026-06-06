@@ -13,8 +13,9 @@ This repository is still an MVP implementation.
   repository.
 - Cross-language rename depends on the symbol graph. Missing or stale graph
   entries mean the gateway falls back to the underlying language servers.
-- Binary uploads, binary downloads, WebSocket duplex transports, richer date and
-  decimal decoding, and compatibility-preserving wire renames are future work.
+- Binary upload/download support is raw bytes only; multipart form upload,
+  WebSocket duplex transports, richer date and decimal decoding, and
+  compatibility-preserving wire renames are future work.
 - Generated files are hidden under `target/api-contract` by design. If your
   editor or TypeScript server cannot resolve imports, check `tsconfig` paths and
   rerun `api gen`.

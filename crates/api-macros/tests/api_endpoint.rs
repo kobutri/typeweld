@@ -1,6 +1,6 @@
 use api_core::{
-    ir::{HttpMethod, ResponseShape, Transport},
-    ApiType, Created, Json, Path, Query, Sse,
+    ir::{HttpMethod, RequestBodyTransport, ResponseShape, Transport},
+    ApiType, Binary, Created, Json, Path, Query, Sse,
 };
 
 #[derive(api_macros::ApiType)]
@@ -64,6 +64,25 @@ async fn axum_wrapped_create_user(
 #[api_macros::api(method = "SSE", path = "/axum-users/events")]
 #[allow(dead_code)]
 fn axum_wrapped_user_events() -> Result<api_axum::Sse<User>, GetUserError> {
+    unimplemented!()
+}
+
+#[api_macros::api(method = "GET", path = "/files/{id}")]
+#[allow(dead_code)]
+async fn download_file(id: Path<i64>) -> Result<Binary<bytes::Bytes>, GetUserError> {
+    let _ = id;
+    std::future::ready(()).await;
+    unimplemented!()
+}
+
+#[api_macros::api(method = "POST", path = "/files/{id}")]
+#[allow(dead_code)]
+async fn upload_file(
+    id: Path<i64>,
+    body: Binary<bytes::Bytes>,
+) -> Result<Json<User>, GetUserError> {
+    let _ = (id, body);
+    std::future::ready(()).await;
     unimplemented!()
 }
 
@@ -145,6 +164,36 @@ fn api_endpoint_macro_accepts_axum_sse_wrapper() {
         panic!("expected stream response");
     };
     assert_eq!(item.name, "User");
+}
+
+#[test]
+fn api_endpoint_macro_emits_binary_download_metadata() {
+    let endpoint = __api_endpoint_download_file();
+
+    assert_eq!(endpoint.method, HttpMethod::Get);
+    assert_eq!(endpoint.transport, Transport::BinaryDownload);
+    assert_eq!(endpoint.route.0, "/files/{id}");
+    let ResponseShape::Binary { content_type } = endpoint.response else {
+        panic!("expected binary response");
+    };
+    assert_eq!(content_type, None);
+}
+
+#[test]
+fn api_endpoint_macro_emits_binary_upload_metadata() {
+    let endpoint = __api_endpoint_upload_file();
+
+    assert_eq!(endpoint.method, HttpMethod::Post);
+    assert_eq!(endpoint.transport, Transport::BinaryUpload);
+    assert_eq!(
+        endpoint.request.body_transport,
+        RequestBodyTransport::Binary
+    );
+    assert_eq!(endpoint.request.body.expect("body").name, "Bytes");
+    let ResponseShape::Json(response) = endpoint.response else {
+        panic!("expected json response");
+    };
+    assert_eq!(response.name, "User");
 }
 
 #[test]

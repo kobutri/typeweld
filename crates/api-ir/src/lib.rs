@@ -192,6 +192,13 @@ impl SuccessChannel {
                 status: Some(HttpStatus(200)),
                 body: SuccessBody::Stream(type_ref.clone()),
             },
+            ResponseShape::Binary { content_type } => Self {
+                transport: SuccessTransport::from(transport),
+                status: Some(HttpStatus(200)),
+                body: SuccessBody::Binary {
+                    content_type: content_type.clone(),
+                },
+            },
         }
     }
 }
@@ -305,6 +312,21 @@ pub enum Transport {
     BinaryUpload,
 }
 
+/// Encoding used for the endpoint request body.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum RequestBodyTransport {
+    #[default]
+    Json,
+    Binary,
+}
+
+impl RequestBodyTransport {
+    #[must_use]
+    pub const fn is_json(value: &Self) -> bool {
+        matches!(*value, Self::Json)
+    }
+}
+
 /// Supported HTTP methods for unary HTTP endpoints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum HttpMethod {
@@ -338,6 +360,8 @@ pub struct RequestShape {
     pub path_params: Vec<Field>,
     pub query_params: Vec<Field>,
     pub body: Option<TypeRef>,
+    #[serde(default, skip_serializing_if = "RequestBodyTransport::is_json")]
+    pub body_transport: RequestBodyTransport,
 }
 
 /// Endpoint response shape.
@@ -347,6 +371,7 @@ pub enum ResponseShape {
     Json(TypeRef),
     Created(TypeRef),
     Stream(TypeRef),
+    Binary { content_type: Option<String> },
 }
 
 /// Reference to a type definition.
@@ -569,13 +594,22 @@ mod tests {
     }
 
     #[test]
-    fn unary_and_sse_transports_are_representable() {
-        let transports = [Transport::UnaryHttp, Transport::ServerSentEvents];
+    fn transport_placeholders_are_representable() {
+        let transports = [
+            Transport::UnaryHttp,
+            Transport::ServerSentEvents,
+            Transport::BinaryDownload,
+            Transport::BinaryUpload,
+            Transport::WebSocketDuplex,
+        ];
 
         let json = serde_json::to_string(&transports).expect("serialize transports");
 
         assert!(json.contains("UnaryHttp"));
         assert!(json.contains("ServerSentEvents"));
+        assert!(json.contains("BinaryDownload"));
+        assert!(json.contains("BinaryUpload"));
+        assert!(json.contains("WebSocketDuplex"));
     }
 
     #[test]
@@ -614,7 +648,17 @@ mod tests {
                     "/users/events",
                     HttpMethod::Get,
                     Transport::ServerSentEvents,
-                    ResponseShape::Stream(type_ref(user_id, "User")),
+                    ResponseShape::Stream(type_ref(user_id.clone(), "User")),
+                    error_id.clone(),
+                ),
+                endpoint(
+                    "download_avatar",
+                    "/users/:id/avatar",
+                    HttpMethod::Get,
+                    Transport::BinaryDownload,
+                    ResponseShape::Binary {
+                        content_type: Some("image/png".to_owned()),
+                    },
                     error_id,
                 ),
             ],
@@ -640,6 +684,16 @@ mod tests {
             v2.endpoints[3].success.body,
             SuccessBody::Stream(_)
         ));
+        assert_eq!(
+            v2.endpoints[4].success.transport,
+            SuccessTransport::BinaryDownload
+        );
+        assert_eq!(
+            v2.endpoints[4].success.body,
+            SuccessBody::Binary {
+                content_type: Some("image/png".to_owned())
+            }
+        );
         assert_eq!(
             v2.endpoints[0].effect.requirements,
             vec![EffectRequirement::Service {

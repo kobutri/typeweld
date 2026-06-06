@@ -425,14 +425,14 @@ fn expand_api_endpoint(args: ApiAttr, input: ItemFn) -> syn::Result<proc_macro2:
     let register_ident = format_ident!("__api_register_endpoint_{fn_ident}");
     let descriptor_ident = format_ident!("__api_endpoint_descriptor_{fn_ident}");
     let method = args.method_tokens()?;
-    let transport = args.transport_tokens();
     let route_params = route_params(&args.path);
     let request = endpoint_request(&input.sig.inputs, &route_params)?;
+    let endpoint_return = endpoint_return(&input.sig.output)?;
     args.validate_request_policy(&request, &input.sig)?;
+    args.validate_return_policy(&request, &endpoint_return, &input.sig.output)?;
+    let transport = args.transport_tokens(&request, &endpoint_return);
     let request_shape = request.shape;
     let request_registrations = request.registrations;
-    let endpoint_return = endpoint_return(&input.sig.output)?;
-    args.validate_return_policy(&endpoint_return, &input.sig.output)?;
     let response = endpoint_return.response;
     let errors = endpoint_return.errors;
     let return_registrations = endpoint_return.registrations;
@@ -482,6 +482,7 @@ struct EndpointRequest {
     shape: proc_macro2::TokenStream,
     registrations: Vec<proc_macro2::TokenStream>,
     has_body: bool,
+    is_binary_body: bool,
 }
 
 fn endpoint_request(
@@ -491,6 +492,8 @@ fn endpoint_request(
     let mut path_fields = Vec::new();
     let mut query_fields = Vec::new();
     let mut body = None;
+    let mut body_transport = quote!(::api_core::ir::RequestBodyTransport::Json);
+    let mut is_binary_body = false;
     let mut registrations = Vec::new();
     let mut seen_path_params = Vec::new();
 
@@ -517,18 +520,19 @@ fn endpoint_request(
             query_fields.push(endpoint_field(&name, inner));
             registrations.push(contract_register_type_call(inner));
         } else if let Some(inner) = extractor_inner(input.ty.as_ref(), "Body") {
-            if body.is_some() {
-                return Err(syn::Error::new_spanned(
-                    input,
-                    "#[api] endpoints can only declare one Body<T> extractor",
-                ));
-            }
+            ensure_no_endpoint_body(body.is_some(), input)?;
             body = Some(quote!(Some(<#inner as ::api_core::ApiType>::type_ref())));
             registrations.push(contract_register_type_call(inner));
+        } else if let Some(inner) = extractor_inner(input.ty.as_ref(), "Binary") {
+            ensure_no_endpoint_body(body.is_some(), input)?;
+            validate_binary_bytes_type(inner)?;
+            body = Some(quote!(Some(<#inner as ::api_core::ApiType>::type_ref())));
+            body_transport = quote!(::api_core::ir::RequestBodyTransport::Binary);
+            is_binary_body = true;
         } else {
             return Err(syn::Error::new_spanned(
                 input.ty.as_ref(),
-                "#[api] endpoint parameters must use Path<T>, Query<T>, or Body<T> extractors",
+                "#[api] endpoint parameters must use Path<T>, Query<T>, Body<T>, or Binary<bytes::Bytes> extractors",
             ));
         }
     }
@@ -575,11 +579,23 @@ fn endpoint_request(
                 path_params: vec![#(#path_fields),*],
                 query_params: vec![#(#query_fields),*],
                 body: #body,
+                body_transport: #body_transport,
             }
         },
         registrations,
         has_body,
+        is_binary_body,
     })
+}
+
+fn ensure_no_endpoint_body(has_body: bool, input: &syn::PatType) -> syn::Result<()> {
+    if has_body {
+        return Err(syn::Error::new_spanned(
+            input,
+            "#[api] endpoints can only declare one request body extractor",
+        ));
+    }
+    Ok(())
 }
 
 fn contract_register_type_call(ty: &Type) -> proc_macro2::TokenStream {
@@ -673,6 +689,7 @@ struct EndpointReturn {
     errors: Vec<proc_macro2::TokenStream>,
     registrations: Vec<proc_macro2::TokenStream>,
     is_stream: bool,
+    is_binary: bool,
 }
 
 fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
@@ -682,6 +699,7 @@ fn endpoint_return(output: &ReturnType) -> syn::Result<EndpointReturn> {
             errors: Vec::new(),
             registrations: Vec::new(),
             is_stream: false,
+            is_binary: false,
         }),
         ReturnType::Type(_, ty) => return_for_type(ty),
     }
@@ -694,6 +712,20 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             errors: Vec::new(),
             registrations: Vec::new(),
             is_stream: false,
+            is_binary: false,
+        });
+    }
+
+    if let Some(inner) = extractor_inner(ty, "Binary") {
+        validate_binary_bytes_type(inner)?;
+        return Ok(EndpointReturn {
+            response: quote! {
+                ::api_core::ir::ResponseShape::Binary { content_type: None }
+            },
+            errors: Vec::new(),
+            registrations: Vec::new(),
+            is_stream: false,
+            is_binary: true,
         });
     }
 
@@ -705,6 +737,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
             is_stream: false,
+            is_binary: false,
         });
     }
 
@@ -716,6 +749,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
             is_stream: false,
+            is_binary: false,
         });
     }
 
@@ -727,6 +761,7 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             errors: Vec::new(),
             registrations: vec![contract_register_type_call(inner)],
             is_stream: true,
+            is_binary: false,
         });
     }
 
@@ -740,12 +775,13 @@ fn return_for_type(ty: &Type) -> syn::Result<EndpointReturn> {
             errors: vec![quote!(<#err as ::api_core::ApiError>::error_ref())],
             registrations,
             is_stream: ok_return.is_stream,
+            is_binary: ok_return.is_binary,
         });
     }
 
     Err(syn::Error::new_spanned(
         ty,
-        "#[api] endpoint returns must be Json<T>, Created<T>, NoContent, or Result of those",
+        "#[api] endpoint returns must be Json<T>, Created<T>, NoContent, Binary<bytes::Bytes>, or Result of those",
     ))
 }
 
@@ -862,6 +898,30 @@ fn extractor_inner<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
         return None;
     };
     Some(inner)
+}
+
+fn validate_binary_bytes_type(ty: &Type) -> syn::Result<()> {
+    let Some(segments) = type_path_segments(ty) else {
+        return Err(unsupported_binary_type(ty));
+    };
+
+    let is_bytes = segments.last().is_some_and(|segment| segment == "Bytes");
+    let is_known_bytes_path = segments.len() == 1
+        || segments.as_slice() == ["bytes", "Bytes"]
+        || segments.as_slice() == ["axum", "body", "Bytes"];
+
+    if is_bytes && is_known_bytes_path {
+        return Ok(());
+    }
+
+    Err(unsupported_binary_type(ty))
+}
+
+fn unsupported_binary_type(ty: &Type) -> syn::Error {
+    syn::Error::new_spanned(
+        ty,
+        "#[api] Binary<T> endpoints currently support bytes::Bytes or axum::body::Bytes only",
+    )
 }
 
 fn result_types(ty: &Type) -> Option<(&Type, &Type)> {
@@ -1010,9 +1070,17 @@ impl ApiAttr {
         }
     }
 
-    fn transport_tokens(&self) -> proc_macro2::TokenStream {
+    fn transport_tokens(
+        &self,
+        request: &EndpointRequest,
+        endpoint_return: &EndpointReturn,
+    ) -> proc_macro2::TokenStream {
         if self.is_sse() {
             quote!(::api_core::ir::Transport::ServerSentEvents)
+        } else if endpoint_return.is_binary {
+            quote!(::api_core::ir::Transport::BinaryDownload)
+        } else if request.is_binary_body {
+            quote!(::api_core::ir::Transport::BinaryUpload)
         } else {
             quote!(::api_core::ir::Transport::UnaryHttp)
         }
@@ -1031,7 +1099,7 @@ impl ApiAttr {
             return Err(syn::Error::new_spanned(
                 signature,
                 format!(
-                    "#[api] {} endpoints cannot declare Body<T> extractors; use Query<T> or \
+                    "#[api] {} endpoints cannot declare request body extractors; use Query<T> or \
                      change the endpoint method to POST, PUT, or PATCH",
                     self.method
                 ),
@@ -1043,6 +1111,7 @@ impl ApiAttr {
 
     fn validate_return_policy(
         &self,
+        request: &EndpointRequest,
         endpoint_return: &EndpointReturn,
         output: &ReturnType,
     ) -> syn::Result<()> {
@@ -1057,6 +1126,13 @@ impl ApiAttr {
             return Err(syn::Error::new_spanned(
                 output,
                 "#[api] endpoints returning Sse<T> must use method = \"SSE\"",
+            ));
+        }
+
+        if request.is_binary_body && endpoint_return.is_binary {
+            return Err(syn::Error::new_spanned(
+                output,
+                "#[api] binary upload endpoints cannot also return Binary<bytes::Bytes>; model the response as Json<T>, Created<T>, or NoContent",
             ));
         }
 

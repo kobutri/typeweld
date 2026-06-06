@@ -200,7 +200,7 @@ pub fn collect_contract(input: CollectorInput) -> ApiContract {
             collect_type_ref(body, &mut needed_types);
         }
         match &endpoint.response {
-            ResponseShape::Empty => {}
+            ResponseShape::Empty | ResponseShape::Binary { .. } => {}
             ResponseShape::Json(type_ref)
             | ResponseShape::Created(type_ref)
             | ResponseShape::Stream(type_ref) => {

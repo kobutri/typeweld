@@ -1,0 +1,5 @@
+error: #[api] GET endpoints cannot declare request body extractors; use Query<T> or change the endpoint method to POST, PUT, or PATCH
+ --> tests/ui/api_endpoint_binary_body_get.rs:2:1
+  |
+2 | async fn upload_file(body: api_core::Binary<bytes::Bytes>) -> api_core::NoContent {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

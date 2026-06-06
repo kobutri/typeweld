@@ -1,4 +1,4 @@
-error: #[api] endpoint returns must be Json<T>, Created<T>, NoContent, or Result of those
+error: #[api] endpoint returns must be Json<T>, Created<T>, NoContent, Binary<bytes::Bytes>, or Result of those
  --> tests/ui/api_endpoint_invalid_return.rs:2:24
   |
 2 | async fn get_user() -> String {

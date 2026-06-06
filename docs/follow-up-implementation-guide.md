@@ -786,7 +786,15 @@ Acceptance criteria:
 - User examples do not juggle unrelated wrapper types.
 - Axum handlers and API metadata use consistent shapes.
 
-### H3. Expand transports after unary + SSE are solid
+### H3. Expand transports after unary + SSE are solid [done]
+
+Milestone result:
+
+- Unary JSON HTTP and SSE server streams remain covered.
+- Binary download and binary upload are implemented end-to-end.
+- Multipart and WebSocket duplex remain intentionally unsupported for this
+  milestone; unsupported endpoint shapes fail during Rust macro validation or
+  generator validation instead of silently becoming `unknown`.
 
 Implementation order:
 
@@ -968,6 +976,7 @@ Never edit generated files.
 Do not spend milestone time on these until the core loop is real:
 
 - WebSocket duplex support beyond IR placeholders.
+- Multipart form upload support.
 - Multiple framework adapters beyond Axum.
 - Publishing public npm/crates.io packages.
 - Full OpenAPI generation.

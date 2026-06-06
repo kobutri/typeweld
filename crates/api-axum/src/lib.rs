@@ -1,9 +1,9 @@
 //! Axum integration adapter.
 //!
-//! Use this crate's `Json`, `Path`, `Query`, `Body`, `Created`, `NoContent`,
-//! and `Sse` wrappers in Axum handler signatures. The `#[api]` macro reads
-//! those signatures into the same framework-neutral contract shapes used by
-//! `api_core`.
+//! Use this crate's `Json`, `Path`, `Query`, `Body`, `Binary`, `Created`,
+//! `NoContent`, and `Sse` wrappers in Axum handler signatures. The `#[api]`
+//! macro reads those signatures into the same framework-neutral contract shapes
+//! used by `api_core`.
 
 use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 
@@ -12,9 +12,10 @@ use api_core::{
     ApiError, ApiModule, Endpoint,
 };
 use axum::{
+    body::Bytes,
     extract::{FromRequest, FromRequestParts},
     handler::Handler,
-    http::{request::Parts, StatusCode},
+    http::{header::CONTENT_TYPE, request::Parts, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse as AxumSse},
         IntoResponse, Response,
@@ -162,6 +163,10 @@ pub struct Query<T>(pub T);
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Body<T>(pub T);
 
+/// Raw binary request or response body for endpoint handlers.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Binary<T = Bytes>(pub T);
+
 /// Wrapper for typed API domain errors.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DomainError<E>(pub E);
@@ -228,6 +233,13 @@ impl<T> Body<T> {
     }
 }
 
+impl<T> Binary<T> {
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<T> Deref for Json<T> {
     type Target = T;
 
@@ -276,6 +288,14 @@ impl<T> Deref for Body<T> {
     }
 }
 
+impl<T> Deref for Binary<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl<T> From<T> for Json<T> {
     fn from(value: T) -> Self {
         Self(value)
@@ -306,6 +326,12 @@ impl<T> From<T> for Body<T> {
     }
 }
 
+impl<T> From<T> for Binary<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
 impl<T> IntoResponse for Json<T>
 where
     T: Serialize,
@@ -321,6 +347,19 @@ where
 {
     fn into_response(self) -> Response {
         (StatusCode::CREATED, axum::Json(self.0)).into_response()
+    }
+}
+
+impl IntoResponse for Binary<Bytes> {
+    fn into_response(self) -> Response {
+        (
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            )],
+            self.0,
+        )
+            .into_response()
     }
 }
 
@@ -400,6 +439,21 @@ where
         axum::Json::from_request(request, state)
             .await
             .map(|axum::Json(value)| Self(value))
+    }
+}
+
+impl<S> FromRequest<S> for Binary<Bytes>
+where
+    Bytes: FromRequest<S>,
+    S: Send + Sync,
+{
+    type Rejection = <Bytes as FromRequest<S>>::Rejection;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Bytes::from_request(request, state).await.map(Self)
     }
 }
 
@@ -509,6 +563,18 @@ mod tests {
             id: 7,
             filter: String::new(),
             name: body.name,
+        })
+    }
+
+    async fn download_avatar(Path(id): Path<i64>) -> Binary {
+        Binary(Bytes::from(format!("avatar:{id}")))
+    }
+
+    async fn upload_avatar(Binary(bytes): Binary) -> Json<User> {
+        Json(User {
+            id: bytes.len() as i64,
+            filter: String::new(),
+            name: String::from_utf8(bytes.to_vec()).expect("utf8 upload"),
         })
     }
 
@@ -723,5 +789,64 @@ mod tests {
         assert!(body.contains(r#"data: {"id":1,"filter":"","name":"Ada"}"#));
         assert!(body.contains("event: api-error"));
         assert!(body.contains(r#"data: {"status":404,"body":{"_tag":"NotFound","id":2}}"#));
+    }
+
+    #[tokio::test]
+    async fn binary_response_returns_raw_bytes() {
+        let app = router(ApiModule::new("files"))
+            .route(
+                Endpoint::new(HttpMethod::Get, "/avatars/:id"),
+                download_avatar,
+            )
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/avatars/42")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(body.as_ref(), b"avatar:42");
+    }
+
+    #[tokio::test]
+    async fn binary_request_extracts_raw_bytes() {
+        let app = router(ApiModule::new("files"))
+            .route(Endpoint::new(HttpMethod::Post, "/avatars"), upload_avatar)
+            .into_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/avatars")
+                    .header("content-type", "application/octet-stream")
+                    .body(AxumBody::from("raw-avatar"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(
+            std::str::from_utf8(&body).expect("utf8"),
+            r#"{"id":10,"filter":"","name":"raw-avatar"}"#
+        );
     }
 }

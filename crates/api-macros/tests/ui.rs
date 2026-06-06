@@ -18,6 +18,9 @@ fn api_type_compile_failures_are_clear() {
     tests.compile_fail("tests/ui/api_endpoint_extra_path.rs");
     tests.compile_fail("tests/ui/api_endpoint_duplicate_body.rs");
     tests.compile_fail("tests/ui/api_endpoint_get_body.rs");
+    tests.compile_fail("tests/ui/api_endpoint_binary_body_get.rs");
+    tests.compile_fail("tests/ui/api_endpoint_binary_non_bytes.rs");
+    tests.compile_fail("tests/ui/api_endpoint_binary_upload_download.rs");
     tests.compile_fail("tests/ui/api_endpoint_invalid_sse_return.rs");
     tests.compile_fail("tests/ui/api_endpoint_sse_return_requires_sse_method.rs");
     tests.compile_fail("tests/ui/api_endpoint_unsupported_extractor.rs");

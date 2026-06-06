@@ -7,8 +7,8 @@ use std::{
 
 use api_ir::{
     ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorVariant, ExternalType, Field,
-    Optionality, Primitive, RequestShape, ResponseShape, SourceRange, SourceSpan, StructShape,
-    SymbolId, Transport, TypeDef, TypeRef, TypeShape,
+    Optionality, Primitive, RequestBodyTransport, RequestShape, ResponseShape, SourceRange,
+    SourceSpan, StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
 };
 use serde::Serialize;
 
@@ -1191,6 +1191,11 @@ fn render_tracked_endpoints(contract: &ApiContract, options: &EffectRenderOption
         write_effect_compat_import(&mut writer, "Effect, Schema");
     }
     writer.push("import { ServerApi } from \"./layer.js\"\n");
+    if contract_has_binary_upload_endpoints(contract) {
+        writer.push(
+            "import type { BinaryRequestBody } from \"@rust-ts-integration/effect-runtime\"\n",
+        );
+    }
 
     let schema_imports = collect_endpoint_schema_imports(contract);
     if !schema_imports.is_empty() {
@@ -1338,7 +1343,11 @@ fn write_tracked_endpoint_args(
     if let Some(body) = &endpoint.request.body {
         has_fields = true;
         writer.push("    readonly body: ");
-        writer.push(&render_ts_type_ref(body, options));
+        if endpoint.request.body_transport == RequestBodyTransport::Binary {
+            writer.push("BinaryRequestBody");
+        } else {
+            writer.push(&render_ts_type_ref(body, options));
+        }
         writer.push(";\n");
     }
     if !has_fields {
@@ -1382,7 +1391,11 @@ fn write_tracked_endpoint_args_schema(
         }
         if let Some(body) = &endpoint.request.body {
             writer.push("    body: ");
-            writer.push(&render_type_ref(body, options));
+            if endpoint.request.body_transport == RequestBodyTransport::Binary {
+                writer.push("Schema.Unknown");
+            } else {
+                writer.push(&render_type_ref(body, options));
+            }
             writer.push(",\n");
         }
         writer.push("  })\n");
@@ -1788,7 +1801,6 @@ fn write_tracked_fetch_service_method(
     let namespace = endpoint_namespace(endpoint);
     let args_name = endpoint_args_name(endpoint);
     let helper = render_runtime_client_helper(endpoint);
-    let success_decoder = render_success_decoder(&endpoint.response, helper, options);
     let error_decoder = render_domain_error_decoder(endpoint, helper);
     let success = render_response_type(&endpoint.response, options);
     let domain_error = render_endpoint_domain_error_type(endpoint);
@@ -1801,8 +1813,10 @@ fn write_tracked_fetch_service_method(
     writer.push(&namespace);
     writer.push(".");
     writer.push(&args_name);
-    writer.push(", ");
-    writer.push(&success);
+    if endpoint.transport != Transport::BinaryDownload {
+        writer.push(", ");
+        writer.push(&success);
+    }
     writer.push(", ");
     writer.push(&domain_error);
     writer.push(">(config, {\n          method: ");
@@ -1817,8 +1831,11 @@ fn write_tracked_fetch_service_method(
         helper,
         &format!("{namespace}.{args_name}"),
     ));
-    writer.push(",\n          decodeSuccess: ");
-    writer.push(&success_decoder);
+    if endpoint.transport != Transport::BinaryDownload {
+        let success_decoder = render_success_decoder(&endpoint.response, helper, options);
+        writer.push(",\n          decodeSuccess: ");
+        writer.push(&success_decoder);
+    }
     writer.push(",\n          decodeError: ");
     writer.push(&error_decoder);
     writer.push(",\n        }),\n");
@@ -1857,7 +1874,13 @@ fn collect_runtime_client_imports(contract: &ApiContract) -> BTreeSet<String> {
             Transport::ServerSentEvents => {
                 imports.insert("makeSseClient".to_owned());
             }
-            Transport::WebSocketDuplex | Transport::BinaryDownload | Transport::BinaryUpload => {}
+            Transport::BinaryDownload => {
+                imports.insert("makeBinaryDownloadClient".to_owned());
+            }
+            Transport::BinaryUpload => {
+                imports.insert("makeBinaryUploadClient".to_owned());
+            }
+            Transport::WebSocketDuplex => {}
         }
     }
     imports
@@ -1870,12 +1893,19 @@ fn contract_has_stream_endpoints(contract: &ApiContract) -> bool {
         .any(|endpoint| matches!(endpoint.response, ResponseShape::Stream(_)))
 }
 
+fn contract_has_binary_upload_endpoints(contract: &ApiContract) -> bool {
+    contract
+        .endpoints
+        .iter()
+        .any(|endpoint| endpoint.request.body_transport == RequestBodyTransport::Binary)
+}
+
 fn contract_has_primitive_success(contract: &ApiContract) -> bool {
     contract
         .endpoints
         .iter()
         .any(|endpoint| match &endpoint.response {
-            ResponseShape::Empty => false,
+            ResponseShape::Empty | ResponseShape::Binary { .. } => false,
             ResponseShape::Json(type_ref)
             | ResponseShape::Created(type_ref)
             | ResponseShape::Stream(type_ref) => primitive_from_type_ref(type_ref).is_some(),
@@ -1933,14 +1963,16 @@ fn collect_request_type_imports(request: &RequestShape, imports: &mut BTreeSet<S
     {
         collect_type_ref_import(&field.type_ref, imports);
     }
-    if let Some(body) = &request.body {
-        collect_type_ref_import(body, imports);
+    if request.body_transport != RequestBodyTransport::Binary {
+        if let Some(body) = &request.body {
+            collect_type_ref_import(body, imports);
+        }
     }
 }
 
 fn collect_response_type_imports(response: &ResponseShape, imports: &mut BTreeSet<String>) {
     match response {
-        ResponseShape::Empty => {}
+        ResponseShape::Empty | ResponseShape::Binary { .. } => {}
         ResponseShape::Json(type_ref)
         | ResponseShape::Created(type_ref)
         | ResponseShape::Stream(type_ref) => {
@@ -1976,6 +2008,7 @@ fn collect_endpoint_error_metadata_imports(contract: &ApiContract) -> BTreeSet<S
 fn render_response_type(response: &ResponseShape, options: &EffectRenderOptions) -> String {
     match response {
         ResponseShape::Empty => "void".to_owned(),
+        ResponseShape::Binary { .. } => "Uint8Array".to_owned(),
         ResponseShape::Json(type_ref)
         | ResponseShape::Created(type_ref)
         | ResponseShape::Stream(type_ref) => render_ts_type_ref(type_ref, options),
@@ -1994,7 +2027,10 @@ fn render_endpoint_return_type(
         ResponseShape::Stream(_) => {
             format!("Stream.Stream<{success}, {error}, {requirements}>")
         }
-        ResponseShape::Empty | ResponseShape::Json(_) | ResponseShape::Created(_) => {
+        ResponseShape::Empty
+        | ResponseShape::Json(_)
+        | ResponseShape::Created(_)
+        | ResponseShape::Binary { .. } => {
             format!("Effect.Effect<{success}, {error}, {requirements}>")
         }
     }
@@ -2080,6 +2116,9 @@ fn render_request_encoder(endpoint: &Endpoint, helper: &str, args_type: &str) ->
 
     if request.body.is_some() {
         lines.push("body: encoded.body,".to_owned());
+        if request.body_transport == RequestBodyTransport::Binary {
+            lines.push("bodyKind: \"binary\",".to_owned());
+        }
     }
 
     format!(
@@ -2108,6 +2147,9 @@ fn render_success_decoder(
                 "(input) => {helper}.decode(input, {})",
                 render_type_ref(type_ref, options)
             );
+        }
+        ResponseShape::Binary { .. } => {
+            unreachable!("binary downloads do not use JSON success decoders")
         }
     }
     .to_owned()
@@ -2145,12 +2187,14 @@ fn render_domain_error_decoder(endpoint: &Endpoint, helper: &str) -> String {
     output
 }
 
-const fn render_runtime_client_helper(endpoint: &Endpoint) -> &'static str {
+fn render_runtime_client_helper(endpoint: &Endpoint) -> &'static str {
     match endpoint.transport {
         Transport::UnaryHttp => "makeUnaryHttpClient",
         Transport::ServerSentEvents => "makeSseClient",
-        Transport::WebSocketDuplex | Transport::BinaryDownload | Transport::BinaryUpload => {
-            "makeUnaryHttpClient"
+        Transport::BinaryDownload => "makeBinaryDownloadClient",
+        Transport::BinaryUpload => "makeBinaryUploadClient",
+        Transport::WebSocketDuplex => {
+            panic!("WebSocket duplex endpoints are IR placeholders and are not generated yet")
         }
     }
 }
@@ -2638,9 +2682,9 @@ mod tests {
 
     use api_ir::{
         ApiContract, Endpoint, EnumShape, EnumVariant, ErrorDef, ErrorRef, ErrorVariant,
-        ExternalType, Field, HttpMethod, HttpStatus, Optionality, Primitive, RequestShape,
-        ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId, Transport, TypeDef,
-        TypeRef, TypeShape,
+        ExternalType, Field, HttpMethod, HttpStatus, Optionality, Primitive, RequestBodyTransport,
+        RequestShape, ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId, Transport,
+        TypeDef, TypeRef, TypeShape,
     };
 
     use super::*;
@@ -2859,6 +2903,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     path_params: vec![field("id", "id", type_ref("i64"), Optionality::Required)],
                     query_params: Vec::new(),
                     body: None,
+                    body_transport: RequestBodyTransport::Json,
                 },
                 response: ResponseShape::Json(type_ref("i64")),
                 errors: Vec::new(),
@@ -3120,6 +3165,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                         Optionality::Optional,
                     )],
                     body: None,
+                    body_transport: RequestBodyTransport::Json,
                 },
                 response: ResponseShape::Json(type_ref("User")),
                 errors: vec![ErrorRef {
@@ -3175,6 +3221,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                 path_params: Vec::new(),
                 query_params: Vec::new(),
                 body: Some(type_ref("CreateUser")),
+                body_transport: RequestBodyTransport::Json,
             },
             response: ResponseShape::Empty,
             errors: Vec::new(),
@@ -3241,6 +3288,93 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
     }
 
     #[test]
+    fn renders_binary_endpoint_accessors() {
+        let bytes = type_ref("Bytes");
+        let item = type_ref("CatalogItem");
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: Vec::new(),
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(bytes),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(item),
+                    errors: Vec::new(),
+                    source: source(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_endpoints(&contract);
+
+        assert!(rendered.contains(
+            "import type { BinaryRequestBody } from \"@rust-ts-integration/effect-runtime\""
+        ));
+        assert!(rendered.contains(
+            "  export interface DownloadAttachmentArgs {\n    readonly id: UserId;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const downloadAttachmentRoute = {\n    method: \"GET\",\n    path: \"/catalog/{id}/attachment\",\n    transport: \"BinaryDownload\",\n  } as const"
+        ));
+        assert!(rendered.contains("): Effect.Effect<Uint8Array, ApiClientError, ServerApi> =>"));
+        assert!(rendered.contains(
+            "  export interface UploadAttachmentArgs {\n    readonly id: UserId;\n    readonly body: BinaryRequestBody;\n  }"
+        ));
+        assert!(rendered.contains(
+            "  export const UploadAttachmentArgsSchema = Schema.Struct({\n    id: UserId,\n    body: Schema.Unknown,\n  })"
+        ));
+    }
+
+    #[test]
     fn renders_server_api_service_and_layers() {
         let contract = ApiContract {
             package_name: "@workspace/server-api".to_owned(),
@@ -3260,6 +3394,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     path_params: vec![field("id", "id", type_ref("UserId"), Optionality::Required)],
                     query_params: Vec::new(),
                     body: None,
+                    body_transport: RequestBodyTransport::Json,
                 },
                 response: ResponseShape::Json(type_ref("User")),
                 errors: vec![ErrorRef {
@@ -3354,6 +3489,89 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
         assert!(
             rendered.contains("decodeSuccess: (input) => makeSseClient.decode(input, UserEvent)")
         );
+    }
+
+    #[test]
+    fn renders_binary_server_api_service_and_layer_client() {
+        let contract = ApiContract {
+            package_name: "@workspace/server-api".to_owned(),
+            endpoints: vec![
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: Vec::new(),
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "server".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            type_ref("UserId"),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(type_ref("Bytes")),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(type_ref("CatalogItem")),
+                    errors: Vec::new(),
+                    source: source(),
+                    allow_unused: false,
+                },
+            ],
+            ..ApiContract::default()
+        };
+
+        let rendered = render_layer(&contract);
+
+        assert!(rendered.contains(
+            "import { makeBinaryDownloadClient, makeBinaryUploadClient } from \"@rust-ts-integration/effect-runtime\""
+        ));
+        assert!(rendered.contains(
+            "      readonly downloadAttachment: (args: catalog.DownloadAttachmentArgs) => Effect.Effect<Uint8Array, ApiClientError, never>"
+        ));
+        assert!(rendered.contains(
+            "downloadAttachment: makeBinaryDownloadClient<catalog.DownloadAttachmentArgs, never>(config,"
+        ));
+        assert!(!rendered.contains("downloadAttachment: makeBinaryDownloadClient<catalog.DownloadAttachmentArgs, Uint8Array"));
+        assert!(rendered.contains(
+            "uploadAttachment: makeBinaryUploadClient<catalog.UploadAttachmentArgs, CatalogItem, never>(config,"
+        ));
+        assert!(rendered.contains("bodyKind: \"binary\""));
     }
 
     #[test]
@@ -3935,6 +4153,7 @@ export namespace users {
                             field("at", "at", date_time.clone(), Optionality::Optional),
                         ],
                         body: None,
+                        body_transport: RequestBodyTransport::Json,
                     },
                     response: ResponseShape::Json(item.clone()),
                     errors: vec![error_ref.clone()],
@@ -3957,8 +4176,65 @@ export namespace users {
                         path_params: Vec::new(),
                         query_params: Vec::new(),
                         body: Some(create_item),
+                        body_transport: RequestBodyTransport::Json,
                     },
-                    response: ResponseShape::Created(item),
+                    response: ResponseShape::Created(item.clone()),
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "download_attachment"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "download_attachment".to_owned(),
+                    ],
+                    rust_name: "download_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "downloadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Get,
+                    transport: Transport::BinaryDownload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: None,
+                        body_transport: RequestBodyTransport::Json,
+                    },
+                    response: ResponseShape::Binary { content_type: None },
+                    errors: vec![error_ref.clone()],
+                    source: source(),
+                    allow_unused: false,
+                },
+                Endpoint {
+                    id: symbol("endpoint", &["catalog", "upload_attachment"]),
+                    rust_path: vec![
+                        "fixture".to_owned(),
+                        "catalog".to_owned(),
+                        "upload_attachment".to_owned(),
+                    ],
+                    rust_name: "upload_attachment".to_owned(),
+                    ts_path: vec!["catalog".to_owned(), "uploadAttachment".to_owned()],
+                    route: RoutePattern("/catalog/{id}/attachment".to_owned()),
+                    method: HttpMethod::Post,
+                    transport: Transport::BinaryUpload,
+                    request: RequestShape {
+                        path_params: vec![field(
+                            "id",
+                            "id",
+                            user_id.clone(),
+                            Optionality::Required,
+                        )],
+                        query_params: Vec::new(),
+                        body: Some(bytes),
+                        body_transport: RequestBodyTransport::Binary,
+                    },
+                    response: ResponseShape::Json(item),
                     errors: vec![error_ref.clone()],
                     source: source(),
                     allow_unused: false,
@@ -3984,6 +4260,7 @@ export namespace users {
                             Optionality::Optional,
                         )],
                         body: None,
+                        body_transport: RequestBodyTransport::Json,
                     },
                     response: ResponseShape::Stream(event),
                     errors: vec![error_ref],
@@ -4107,8 +4384,14 @@ const writeProgram = Effect.gen(function* () {
     },
   })
 
+  const downloaded = yield* catalog.downloadAttachment({ id })
+  const uploaded = yield* catalog.uploadAttachment({
+    id,
+    body: new Uint8Array(downloaded),
+  })
+
   yield* admin.reindex({})
-  return created.displayName
+  return `${created.displayName}:${uploaded.displayName}`
 })
 
 const streamProgram = events.watchCatalog({ after: at }).pipe(

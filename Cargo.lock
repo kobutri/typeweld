@@ -89,6 +89,7 @@ dependencies = [
  "api-axum",
  "api-core",
  "api-gen-effect-v4",
+ "bytes",
  "proc-macro2",
  "quote",
  "serde",

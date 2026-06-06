@@ -2,8 +2,8 @@
 
 use api_ir::{
     ApiContract, Endpoint, ErrorDef, ErrorRef, ErrorVariant, Field, HttpMethod, HttpStatus,
-    Optionality, RequestShape, ResponseShape, RoutePattern, SourceRange, StructShape, SymbolId,
-    Transport, TypeDef, TypeRef, TypeShape,
+    Optionality, RequestBodyTransport, RequestShape, ResponseShape, RoutePattern, SourceRange,
+    StructShape, SymbolId, Transport, TypeDef, TypeRef, TypeShape,
 };
 
 pub const BASIC_PACKAGE_NAME: &str = "@workspace/server-api";
@@ -35,6 +35,7 @@ pub fn basic_contract() -> ApiContract {
                     path_params: vec![field("fixture:field:getUser:id", "id", i64_ref.clone())],
                     query_params: Vec::new(),
                     body: None,
+                    body_transport: RequestBodyTransport::Json,
                 },
                 response: ResponseShape::Json(user_ref.clone()),
                 errors: vec![error_ref.clone()],
@@ -53,6 +54,7 @@ pub fn basic_contract() -> ApiContract {
                     path_params: Vec::new(),
                     query_params: Vec::new(),
                     body: Some(create_user_ref.clone()),
+                    body_transport: RequestBodyTransport::Json,
                 },
                 response: ResponseShape::Json(user_ref.clone()),
                 errors: vec![error_ref.clone()],

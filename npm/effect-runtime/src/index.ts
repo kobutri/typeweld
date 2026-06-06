@@ -3,6 +3,8 @@ import { Effect, Schema, Stream } from "./compat.js"
 export type HttpMethod = "DELETE" | "GET" | "PATCH" | "POST" | "PUT"
 
 export type RequestValue = string | number | bigint | boolean | null | undefined
+export type BinaryRequestBody = Uint8Array | ArrayBuffer | Blob
+export type RequestBodyKind = "json" | "binary"
 
 export interface FetchClientConfig {
   readonly baseUrl: string
@@ -15,6 +17,7 @@ export interface EncodedRequest {
   readonly path?: Readonly<Record<string, RequestValue>>
   readonly query?: Readonly<Record<string, RequestValue | ReadonlyArray<RequestValue>>>
   readonly body?: unknown
+  readonly bodyKind?: RequestBodyKind
   readonly headers?: HeadersInit
 }
 
@@ -30,6 +33,27 @@ export interface UnaryHttpEndpoint<Args, Success, DomainError> {
 }
 
 export interface SseEndpoint<Args, Success, DomainError> {
+  readonly method: HttpMethod
+  readonly path: string
+  readonly encode?: (args: Args) => EncodedRequest
+  readonly decodeSuccess: (input: unknown) => Effect.Effect<Success, ApiClientError>
+  readonly decodeError?: (
+    status: number,
+    input: unknown,
+  ) => Effect.Effect<DomainError, ApiClientError> | undefined
+}
+
+export interface BinaryDownloadEndpoint<Args, DomainError> {
+  readonly method: HttpMethod
+  readonly path: string
+  readonly encode?: (args: Args) => EncodedRequest
+  readonly decodeError?: (
+    status: number,
+    input: unknown,
+  ) => Effect.Effect<DomainError, ApiClientError> | undefined
+}
+
+export interface BinaryUploadEndpoint<Args, Success, DomainError> {
   readonly method: HttpMethod
   readonly path: string
   readonly encode?: (args: Args) => EncodedRequest
@@ -208,9 +232,98 @@ export const makeSseClient = Object.assign(
   },
 )
 
+export const makeBinaryDownloadClient = Object.assign(
+  <Args, DomainError>(
+    config: FetchClientConfig,
+    endpoint: BinaryDownloadEndpoint<Args, DomainError>,
+  ): ((args: Args) => Effect.Effect<Uint8Array, DomainError | ApiClientError>) =>
+    Effect.fn("makeBinaryDownloadClient.endpoint")(function* (
+      args: Args,
+    ): Effect.fn.Return<Uint8Array, DomainError | ApiClientError> {
+      const encoded = yield* Effect.try({
+        try: () => endpoint.encode?.(args) ?? {},
+        catch: (cause) =>
+          new EncodeError({
+            message: "Failed to encode API binary download request",
+            cause,
+          }),
+      })
+
+      const response = yield* fetchResponse(config, endpoint, encoded)
+      if (response.ok) {
+        return yield* readBinaryResponseBody(response)
+      }
+
+      const body = yield* readResponseBody(response)
+      const domainError = endpoint.decodeError?.(response.status, body)
+      if (domainError !== undefined) {
+        const decodedError = yield* domainError
+        return yield* Effect.fail(decodedError)
+      }
+
+      return yield* new UnexpectedStatusError({
+        message: `Unexpected HTTP status ${response.status}`,
+        status: response.status,
+        body,
+      })
+    }),
+  {
+    decode: decodeWithSchema,
+    encode: encodeWithSchema,
+  },
+)
+
+export const makeBinaryUploadClient = Object.assign(
+  <Args, Success, DomainError>(
+    config: FetchClientConfig,
+    endpoint: BinaryUploadEndpoint<Args, Success, DomainError>,
+  ): ((args: Args) => Effect.Effect<Success, DomainError | ApiClientError>) =>
+    Effect.fn("makeBinaryUploadClient.endpoint")(function* (
+      args: Args,
+    ): Effect.fn.Return<Success, DomainError | ApiClientError> {
+      const encoded = yield* Effect.try({
+        try: () => endpoint.encode?.(args) ?? {},
+        catch: (cause) =>
+          new EncodeError({
+            message: "Failed to encode API binary upload request",
+            cause,
+          }),
+      })
+
+      const response = yield* fetchResponse(config, endpoint, encoded)
+      const body = yield* readResponseBody(response)
+
+      if (response.ok) {
+        return yield* endpoint.decodeSuccess(body)
+      }
+
+      const domainError = endpoint.decodeError?.(response.status, body)
+      if (domainError !== undefined) {
+        const decodedError = yield* domainError
+        return yield* Effect.fail(decodedError)
+      }
+
+      return yield* new UnexpectedStatusError({
+        message: `Unexpected HTTP status ${response.status}`,
+        status: response.status,
+        body,
+      })
+    }),
+  {
+    decode: decodeWithSchema,
+    encode: encodeWithSchema,
+  },
+)
+
+type RuntimeEndpoint<Args, Success, DomainError> =
+  | UnaryHttpEndpoint<Args, Success, DomainError>
+  | SseEndpoint<Args, Success, DomainError>
+  | BinaryDownloadEndpoint<Args, DomainError>
+  | BinaryUploadEndpoint<Args, Success, DomainError>
+
 const fetchResponse = <Args, Success, DomainError>(
   config: FetchClientConfig,
-  endpoint: UnaryHttpEndpoint<Args, Success, DomainError> | SseEndpoint<Args, Success, DomainError>,
+  endpoint: RuntimeEndpoint<Args, Success, DomainError>,
   encoded: EncodedRequest,
 ): Effect.Effect<Response, NetworkError | TimeoutError | EncodeError> =>
   Effect.tryPromise({
@@ -227,7 +340,7 @@ const fetchResponse = <Args, Success, DomainError>(
           headers: buildHeaders(config.headers, encoded),
           signal: timeout.signal,
         }
-        const body = encodeBody(encoded.body)
+        const body = encodeBody(encoded.body, encoded.bodyKind ?? "json")
         if (body !== undefined) {
           init.body = body
         }
@@ -241,10 +354,12 @@ const fetchResponse = <Args, Success, DomainError>(
         ? cause
         : cause instanceof NetworkError
           ? cause
-          : new NetworkError({
-              message: "API request failed",
-              cause,
-            }),
+          : cause instanceof EncodeError
+            ? cause
+            : new NetworkError({
+                message: "API request failed",
+                cause,
+              }),
   })
 
 const readResponseBody = (
@@ -277,6 +392,18 @@ const readResponseBody = (
             message: "Failed to read API response body",
             body: cause,
           }),
+  })
+
+const readBinaryResponseBody = (
+  response: Response,
+): Effect.Effect<Uint8Array, RemoteProtocolError> =>
+  Effect.tryPromise({
+    try: async () => new Uint8Array(await response.arrayBuffer()),
+    catch: (cause) =>
+      new RemoteProtocolError({
+        message: "Failed to read API binary response body",
+        body: cause,
+      }),
   })
 
 interface SseFrame {
@@ -477,14 +604,26 @@ const buildHeaders = (
   const requestHeaders = new Headers(request.headers)
   requestHeaders.forEach((value, key) => headers.set(key, value))
   if (request.body !== undefined && request.body !== null && !headers.has("content-type")) {
-    headers.set("content-type", "application/json")
+    headers.set(
+      "content-type",
+      request.bodyKind === "binary" ? "application/octet-stream" : "application/json",
+    )
   }
   return headers
 }
 
-const encodeBody = (body: unknown): BodyInit | undefined => {
+const encodeBody = (body: unknown, bodyKind: RequestBodyKind): BodyInit | undefined => {
   if (body === undefined || body === null) {
     return undefined
+  }
+  if (bodyKind === "binary") {
+    if (body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      return body as BodyInit
+    }
+    throw new EncodeError({
+      message: "Binary request body must be a Uint8Array, ArrayBuffer, or Blob",
+      cause: body,
+    })
   }
   if (typeof body === "string" || body instanceof FormData || body instanceof Blob) {
     return body
