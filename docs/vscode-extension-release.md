@@ -34,7 +34,7 @@ The same workflow also builds and uploads the `typeweld` CLI:
 ## Steps
 
 1. Land the release commit on `main`.
-2. Run `npm test` locally if you want a final preflight.
+2. Run the release preflight from `docs/publishing.md`.
 3. Create a GitHub Release for a semver tag such as `v0.1.0`.
 4. Publish the release. Draft creation alone does not upload assets.
 5. Wait for the `Release Artifacts` workflow to finish.
@@ -45,4 +45,4 @@ code --install-extension typeweld-0.1.0-darwin-arm64.vsix
 ```
 
 If the release workflow needs to be rerun after fixing workflow-only issues,
-run it manually with `workflow_dispatch` and pass the same tag name.
+delete the failed GitHub Release and recreate it from the same protected tag.

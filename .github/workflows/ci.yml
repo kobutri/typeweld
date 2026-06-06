@@ -93,6 +93,7 @@ jobs:
         working-directory: npm
       - name: Run npm checks
         run: |
+          npm run check:versions
           npm run typecheck:workspaces
           npm run test:cli
           npm run test:runtime

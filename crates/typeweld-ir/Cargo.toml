@@ -1,5 +1,6 @@
 [package]
 name = "typeweld-ir"
+categories.workspace = true
 description.workspace = true
 documentation.workspace = true
 edition.workspace = true

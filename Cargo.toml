@@ -17,6 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
+categories = ["development-tools", "web-programming"]
 description = "Rust-to-TypeScript API contract tooling for Effect clients"
 documentation = "https://github.com/typeweld/typeweld/tree/main/docs"
 edition = "2021"

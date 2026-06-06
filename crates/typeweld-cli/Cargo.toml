@@ -1,5 +1,6 @@
 [package]
 name = "typeweld-cli"
+categories.workspace = true
 description.workspace = true
 documentation.workspace = true
 edition.workspace = true

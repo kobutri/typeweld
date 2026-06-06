@@ -12,9 +12,16 @@
     "access": "public"
   },
   "type": "module",
+  "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./compat": "./src/compat.ts"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./compat": {
+      "types": "./src/compat.ts",
+      "default": "./src/compat.ts"
+    }
   },
   "files": [
     "src"

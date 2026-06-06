@@ -2,5 +2,15 @@
   "name": "@typeweld/typescript-plugin",
   "version": "0.0.0",
   "private": true,
-  "main": "index.js"
+  "description": "Typeweld TypeScript server plugin bundled with the VS Code extension.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/typeweld/typeweld",
+    "directory": "npm/vscode-extension/typescript-plugin"
+  },
+  "main": "index.js",
+  "files": [
+    "index.js"
+  ]
 }
