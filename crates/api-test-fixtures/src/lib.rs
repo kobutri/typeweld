@@ -40,6 +40,7 @@ pub fn basic_contract() -> ApiContract {
                 response: ResponseShape::Json(user_ref.clone()),
                 errors: vec![error_ref.clone()],
                 source: range("crates/server/src/users.rs", 18, 1, 22, 2),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             },
             Endpoint {
@@ -59,6 +60,7 @@ pub fn basic_contract() -> ApiContract {
                 response: ResponseShape::Json(user_ref.clone()),
                 errors: vec![error_ref.clone()],
                 source: range("crates/server/src/users.rs", 24, 1, 28, 2),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             },
             Endpoint {
@@ -73,6 +75,7 @@ pub fn basic_contract() -> ApiContract {
                 response: ResponseShape::Stream(event_ref.clone()),
                 errors: vec![error_ref.clone()],
                 source: range("crates/server/src/events.rs", 10, 1, 14, 2),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             },
         ],
@@ -85,7 +88,11 @@ pub fn basic_contract() -> ApiContract {
                 shape: TypeShape::Struct(StructShape {
                     fields: vec![
                         field("fixture:field:User:id", "id", i64_ref.clone()),
-                        field("fixture:field:User:displayName", "display_name", string.clone()),
+                        field(
+                            "fixture:field:User:displayName",
+                            "display_name",
+                            string.clone(),
+                        ),
                     ],
                 }),
                 source: range("crates/server/src/types.rs", 5, 1, 9, 2),

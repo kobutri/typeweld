@@ -52,6 +52,8 @@ pub struct EndpointV2 {
     pub errors: Vec<ErrorRef>,
     pub effect: EffectMetadata,
     pub source: SourceRange,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub router_mounts: Vec<SourceRange>,
     pub allow_unused: bool,
 }
 
@@ -141,6 +143,8 @@ pub struct Endpoint {
     pub response: ResponseShape,
     pub errors: Vec<ErrorRef>,
     pub source: SourceRange,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub router_mounts: Vec<SourceRange>,
     pub allow_unused: bool,
 }
 
@@ -163,6 +167,7 @@ impl Endpoint {
                 }],
             },
             source: self.source.clone(),
+            router_mounts: self.router_mounts.clone(),
             allow_unused: self.allow_unused,
         }
     }
@@ -725,6 +730,7 @@ mod tests {
                 name: "GetUserError".to_owned(),
             }],
             source: source(),
+            router_mounts: Vec::new(),
             allow_unused: false,
         }
     }

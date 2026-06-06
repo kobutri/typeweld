@@ -1007,6 +1007,8 @@ Acceptance:
 
 ### Phase 5: Router-aware Symbol Graph
 
+Status: Done.
+
 Files:
 
 - `crates/api-gen-effect-v4/src/lib.rs`
@@ -1015,12 +1017,12 @@ Files:
 
 Steps:
 
-1. Add graph roles and rename strategies.
-2. Record `.endpoint(handler)` as `rustRouterMount`.
-3. Record route path placeholder ranges.
-4. Record serde rename ranges where available.
-5. Preserve legacy helper references during migration.
-6. Add graph schema version compatibility tests.
+1. [x] Add graph roles and rename strategies.
+2. [x] Record `.endpoint(handler)` as `rustRouterMount`.
+3. [x] Record route path placeholder ranges.
+4. [x] Record serde rename ranges where available.
+5. [x] Preserve legacy helper references during migration.
+6. [x] Add graph schema version compatibility tests.
 
 Acceptance:
 

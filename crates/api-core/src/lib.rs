@@ -279,6 +279,7 @@ pub struct Endpoint {
     pub response: ResponseShape,
     pub errors: Vec<ErrorRef>,
     pub source: SourceRange,
+    pub router_mounts: Vec<SourceRange>,
     pub allow_unused: bool,
 }
 
@@ -298,6 +299,7 @@ impl Endpoint {
             response: ResponseShape::Empty,
             errors: Vec::new(),
             source: SourceRange::default(),
+            router_mounts: Vec::new(),
             allow_unused: false,
         }
     }
@@ -357,6 +359,12 @@ impl Endpoint {
     }
 
     #[must_use]
+    pub fn router_mount(mut self, source: SourceRange) -> Self {
+        self.router_mounts.push(source);
+        self
+    }
+
+    #[must_use]
     pub fn into_ir(self) -> api_ir::Endpoint {
         api_ir::Endpoint {
             id: self.id,
@@ -370,6 +378,7 @@ impl Endpoint {
             response: self.response,
             errors: self.errors,
             source: self.source,
+            router_mounts: self.router_mounts,
             allow_unused: self.allow_unused,
         }
     }
@@ -625,6 +634,9 @@ fn flatten_route_tree(tree: &ApiRouteTree, path_prefix: &str, module: &mut ApiMo
                 endpoint.method = mounted.effective_method;
                 endpoint.route =
                     RoutePattern(join_route_paths(path_prefix, &mounted.effective_path));
+                if mounted.source != SourceRange::default() {
+                    endpoint.router_mounts.push(mounted.source.clone());
+                }
                 mounted
                     .descriptor
                     .register_types_and_errors(module.registry_mut());

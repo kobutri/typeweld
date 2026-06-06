@@ -1427,6 +1427,10 @@ impl SymbolGraph {
 
     fn definition(&self, query: &TextPositionQuery, workspace: &WorkspaceConfig) -> Option<Value> {
         for symbol in &self.symbols {
+            if symbol.rust_reference_match(query, workspace).is_some() {
+                return Some(symbol.rust.to_lsp_location(workspace));
+            }
+
             if symbol.rust.matches(query, workspace) {
                 let locations = symbol
                     .typescript
@@ -1460,18 +1464,26 @@ impl SymbolGraph {
 
         for symbol in &self.symbols {
             let rust_match = symbol.rust.matches(query, workspace);
+            let rust_reference_match = symbol.rust_reference_match(query, workspace).is_some();
             let typescript_match = symbol
                 .typescript
                 .iter()
                 .any(|location| location.matches(query, workspace));
-            if !rust_match && !typescript_match {
+            if !rust_match && !rust_reference_match && !typescript_match {
                 continue;
             }
 
             let mut locations = Vec::new();
-            if include_declaration || typescript_match {
+            if include_declaration || rust_reference_match || typescript_match {
                 locations.push(symbol.rust.to_lsp_location(workspace));
             }
+            locations.extend(
+                symbol
+                    .rust_references
+                    .iter()
+                    .filter(|location| !location.generated)
+                    .map(|location| location.to_lsp_location(workspace)),
+            );
             locations.extend(
                 symbol
                     .typescript
@@ -1492,7 +1504,7 @@ impl SymbolGraph {
         workspace: &WorkspaceConfig,
     ) -> Vec<Value> {
         for symbol in &self.symbols {
-            if !symbol.rust.matches(query, workspace) {
+            if !symbol.matches_any_rust_location(query, workspace) {
                 continue;
             }
             return symbol
@@ -1512,9 +1524,13 @@ impl SymbolGraph {
                 Some(symbol.rust.range)
             } else {
                 symbol
-                    .typescript
-                    .iter()
-                    .find(|location| location.matches(query, workspace))
+                    .rust_reference_match(query, workspace)
+                    .or_else(|| {
+                        symbol
+                            .typescript
+                            .iter()
+                            .find(|location| location.matches(query, workspace))
+                    })
                     .map(|location| location.range)
             };
             let Some(range) = matched_range else {
@@ -1555,7 +1571,7 @@ impl SymbolGraph {
             return Ok(None);
         };
         symbol.validate_rename_name(new_name)?;
-        let source = if symbol.rust.matches(query, workspace) {
+        let source = if symbol.matches_any_rust_location(query, workspace) {
             RenameSource::Rust
         } else {
             RenameSource::TypeScript
@@ -1576,6 +1592,13 @@ impl SymbolGraph {
         if symbol.rust.is_renamable() {
             add_rename_change(&mut changes, &symbol.rust, workspace, &rename_texts.rust);
             symbol.add_supporting_rust_rename_changes(&mut changes, workspace, &rename_texts)?;
+        }
+        for location in symbol
+            .rust_references
+            .iter()
+            .filter(|location| location.is_renamable())
+        {
+            add_rename_change(&mut changes, location, workspace, &rename_texts.rust);
         }
         for location in symbol
             .typescript
@@ -1601,6 +1624,16 @@ impl SymbolGraph {
                 ));
             }
             if symbol
+                .rust_references
+                .iter()
+                .any(|location| location.is_generated_match(query, workspace))
+            {
+                return Some(format!(
+                    "generated API files are read-only; rename API {} `{}` from Rust source or a non-generated TypeScript usage instead",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol
                 .typescript
                 .iter()
                 .any(|location| location.is_generated_match(query, workspace))
@@ -1616,9 +1649,29 @@ impl SymbolGraph {
                     symbol.kind, symbol.id
                 ));
             }
+            if symbol
+                .rust_references
+                .iter()
+                .any(|location| location.is_surrounding_match(query, workspace))
+            {
+                return Some(format!(
+                    "API {} `{}` can only be renamed from its identifier, not surrounding router syntax",
+                    symbol.kind, symbol.id
+                ));
+            }
             if symbol.rust.matches(query, workspace) && !symbol.rust.is_renamable() {
                 return Some(format!(
                     "API {} `{}` cannot be renamed at this Rust position",
+                    symbol.kind, symbol.id
+                ));
+            }
+            if symbol
+                .rust_references
+                .iter()
+                .any(|location| location.matches(query, workspace) && !location.is_renamable())
+            {
+                return Some(format!(
+                    "API {} `{}` cannot be renamed at this Rust router position",
                     symbol.kind, symbol.id
                 ));
             }
@@ -1694,6 +1747,13 @@ impl SymbolGraph {
                 return Some((symbol, &symbol.rust));
             }
             if let Some(location) = symbol
+                .rust_references
+                .iter()
+                .find(|location| location.is_renamable() && location.matches(query, workspace))
+            {
+                return Some((symbol, location));
+            }
+            if let Some(location) = symbol
                 .typescript
                 .iter()
                 .find(|location| location.is_renamable() && location.matches(query, workspace))
@@ -1714,12 +1774,36 @@ struct LinkedSymbol {
     kind: String,
     rust: GraphLocation,
     #[serde(default)]
+    rust_references: Vec<GraphLocation>,
+    #[serde(default)]
     typescript: Vec<GraphLocation>,
     #[serde(default)]
     metadata: SymbolMetadata,
 }
 
 impl LinkedSymbol {
+    fn rust_reference_match(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> Option<&GraphLocation> {
+        self.rust_references
+            .iter()
+            .find(|location| location.matches(query, workspace))
+    }
+
+    fn matches_any_rust_location(
+        &self,
+        query: &TextPositionQuery,
+        workspace: &WorkspaceConfig,
+    ) -> bool {
+        self.rust.matches(query, workspace)
+            || self
+                .rust_references
+                .iter()
+                .any(|location| location.matches(query, workspace))
+    }
+
     fn hover_markdown(&self, workspace: &WorkspaceConfig) -> String {
         let mut lines = Vec::new();
         lines.push(format!("**API {}** `{}`", self.kind, self.id));
@@ -2069,6 +2153,9 @@ impl UsageLocation {
             full_range: Some(range),
             generated: false,
             renamable: Some(true),
+            role: Some("userUsage".to_owned()),
+            language: Some("typescript".to_owned()),
+            rename_strategy: Some("typescriptUsage".to_owned()),
         }
     }
 }
@@ -2126,6 +2213,15 @@ struct GraphLocation {
     #[serde(default)]
     generated: bool,
     renamable: Option<bool>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    role: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    language: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    rename_strategy: Option<String>,
 }
 
 impl GraphLocation {
@@ -5219,6 +5315,112 @@ mod tests {
     }
 
     #[test]
+    fn router_mounts_are_user_facing_endpoint_references() {
+        let root = test_root("router-mount-references");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("crates/server/src")).expect("create rust dir");
+        fs::create_dir_all(root.join("client")).expect("create client dir");
+        fs::create_dir_all(root.join("target/api-contract/effect-v4/packages/server-api"))
+            .expect("create generated dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let rust_uri = path_to_file_uri(&root.join("crates/server/src/users.rs"));
+        let routes_uri = path_to_file_uri(&root.join("crates/server/src/routes.rs"));
+        let ts_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        let generated_uri = path_to_file_uri(
+            &root.join("target/api-contract/effect-v4/packages/server-api/endpoints.ts"),
+        );
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "schemaVersion": 1,
+                "contractHash": "hash:router-mount",
+                "symbols": [{
+                    "id": "fixture:endpoint:getUser",
+                    "kind": "endpoint",
+                    "rust": graph_location_json(&rust_uri, 10, 9, 17, false, true, "rustDeclaration"),
+                    "rustReferences": [
+                        graph_location_json(&routes_uri, 20, 18, 26, false, true, "rustRouterMount")
+                    ],
+                    "typescript": [
+                        graph_location_json(&ts_uri, 3, 20, 27, false, true, "userUsage"),
+                        graph_location_json(&generated_uri, 0, 13, 20, true, false, "generatedDefinition")
+                    ],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["fixture", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "rustName": "get_user",
+                        "tsName": "getUser",
+                        "renamePlaceholder": "get_user"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let workspace =
+            discover_workspace_config(Some(&root), &root).expect("discover workspace config");
+        let graph = SymbolGraph::load(&workspace.symbol_graph)
+            .expect("load graph")
+            .expect("symbol graph");
+        let declaration_query = TextPositionQuery {
+            uri: rust_uri.clone(),
+            position: GraphPosition {
+                line: 10,
+                character: 12,
+            },
+            include_declaration: true,
+        };
+        let mount_query = TextPositionQuery {
+            uri: routes_uri.clone(),
+            position: GraphPosition {
+                line: 20,
+                character: 22,
+            },
+            include_declaration: false,
+        };
+
+        let declaration_references = graph
+            .references(&declaration_query, &workspace)
+            .expect("declaration references");
+        assert!(declaration_references
+            .iter()
+            .any(|location| location["uri"] == rust_uri));
+        assert!(declaration_references
+            .iter()
+            .any(|location| location["uri"] == routes_uri));
+        assert!(declaration_references
+            .iter()
+            .any(|location| location["uri"] == ts_uri));
+        assert!(declaration_references
+            .iter()
+            .all(|location| location["uri"] != generated_uri));
+
+        let mount_definition = graph
+            .definition(&mount_query, &workspace)
+            .expect("mount definition");
+        assert_eq!(mount_definition["uri"], rust_uri);
+        assert_eq!(
+            graph
+                .generated_typescript_reference_params(&mount_query, &workspace)
+                .len(),
+            1
+        );
+
+        let rename = graph
+            .rename(&mount_query, "fetchUser", &workspace)
+            .expect("rename succeeds")
+            .expect("rename edits");
+        let changes = rename["changes"].as_object().expect("rename changes");
+        assert_text_edit(changes, &rust_uri, 10, 9, 17, "fetch_user");
+        assert_text_edit(changes, &routes_uri, 20, 18, 26, "fetch_user");
+        assert_text_edit(changes, &ts_uri, 3, 20, 27, "fetchUser");
+        assert!(!changes.contains_key(&generated_uri));
+    }
+
+    #[test]
     fn redirects_generated_typescript_definition_to_rust_source() {
         let root = test_root("cross-definition");
         let generated_cache_dir = root.join("target/api-contract/effect-v4/packages");
@@ -6738,6 +6940,54 @@ mod tests {
                 "allowUnused": allow_unused
             }
         })
+    }
+
+    fn graph_location_json(
+        uri: &str,
+        line: u32,
+        start: u32,
+        end: u32,
+        generated: bool,
+        renamable: bool,
+        role: &str,
+    ) -> Value {
+        let range = json!({
+            "start": { "line": line, "character": start },
+            "end": { "line": line, "character": end }
+        });
+        json!({
+            "uri": uri,
+            "range": range.clone(),
+            "nameRange": range.clone(),
+            "fullRange": range,
+            "generated": generated,
+            "renamable": renamable,
+            "role": role
+        })
+    }
+
+    fn assert_text_edit(
+        changes: &serde_json::Map<String, Value>,
+        uri: &str,
+        line: u32,
+        start: u32,
+        end: u32,
+        new_text: &str,
+    ) {
+        let edits = changes
+            .get(uri)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("missing edits for `{uri}` in {changes:?}"));
+        assert!(
+            edits.iter().any(|edit| {
+                edit["newText"] == new_text
+                    && edit["range"]["start"]["line"] == line
+                    && edit["range"]["start"]["character"] == start
+                    && edit["range"]["end"]["line"] == line
+                    && edit["range"]["end"]["character"] == end
+            }),
+            "missing edit {line}:{start}-{end} -> `{new_text}` in {edits:?}"
+        );
     }
 
     fn write_unused_endpoint_workspace(root: &Path, lint_level: &str) {

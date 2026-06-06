@@ -37,7 +37,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -73,7 +76,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -108,7 +114,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -143,7 +152,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -178,7 +190,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -213,7 +228,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -277,7 +295,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -313,7 +334,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -348,7 +372,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -383,7 +410,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -418,7 +448,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -453,7 +486,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -517,7 +553,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -553,7 +592,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -588,7 +630,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/endpoints.ts",
@@ -623,7 +668,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -658,7 +706,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/layer.ts",
@@ -693,7 +744,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -753,7 +807,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -789,7 +846,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -824,7 +884,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -859,7 +922,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -894,7 +960,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -929,7 +998,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -980,7 +1052,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1016,7 +1091,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1071,7 +1149,10 @@
             "character": 3
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1107,7 +1188,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1142,7 +1226,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1177,7 +1264,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1212,7 +1302,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1270,7 +1363,10 @@
             "character": 19
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1306,7 +1402,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1341,7 +1440,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1376,7 +1478,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1411,7 +1516,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1469,7 +1577,10 @@
             "character": 19
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1505,7 +1616,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1540,7 +1654,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1575,7 +1692,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1632,7 +1752,10 @@
             "character": 3
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1668,7 +1791,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1703,7 +1829,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/errors.ts",
@@ -1738,7 +1867,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1795,7 +1927,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1831,7 +1966,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1885,7 +2023,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -1921,7 +2062,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -1978,7 +2122,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -2014,7 +2161,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2072,7 +2222,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -2108,7 +2261,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2165,7 +2321,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "serdeRenameAware"
       },
       "typescript": [
         {
@@ -2201,7 +2360,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2258,7 +2420,10 @@
             "character": 0
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAndRoutePlaceholder"
       },
       "typescript": [
         {
@@ -2294,7 +2459,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2350,7 +2518,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -2386,7 +2557,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2421,7 +2595,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2456,7 +2633,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2507,7 +2687,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -2543,7 +2726,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2578,7 +2764,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2613,7 +2802,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {
@@ -2664,7 +2856,10 @@
             "character": 1
           }
         },
-        "renamable": true
+        "renamable": true,
+        "role": "rustDeclaration",
+        "language": "rust",
+        "renameStrategy": "rustAnalyzer"
       },
       "typescript": [
         {
@@ -2700,7 +2895,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2735,7 +2933,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         },
         {
           "file": "target/api-contract/effect-v4/packages/_workspace_server-api/schemas.ts",
@@ -2770,7 +2971,10 @@
             }
           },
           "generated": true,
-          "renamable": false
+          "renamable": false,
+          "role": "generatedDefinition",
+          "language": "typescript",
+          "renameStrategy": "generatedReadOnly"
         }
       ],
       "metadata": {

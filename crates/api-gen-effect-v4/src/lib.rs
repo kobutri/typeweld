@@ -404,6 +404,8 @@ struct LinkedSymbol {
     id: String,
     kind: String,
     rust: GraphLocation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rust_references: Vec<GraphLocation>,
     #[serde(default)]
     typescript: Vec<GraphLocation>,
     #[serde(default)]
@@ -455,6 +457,12 @@ struct GraphLocation {
     generated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     renamable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rename_strategy: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -479,7 +487,8 @@ fn endpoint_symbol(
     LinkedSymbol {
         id: endpoint.id.as_str().to_owned(),
         kind: "endpoint".to_owned(),
-        rust: rust_location(&endpoint.source, Some(true)),
+        rust: rust_declaration_location(&endpoint.source, Some(true), "rustAnalyzer"),
+        rust_references: router_mount_locations(endpoint),
         typescript: generated_locations(package, endpoint.id.as_str(), "endpoint"),
         metadata: SymbolMetadata {
             method: Some(endpoint.method.as_str().to_owned()),
@@ -507,7 +516,8 @@ fn type_symbol(package: &GeneratedPackage, type_def: &TypeDef) -> LinkedSymbol {
     LinkedSymbol {
         id: type_def.id.as_str().to_owned(),
         kind: "type".to_owned(),
-        rust: rust_location(&type_def.source, Some(true)),
+        rust: rust_declaration_location(&type_def.source, Some(true), "rustAnalyzer"),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, type_def.id.as_str(), "type"),
         metadata: SymbolMetadata {
             rust_path: type_def.rust_path.clone(),
@@ -525,7 +535,8 @@ fn error_type_symbol(package: &GeneratedPackage, error: &ErrorDef) -> LinkedSymb
     LinkedSymbol {
         id: error.id.as_str().to_owned(),
         kind: "error".to_owned(),
-        rust: rust_location(&error.source, Some(true)),
+        rust: rust_declaration_location(&error.source, Some(true), "rustAnalyzer"),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, error.id.as_str(), "error"),
         metadata: SymbolMetadata {
             rust_path: error.rust_path.clone(),
@@ -548,7 +559,8 @@ fn error_variant_symbol(
     LinkedSymbol {
         id: variant.id.as_str().to_owned(),
         kind: "errorVariant".to_owned(),
-        rust: rust_location(&variant.source, Some(true)),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, variant.id.as_str(), "errorVariant"),
         metadata: SymbolMetadata {
             rust_path: error
@@ -578,7 +590,8 @@ fn error_tag_symbol(
     LinkedSymbol {
         id: id.clone(),
         kind: "errorTag".to_owned(),
-        rust: rust_location(&variant.source, Some(true)),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, &id, "errorTag"),
         metadata: SymbolMetadata {
             rust_path: path_with(&error.rust_path, &[&variant.rust_name]),
@@ -604,7 +617,8 @@ fn field_symbol(
     LinkedSymbol {
         id: field.id.as_str().to_owned(),
         kind: kind.to_owned(),
-        rust: rust_location(&field.source, Some(true)),
+        rust: rust_declaration_location(&field.source, Some(true), rust_rename_strategy(kind)),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, field.id.as_str(), kind),
         metadata: SymbolMetadata {
             rust_path,
@@ -671,7 +685,8 @@ fn enum_variant_symbol(
     LinkedSymbol {
         id: variant.id.as_str().to_owned(),
         kind: "enumVariant".to_owned(),
-        rust: rust_location(&variant.source, Some(true)),
+        rust: rust_declaration_location(&variant.source, Some(true), "serdeRenameAware"),
+        rust_references: Vec::new(),
         typescript: generated_locations(package, variant.id.as_str(), "enumVariant"),
         metadata: SymbolMetadata {
             rust_path: path_with(&type_def.rust_path, &[&variant.rust_name]),
@@ -783,6 +798,9 @@ fn generated_locations(
                 full_range: Some(range),
                 generated: true,
                 renamable: Some(false),
+                role: Some("generatedDefinition"),
+                language: Some("typescript"),
+                rename_strategy: Some("generatedReadOnly"),
             }
         })
         .collect()
@@ -794,7 +812,51 @@ fn error_tag_symbol_id(variant: &ErrorVariant) -> String {
         .to_owned()
 }
 
-fn rust_location(source: &SourceRange, renamable: Option<bool>) -> GraphLocation {
+fn router_mount_locations(endpoint: &Endpoint) -> Vec<GraphLocation> {
+    endpoint
+        .router_mounts
+        .iter()
+        .map(|source| {
+            rust_location_with_metadata(
+                source,
+                Some(true),
+                Some("rustRouterMount"),
+                Some("rust"),
+                Some("rustAnalyzerReference"),
+            )
+        })
+        .collect()
+}
+
+fn rust_rename_strategy(kind: &str) -> &'static str {
+    match kind {
+        "routeParam" => "rustAndRoutePlaceholder",
+        "field" | "errorField" | "enumVariant" | "errorVariant" | "errorTag" => "serdeRenameAware",
+        _ => "rustAnalyzer",
+    }
+}
+
+fn rust_declaration_location(
+    source: &SourceRange,
+    renamable: Option<bool>,
+    rename_strategy: &'static str,
+) -> GraphLocation {
+    rust_location_with_metadata(
+        source,
+        renamable,
+        Some("rustDeclaration"),
+        Some("rust"),
+        Some(rename_strategy),
+    )
+}
+
+fn rust_location_with_metadata(
+    source: &SourceRange,
+    renamable: Option<bool>,
+    role: Option<&'static str>,
+    language: Option<&'static str>,
+    rename_strategy: Option<&'static str>,
+) -> GraphLocation {
     let range = range_from_source(source);
     let full_range = source
         .full_range
@@ -808,6 +870,9 @@ fn rust_location(source: &SourceRange, renamable: Option<bool>) -> GraphLocation
         full_range: Some(full_range),
         generated: false,
         renamable,
+        role,
+        language,
+        rename_strategy,
     }
 }
 
@@ -2908,6 +2973,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                 response: ResponseShape::Json(type_ref("i64")),
                 errors: Vec::new(),
                 source: source(),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             }],
             ..ApiContract::default()
@@ -3173,6 +3239,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     name: "GetUserError".to_owned(),
                 }],
                 source: source(),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             }],
             ..ApiContract::default()
@@ -3224,6 +3291,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             response: ResponseShape::Empty,
             errors: Vec::new(),
             source: source(),
+            router_mounts: Vec::new(),
             allow_unused: false,
         };
 
@@ -3264,6 +3332,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     name: "EventError".to_owned(),
                 }],
                 source: source(),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             }],
             ..ApiContract::default()
@@ -3318,6 +3387,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     response: ResponseShape::Binary { content_type: None },
                     errors: Vec::new(),
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -3346,6 +3416,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     response: ResponseShape::Json(item),
                     errors: Vec::new(),
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
             ],
@@ -3400,6 +3471,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     name: "GetUserError".to_owned(),
                 }],
                 source: source(),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             }],
             ..ApiContract::default()
@@ -3464,6 +3536,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     name: "EventError".to_owned(),
                 }],
                 source: source(),
+                router_mounts: Vec::new(),
                 allow_unused: false,
             }],
             ..ApiContract::default()
@@ -3518,6 +3591,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     response: ResponseShape::Binary { content_type: None },
                     errors: Vec::new(),
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -3546,6 +3620,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
                     response: ResponseShape::Json(type_ref("CatalogItem")),
                     errors: Vec::new(),
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
             ],
@@ -3684,6 +3759,9 @@ export * from "./layer"
     #[test]
     fn renders_symbol_graph_for_generated_package() {
         let mut contract = api_test_fixtures::basic_contract();
+        contract.endpoints[0]
+            .router_mounts
+            .push(source_file("crates/server/src/routes.rs", 42));
         contract.types.push(TypeDef {
             id: SymbolId::new("fixture:type:AccountState"),
             rust_path: vec![
@@ -3723,14 +3801,26 @@ export * from "./layer"
             endpoint["metadata"]["tsPath"],
             serde_json::json!(["users", "getUser"])
         );
+        assert_eq!(endpoint["rust"]["role"], "rustDeclaration");
+        assert_eq!(endpoint["rust"]["language"], "rust");
+        assert_eq!(endpoint["rust"]["renameStrategy"], "rustAnalyzer");
         assert!(endpoint["rust"]["nameRange"].is_object());
         assert!(endpoint["rust"]["fullRange"].is_object());
+        let router_mounts = endpoint["rustReferences"]
+            .as_array()
+            .expect("endpoint rust references");
+        assert_eq!(router_mounts.len(), 1);
+        assert_eq!(router_mounts[0]["role"], "rustRouterMount");
+        assert_eq!(router_mounts[0]["language"], "rust");
+        assert_eq!(router_mounts[0]["renameStrategy"], "rustAnalyzerReference");
         assert!(endpoint["typescript"]
             .as_array()
             .expect("endpoint ts locations")
             .iter()
             .any(|location| location["generated"] == true
                 && location["renamable"] == false
+                && location["role"] == "generatedDefinition"
+                && location["language"] == "typescript"
                 && location["file"]
                     .as_str()
                     .is_some_and(|file| file.ends_with("endpoints.ts"))));
@@ -3739,6 +3829,11 @@ export * from "./layer"
             .expect("endpoint reserved names")
             .iter()
             .any(|name| name.as_str() == Some("createUser")));
+        let route_param = find_symbol(symbols, "fixture:field:getUser:id");
+        assert_eq!(
+            route_param["rust"]["renameStrategy"],
+            "rustAndRoutePlaceholder"
+        );
         assert!(endpoint["typescript"]
             .as_array()
             .expect("endpoint ts locations")
@@ -4076,6 +4171,7 @@ export * from "./layer"
                     response: ResponseShape::Json(item.clone()),
                     errors: vec![error_ref.clone()],
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -4099,6 +4195,7 @@ export * from "./layer"
                     response: ResponseShape::Created(item.clone()),
                     errors: vec![error_ref.clone()],
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -4127,6 +4224,7 @@ export * from "./layer"
                     response: ResponseShape::Binary { content_type: None },
                     errors: vec![error_ref.clone()],
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -4155,6 +4253,7 @@ export * from "./layer"
                     response: ResponseShape::Json(item),
                     errors: vec![error_ref.clone()],
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -4183,6 +4282,7 @@ export * from "./layer"
                     response: ResponseShape::Stream(event),
                     errors: vec![error_ref],
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
                 Endpoint {
@@ -4201,6 +4301,7 @@ export * from "./layer"
                     response: ResponseShape::Empty,
                     errors: Vec::new(),
                     source: source(),
+                    router_mounts: Vec::new(),
                     allow_unused: false,
                 },
             ],
