@@ -420,6 +420,7 @@ pub enum Optionality {
     Required,
     Optional,
     Nullable,
+    OptionalNullable,
 }
 
 /// A data enum variant.

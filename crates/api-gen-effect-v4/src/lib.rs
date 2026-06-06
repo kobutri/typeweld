@@ -943,7 +943,10 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
         has_fields = true;
         writer.push("    readonly ");
         mark_property_key(writer, &field.id, "routeParam", &field.ts_name);
-        if matches!(field.optionality, Optionality::Optional) {
+        if matches!(
+            field.optionality,
+            Optionality::Optional | Optionality::OptionalNullable
+        ) {
             writer.push("?");
         }
         writer.push(": ");
@@ -954,7 +957,10 @@ fn write_tracked_endpoint_args(writer: &mut TrackedWriter, endpoint: &Endpoint) 
         has_fields = true;
         writer.push("    readonly ");
         mark_property_key(writer, &field.id, "queryParam", &field.ts_name);
-        if matches!(field.optionality, Optionality::Optional) {
+        if matches!(
+            field.optionality,
+            Optionality::Optional | Optionality::OptionalNullable
+        ) {
             writer.push("?");
         }
         writer.push(": ");
@@ -1348,7 +1354,10 @@ fn write_tracked_fetch_service_method(writer: &mut TrackedWriter, endpoint: &End
 
 fn render_endpoint_arg_field_type(field: &Field) -> String {
     let mut field_type = render_ts_type_ref(&field.type_ref);
-    if matches!(field.optionality, Optionality::Nullable) {
+    if matches!(
+        field.optionality,
+        Optionality::Nullable | Optionality::OptionalNullable
+    ) {
         field_type.push_str(" | null");
     }
     field_type
@@ -1883,6 +1892,7 @@ fn render_field_schema(field: &Field) -> String {
         Optionality::Required => schema,
         Optionality::Optional => format!("Schema.optionalKey({schema})"),
         Optionality::Nullable => format!("Schema.NullOr({schema})"),
+        Optionality::OptionalNullable => format!("Schema.optionalKey(Schema.NullOr({schema}))"),
     }
 }
 
@@ -2038,8 +2048,20 @@ mod tests {
                             Optionality::Required,
                         ),
                         field(
+                            "avatar_url",
+                            "avatarURL",
+                            type_ref("String"),
+                            Optionality::Nullable,
+                        ),
+                        field(
                             "nickname",
                             "nickname",
+                            type_ref("String"),
+                            Optionality::OptionalNullable,
+                        ),
+                        field(
+                            "timezone",
+                            "timezone",
                             type_ref("String"),
                             Optionality::Optional,
                         ),
@@ -2060,7 +2082,9 @@ import { Schema } from "effect"
 export const User = Schema.Struct({
   id: UserId,
   displayName: Schema.String,
-  nickname: Schema.optionalKey(Schema.String),
+  avatarURL: Schema.NullOr(Schema.String),
+  nickname: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  timezone: Schema.optionalKey(Schema.String),
 })
 export type User = Schema.Schema.Type<typeof User>
 export type UserEncoded = Schema.Codec.Encoded<typeof User>

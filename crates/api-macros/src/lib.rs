@@ -586,19 +586,19 @@ fn named_field_metadata<'a>(
         let field_ty = &field.ty;
         let serde = SerdeAttrs::from_attrs(&field.attrs)?;
         serde.validate_field(derive, field)?;
+        let field_shape = FieldWireShape::from_type(field_ty, &serde)?;
         let wire_name = serde
             .rename
             .unwrap_or_else(|| apply_rename_rule(&field_name, rename_all));
-        let optional = serde.skip_serializing_if_option_none;
 
         defs.push(field_def(
             owner_name,
             &field_name,
             &wire_name,
-            field_ty,
-            optional,
+            field_shape.type_ref_ty,
+            field_shape.optionality,
         ));
-        register_types.push(register_type_call(field_ty));
+        register_types.push(register_type_call(field_shape.type_ref_ty));
     }
 
     Ok(FieldMetadata {
@@ -872,13 +872,9 @@ fn field_def(
     field_name: &str,
     wire_name: &str,
     field_ty: &Type,
-    optional: bool,
+    optionality: WireOptionality,
 ) -> proc_macro2::TokenStream {
-    let optionality = if optional {
-        quote!(::api_core::ir::Optionality::Optional)
-    } else {
-        quote!(::api_core::ir::Optionality::Required)
-    };
+    let optionality = optionality.tokens();
 
     quote! {
         ::api_core::ir::Field {
@@ -937,6 +933,7 @@ struct SerdeAttrs {
     aliases: Vec<String>,
     transparent: bool,
     deny_unknown_fields: bool,
+    default: bool,
     skip_serializing_if_option_none: bool,
 }
 
@@ -1026,10 +1023,11 @@ impl SerdeAttrs {
                          field so the generated schema has an explicit shape",
                     ))
                 } else if meta.path.is_ident("default") {
-                    Err(meta.error(
-                        "serde default is not represented in the API IR yet; remove it or use an \
-                         explicit request DTO until optional/default decoding is modeled",
-                    ))
+                    serde.default = true;
+                    if meta.input.peek(syn::Token![=]) {
+                        let _: LitStr = meta.value()?.parse()?;
+                    }
+                    Ok(())
                 } else if meta.path.is_ident("skip")
                     || meta.path.is_ident("skip_serializing")
                     || meta.path.is_ident("skip_deserializing")
@@ -1090,12 +1088,24 @@ impl SerdeAttrs {
                 ),
             ));
         }
+        if self.default {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} supports serde default only on fields"),
+            ));
+        }
 
         Ok(())
     }
 
     fn validate_newtype_container(&self, derive: &str, ident: &syn::Ident) -> syn::Result<()> {
         self.reject_enum_only_attrs(derive, ident)?;
+        if self.default {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} supports serde default only on fields"),
+            ));
+        }
         if self.rename_all.is_some() || self.rename_all_fields.is_some() {
             return Err(syn::Error::new_spanned(
                 ident,
@@ -1121,6 +1131,12 @@ impl SerdeAttrs {
             return Err(syn::Error::new_spanned(
                 ident,
                 format!("{derive} enums cannot use serde transparent"),
+            ));
+        }
+        if self.default {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} supports serde default only on fields"),
             ));
         }
 
@@ -1164,6 +1180,12 @@ impl SerdeAttrs {
             return Err(syn::Error::new_spanned(
                 variant,
                 format!("{derive} supports serde rename_all_fields only on enum containers"),
+            ));
+        }
+        if self.default {
+            return Err(syn::Error::new_spanned(
+                variant,
+                format!("{derive} supports serde default only on fields"),
             ));
         }
         if self.transparent {
@@ -1218,6 +1240,7 @@ impl SerdeAttrs {
             || self.tag.is_some()
             || self.transparent
             || self.deny_unknown_fields
+            || self.default
             || self.skip_serializing_if_option_none
             || !self.aliases.is_empty()
         {
@@ -1242,6 +1265,57 @@ impl SerdeAttrs {
         }
 
         Ok(())
+    }
+}
+
+struct FieldWireShape<'a> {
+    type_ref_ty: &'a Type,
+    optionality: WireOptionality,
+}
+
+impl<'a> FieldWireShape<'a> {
+    fn from_type(field_ty: &'a Type, serde: &SerdeAttrs) -> syn::Result<Self> {
+        let option_inner = extractor_inner(field_ty, "Option");
+        if serde.skip_serializing_if_option_none && option_inner.is_none() {
+            return Err(syn::Error::new_spanned(
+                field_ty,
+                "ApiType supports skip_serializing_if = \"Option::is_none\" only on Option<T> fields",
+            ));
+        }
+
+        let optionality = match (
+            option_inner.is_some(),
+            serde.default || serde.skip_serializing_if_option_none,
+        ) {
+            (true, true) => WireOptionality::OptionalNullable,
+            (true, false) => WireOptionality::Nullable,
+            (false, true) => WireOptionality::Optional,
+            (false, false) => WireOptionality::Required,
+        };
+
+        Ok(Self {
+            type_ref_ty: option_inner.unwrap_or(field_ty),
+            optionality,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WireOptionality {
+    Required,
+    Optional,
+    Nullable,
+    OptionalNullable,
+}
+
+impl WireOptionality {
+    fn tokens(self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Required => quote!(::api_core::ir::Optionality::Required),
+            Self::Optional => quote!(::api_core::ir::Optionality::Optional),
+            Self::Nullable => quote!(::api_core::ir::Optionality::Nullable),
+            Self::OptionalNullable => quote!(::api_core::ir::Optionality::OptionalNullable),
+        }
     }
 }
 

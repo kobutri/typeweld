@@ -24,7 +24,7 @@ enum UserEvent {
     Renamed { name: String },
 }
 
-#[derive(api_macros::ApiType)]
+#[derive(api_macros::ApiType, Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 struct Profile {
@@ -33,6 +33,8 @@ struct Profile {
     avatar_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nickname: Option<String>,
+    #[serde(default)]
+    theme: String,
 }
 
 #[derive(api_macros::ApiType)]
@@ -141,8 +143,59 @@ fn serde_rename_lowering_updates_wire_names() {
     assert_eq!(shape.fields[0].wire_name, "displayName");
     assert!(shape.fields[0].source.start_line > 0);
     assert_eq!(shape.fields[1].wire_name, "avatarURL");
+    assert_eq!(shape.fields[1].type_ref.name, "String");
+    assert_eq!(shape.fields[1].optionality, Optionality::Nullable);
     assert_eq!(shape.fields[2].wire_name, "nickname");
-    assert_eq!(shape.fields[2].optionality, Optionality::Optional);
+    assert_eq!(shape.fields[2].type_ref.name, "String");
+    assert_eq!(shape.fields[2].optionality, Optionality::OptionalNullable);
+    assert_eq!(shape.fields[3].wire_name, "theme");
+    assert_eq!(shape.fields[3].optionality, Optionality::Optional);
+}
+
+#[test]
+fn serde_optionality_and_nullability_match_generated_schema_expectations() {
+    let value = Profile {
+        display_name: "Ada".to_owned(),
+        avatar_url: None,
+        nickname: None,
+        theme: "dark".to_owned(),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&value).expect("serialize profile"),
+        json!({
+            "displayName": "Ada",
+            "avatarURL": null,
+            "theme": "dark",
+        })
+    );
+
+    let decoded = serde_json::from_value::<Profile>(json!({
+        "displayName": "Ada",
+        "avatarURL": null,
+        "nickname": null,
+    }))
+    .expect("deserialize missing default and nullable option");
+    assert_eq!(
+        decoded,
+        Profile {
+            display_name: "Ada".to_owned(),
+            avatar_url: None,
+            nickname: None,
+            theme: String::new(),
+        }
+    );
+
+    let schemas = api_gen_effect_v4::render_schemas(&ApiContract {
+        package_name: "@workspace/test-api".to_owned(),
+        endpoints: Vec::new(),
+        types: vec![Profile::type_def()],
+        errors: Vec::new(),
+    });
+
+    assert!(schemas.contains("avatarURL: Schema.NullOr(Schema.String)"));
+    assert!(schemas.contains("nickname: Schema.optionalKey(Schema.NullOr(Schema.String))"));
+    assert!(schemas.contains("theme: Schema.optionalKey(Schema.String)"));
 }
 
 #[test]

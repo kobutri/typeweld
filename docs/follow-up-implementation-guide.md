@@ -364,7 +364,7 @@ Acceptance criteria:
 - Flatten/default/skip behavior is represented or rejected precisely.
 - Unsupported serializers fail with actionable diagnostics.
 
-### C2. Fix optionality and nullability
+### C2. Fix optionality and nullability [done]
 
 Goal: distinguish missing and null.
 
