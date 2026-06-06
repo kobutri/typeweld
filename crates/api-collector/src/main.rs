@@ -1928,6 +1928,7 @@ pub struct AuditEvent {
 }
 
 #[derive(api_macros::ApiError)]
+#[serde(tag = "_tag")]
 pub enum GetUserError {
     #[api_error(status = 404)]
     NotFound,
@@ -2073,6 +2074,7 @@ pub struct User {
 }
 
 #[derive(api_macros::ApiError)]
+#[serde(tag = "_tag")]
 pub enum GetUserError {
     #[api_error(status = 404)]
     UserNotFound { id: i64 },

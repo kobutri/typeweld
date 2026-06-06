@@ -1,0 +1,5 @@
+error: serde default is not represented in the API IR yet; remove it or use an explicit request DTO until optional/default decoding is modeled
+ --> tests/ui/api_type_unsupported_default.rs:3:13
+  |
+3 |     #[serde(default)]
+  |             ^^^^^^^

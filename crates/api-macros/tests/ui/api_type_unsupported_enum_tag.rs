@@ -1,7 +1,7 @@
 #[derive(api_macros::ApiType)]
-#[serde(tag = "_tag")]
+#[serde(tag = "kind")]
 enum UserEvent {
-    Renamed(String),
+    Created,
 }
 
 fn main() {}

@@ -11,7 +11,7 @@ struct UserEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "_tag", rename_all = "camelCase")]
 enum EventError {
     #[api_error(status = 401)]
     Unauthorized,

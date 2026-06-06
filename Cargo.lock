@@ -84,8 +84,11 @@ name = "api-macros"
 version = "0.0.0"
 dependencies = [
  "api-core",
+ "api-gen-effect-v4",
  "proc-macro2",
  "quote",
+ "serde",
+ "serde_json",
  "syn",
  "trybuild",
 ]

@@ -47,21 +47,46 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let shape = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => {
-                let field_metadata = named_field_metadata(
-                    &rust_name,
-                    fields.named.iter(),
-                    container_serde.rename_all,
-                )?;
-                let field_defs = field_metadata.defs;
-                register_types.extend(field_metadata.register_types);
+                container_serde.validate_struct_container("ApiType", &ident)?;
 
-                quote! {
-                    ::api_core::ir::TypeShape::Struct(::api_core::ir::StructShape {
-                        fields: vec![#(#field_defs),*],
-                    })
+                if container_serde.transparent {
+                    if fields.named.len() != 1 {
+                        return Err(syn::Error::new_spanned(
+                            ident,
+                            "serde transparent ApiType structs must contain exactly one field",
+                        ));
+                    }
+
+                    let field = fields.named.first().expect("length checked");
+                    let field_serde = SerdeAttrs::from_attrs(&field.attrs)?;
+                    field_serde.validate_transparent_field("ApiType", field)?;
+                    let field_ty = &field.ty;
+                    register_types.push(register_type_call(field_ty));
+
+                    quote! {
+                        ::api_core::ir::TypeShape::Newtype(Box::new(
+                            <#field_ty as ::api_core::ApiType>::type_ref()
+                        ))
+                    }
+                } else {
+                    let field_metadata = named_field_metadata(
+                        "ApiType",
+                        &rust_name,
+                        fields.named.iter(),
+                        container_serde.rename_all,
+                    )?;
+                    let field_defs = field_metadata.defs;
+                    register_types.extend(field_metadata.register_types);
+
+                    quote! {
+                        ::api_core::ir::TypeShape::Struct(::api_core::ir::StructShape {
+                            fields: vec![#(#field_defs),*],
+                        })
+                    }
                 }
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                container_serde.validate_newtype_container("ApiType", &ident)?;
                 let field_ty = &fields.unnamed.first().expect("length checked").ty;
                 register_types.push(register_type_call(field_ty));
 
@@ -79,6 +104,7 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             }
         },
         Data::Enum(data) => {
+            container_serde.validate_enum_container("ApiType", &ident)?;
             let variants = data
                 .variants
                 .iter()
@@ -86,16 +112,21 @@ fn expand_api_type(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     let variant_ident = &variant.ident;
                     let variant_name = variant_ident.to_string();
                     let variant_serde = SerdeAttrs::from_attrs(&variant.attrs)?;
-                    let wire_name = variant_serde.rename.unwrap_or_else(|| {
+                    variant_serde.validate_enum_variant("ApiType", variant)?;
+                    let variant_field_rename_all = variant_serde
+                        .rename_all
+                        .or(container_serde.rename_all_fields);
+                    let wire_name = variant_serde.rename.clone().unwrap_or_else(|| {
                         apply_rename_rule(&variant_name, container_serde.rename_all)
                     });
                     let variant_fields = match &variant.fields {
                         Fields::Unit => Vec::new(),
                         Fields::Named(fields) => {
                             let field_metadata = named_field_metadata(
+                                "ApiType",
                                 &format!("{rust_name}::{variant_name}"),
                                 fields.named.iter(),
-                                None,
+                                variant_field_rename_all,
                             )?;
                             register_types.extend(field_metadata.register_types);
                             field_metadata.defs
@@ -204,10 +235,11 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 
     let Data::Enum(data) = input.data else {
         return Err(syn::Error::new_spanned(
-            ident,
+            &ident,
             "ApiError can only be derived for enums",
         ));
     };
+    container_serde.validate_enum_container("ApiError", &ident)?;
 
     let mut api_type_variants = Vec::new();
     let mut error_variants = Vec::new();
@@ -219,6 +251,10 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         let variant_name = variant_ident.to_string();
         let status = ErrorAttrs::from_attrs(&variant.attrs, variant)?.status;
         let variant_serde = SerdeAttrs::from_attrs(&variant.attrs)?;
+        variant_serde.validate_enum_variant("ApiError", variant)?;
+        let variant_field_rename_all = variant_serde
+            .rename_all
+            .or(container_serde.rename_all_fields);
         let tag = variant_serde
             .rename
             .unwrap_or_else(|| apply_rename_rule(&variant_name, container_serde.rename_all));
@@ -226,9 +262,10 @@ fn expand_api_error(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             Fields::Unit => Vec::new(),
             Fields::Named(fields) => {
                 let field_metadata = named_field_metadata(
+                    "ApiError",
                     &format!("{rust_name}::{variant_name}"),
                     fields.named.iter(),
-                    None,
+                    variant_field_rename_all,
                 )?;
                 register_types.extend(field_metadata.register_types);
                 field_metadata.defs
@@ -532,6 +569,7 @@ struct FieldMetadata {
 }
 
 fn named_field_metadata<'a>(
+    derive: &str,
     owner_name: &str,
     fields: impl Iterator<Item = &'a syn::Field>,
     rename_all: Option<RenameRule>,
@@ -547,6 +585,7 @@ fn named_field_metadata<'a>(
         let field_name = field_ident.to_string();
         let field_ty = &field.ty;
         let serde = SerdeAttrs::from_attrs(&field.attrs)?;
+        serde.validate_field(derive, field)?;
         let wire_name = serde
             .rename
             .unwrap_or_else(|| apply_rename_rule(&field_name, rename_all));
@@ -893,6 +932,11 @@ impl RenameRule {
 struct SerdeAttrs {
     rename: Option<String>,
     rename_all: Option<RenameRule>,
+    rename_all_fields: Option<RenameRule>,
+    tag: Option<String>,
+    aliases: Vec<String>,
+    transparent: bool,
+    deny_unknown_fields: bool,
     skip_serializing_if_option_none: bool,
 }
 
@@ -945,6 +989,12 @@ impl SerdeAttrs {
         for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename") {
+                    if !meta.input.peek(syn::Token![=]) {
+                        return Err(meta.error(
+                            "serde rename with separate serialize/deserialize names is not \
+                             supported by ApiType; use rename = \"...\" for one wire name",
+                        ));
+                    }
                     let value: LitStr = meta.value()?.parse()?;
                     serde.rename = Some(value.value());
                     Ok(())
@@ -952,18 +1002,246 @@ impl SerdeAttrs {
                     let value: LitStr = meta.value()?.parse()?;
                     serde.rename_all = Some(RenameRule::parse(&value.value(), &value)?);
                     Ok(())
+                } else if meta.path.is_ident("rename_all_fields") {
+                    let value: LitStr = meta.value()?.parse()?;
+                    serde.rename_all_fields = Some(RenameRule::parse(&value.value(), &value)?);
+                    Ok(())
+                } else if meta.path.is_ident("tag") {
+                    let value: LitStr = meta.value()?.parse()?;
+                    serde.tag = Some(value.value());
+                    Ok(())
+                } else if meta.path.is_ident("content") {
+                    Err(meta.error(
+                        "serde content is not supported by ApiType; generated API enums use \
+                         internally tagged #[serde(tag = \"_tag\")] shapes",
+                    ))
+                } else if meta.path.is_ident("untagged") {
+                    Err(meta.error(
+                        "serde untagged enums are not supported by ApiType because generated \
+                         schemas require an explicit _tag discriminator",
+                    ))
+                } else if meta.path.is_ident("flatten") {
+                    Err(meta.error(
+                        "serde flatten is not supported by ApiType yet; use a named nested DTO \
+                         field so the generated schema has an explicit shape",
+                    ))
+                } else if meta.path.is_ident("default") {
+                    Err(meta.error(
+                        "serde default is not represented in the API IR yet; remove it or use an \
+                         explicit request DTO until optional/default decoding is modeled",
+                    ))
+                } else if meta.path.is_ident("skip")
+                    || meta.path.is_ident("skip_serializing")
+                    || meta.path.is_ident("skip_deserializing")
+                {
+                    Err(meta.error(
+                        "serde skip attributes are not represented in the API IR; remove skipped \
+                         fields from the exported DTO or use a separate API DTO",
+                    ))
+                } else if meta.path.is_ident("alias") {
+                    let value: LitStr = meta.value()?.parse()?;
+                    serde.aliases.push(value.value());
+                    Ok(())
+                } else if meta.path.is_ident("transparent") {
+                    serde.transparent = true;
+                    Ok(())
+                } else if meta.path.is_ident("deny_unknown_fields") {
+                    serde.deny_unknown_fields = true;
+                    Ok(())
                 } else if meta.path.is_ident("skip_serializing_if") {
                     let value: LitStr = meta.value()?.parse()?;
-                    serde.skip_serializing_if_option_none =
-                        value.value().ends_with("Option::is_none");
-                    Ok(())
+                    if value.value().ends_with("Option::is_none") {
+                        serde.skip_serializing_if_option_none = true;
+                        Ok(())
+                    } else {
+                        Err(syn::Error::new_spanned(
+                            value,
+                            "ApiType supports only #[serde(skip_serializing_if = \
+                             \"Option::is_none\")] today; other predicates would make the \
+                             generated wire shape inaccurate",
+                        ))
+                    }
+                } else if meta.path.is_ident("serialize_with")
+                    || meta.path.is_ident("deserialize_with")
+                    || meta.path.is_ident("with")
+                {
+                    Err(meta.error(
+                        "custom serde serializers are not supported by ApiType unless an \
+                         explicit API wire-shape override is added; use a representable API DTO \
+                         or newtype instead",
+                    ))
                 } else {
-                    Ok(())
+                    Err(meta.error("unsupported serde attribute for ApiType"))
                 }
             })?;
         }
 
         Ok(serde)
+    }
+
+    fn validate_struct_container(&self, derive: &str, ident: &syn::Ident) -> syn::Result<()> {
+        self.reject_enum_only_attrs(derive, ident)?;
+        if self.rename_all_fields.is_some() {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "{derive} supports serde rename_all_fields only on enum containers with \
+                     struct variants"
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_newtype_container(&self, derive: &str, ident: &syn::Ident) -> syn::Result<()> {
+        self.reject_enum_only_attrs(derive, ident)?;
+        if self.rename_all.is_some() || self.rename_all_fields.is_some() {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} newtypes cannot use serde rename_all attributes"),
+            ));
+        }
+
+        if self.deny_unknown_fields {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "{derive} newtypes cannot use serde deny_unknown_fields because their wire \
+                     shape is the inner value"
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_enum_container(&self, derive: &str, ident: &syn::Ident) -> syn::Result<()> {
+        if self.transparent {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} enums cannot use serde transparent"),
+            ));
+        }
+
+        if self.deny_unknown_fields {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "{derive} enums cannot use serde deny_unknown_fields; put it on payload DTOs \
+                     with generated struct shapes instead"
+                ),
+            ));
+        }
+
+        match self.tag.as_deref() {
+            Some("_tag") => Ok(()),
+            Some(tag) => Err(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "{derive} enums support only #[serde(tag = \"_tag\")] because generated \
+                     TypeScript schemas use _tag discriminators; found tag `{tag}`"
+                ),
+            )),
+            None => Err(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "{derive} enums must use #[serde(tag = \"_tag\")] so Rust JSON and \
+                     generated TypeScript schemas share the same discriminator"
+                ),
+            )),
+        }
+    }
+
+    fn validate_enum_variant(&self, derive: &str, variant: &syn::Variant) -> syn::Result<()> {
+        if self.tag.is_some() {
+            return Err(syn::Error::new_spanned(
+                variant,
+                format!("{derive} supports serde tag only on enum containers"),
+            ));
+        }
+        if self.rename_all_fields.is_some() {
+            return Err(syn::Error::new_spanned(
+                variant,
+                format!("{derive} supports serde rename_all_fields only on enum containers"),
+            ));
+        }
+        if self.transparent {
+            return Err(syn::Error::new_spanned(
+                variant,
+                format!("{derive} enum variants cannot use serde transparent"),
+            ));
+        }
+        if self.deny_unknown_fields {
+            return Err(syn::Error::new_spanned(
+                variant,
+                format!("{derive} enum variants cannot use serde deny_unknown_fields"),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_field(&self, derive: &str, field: &syn::Field) -> syn::Result<()> {
+        if self.tag.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("{derive} fields cannot use serde tag"),
+            ));
+        }
+        if self.rename_all.is_some() || self.rename_all_fields.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("{derive} fields cannot use serde rename_all attributes"),
+            ));
+        }
+        if self.transparent {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("{derive} fields cannot use serde transparent"),
+            ));
+        }
+        if self.deny_unknown_fields {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("{derive} fields cannot use serde deny_unknown_fields"),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_transparent_field(&self, derive: &str, field: &syn::Field) -> syn::Result<()> {
+        if self.rename.is_some()
+            || self.rename_all.is_some()
+            || self.rename_all_fields.is_some()
+            || self.tag.is_some()
+            || self.transparent
+            || self.deny_unknown_fields
+            || self.skip_serializing_if_option_none
+            || !self.aliases.is_empty()
+        {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "{derive} serde transparent fields must not carry serde field-shape \
+                     attributes because the exported wire shape is the inner value"
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn reject_enum_only_attrs(&self, derive: &str, ident: &syn::Ident) -> syn::Result<()> {
+        if self.tag.is_some() {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("{derive} supports serde tag only on enums"),
+            ));
+        }
+
+        Ok(())
     }
 }
 

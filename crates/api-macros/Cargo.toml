@@ -16,6 +16,9 @@ syn = { version = "2.0", features = ["derive", "full"] }
 
 [dev-dependencies]
 api-core = { path = "../api-core" }
+api-gen-effect-v4 = { path = "../api-gen-effect-v4" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 trybuild = "1.0"
 
 [lints]

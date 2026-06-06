@@ -1,0 +1,5 @@
+error: ApiType enums must use #[serde(tag = "_tag")] so Rust JSON and generated TypeScript schemas share the same discriminator
+ --> tests/ui/api_type_missing_enum_tag.rs:2:6
+  |
+2 | enum UserEvent {
+  |      ^^^^^^^^^

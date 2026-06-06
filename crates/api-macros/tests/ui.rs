@@ -4,6 +4,14 @@ fn api_type_compile_failures_are_clear() {
     tests.compile_fail("tests/ui/api_type_tuple_variant.rs");
     tests.compile_fail("tests/ui/api_type_unsupported_field.rs");
     tests.compile_fail("tests/ui/api_type_unsupported_rename_all.rs");
+    tests.compile_fail("tests/ui/api_type_missing_enum_tag.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_enum_tag.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_content.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_untagged.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_flatten.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_default.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_skip.rs");
+    tests.compile_fail("tests/ui/api_type_unsupported_serializer.rs");
     tests.compile_fail("tests/ui/api_error_missing_status.rs");
     tests.compile_fail("tests/ui/api_error_invalid_status.rs");
     tests.compile_fail("tests/ui/api_endpoint_missing_path.rs");

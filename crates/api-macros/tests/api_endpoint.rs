@@ -10,6 +10,7 @@ struct User {
 }
 
 #[derive(api_macros::ApiError)]
+#[serde(tag = "_tag")]
 #[allow(dead_code)]
 enum GetUserError {
     #[api_error(status = 404)]

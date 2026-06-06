@@ -348,7 +348,7 @@ Acceptance criteria:
 
 ## Track C: macros, Serde, and compile-time validation
 
-### C1. Upgrade Serde interpretation
+### C1. Upgrade Serde interpretation [done]
 
 Goal: generated wire shapes should match Serde for API-relevant cases.
 

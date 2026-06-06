@@ -1,0 +1,5 @@
+error: serde content is not supported by ApiType; generated API enums use internally tagged #[serde(tag = "_tag")] shapes
+ --> tests/ui/api_type_unsupported_content.rs:2:23
+  |
+2 | #[serde(tag = "_tag", content = "value")]
+  |                       ^^^^^^^

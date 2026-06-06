@@ -44,7 +44,7 @@ struct CreateUserRequest {
 /// The generated Effect client puts these variants in the Effect error channel,
 /// alongside generated client/transport errors.
 #[derive(Clone, Debug, Deserialize, Serialize, api_macros::ApiError)]
-#[serde(rename_all = "PascalCase")]
+#[serde(tag = "_tag", rename_all = "PascalCase")]
 enum UserError {
     /// The status code is part of the API contract.
     #[api_error(status = 404)]
