@@ -1,4 +1,3 @@
-import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import {
   chmodSync,
@@ -11,7 +10,7 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, delimiter, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import test from "node:test"
+import { expect, it } from "@effect/vitest"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
@@ -20,15 +19,15 @@ const tsxCli = join(packageRoot, "..", "node_modules", "tsx", "dist", "cli.mjs")
 const wrapperModule = await import(pathToFileURL(wrapperPath).href)
 const binaryName = process.platform === "win32" ? "api-ls.exe" : "api-ls"
 
-test("package exposes api-ls as an executable bin", () => {
+it("package exposes api-ls as an executable bin", () => {
   const packageJson = JSON.parse(
     readFileSync(join(packageRoot, "package.json"), "utf8"),
   )
 
-  assert.equal(packageJson.bin["api-ls"], "./src/index.ts")
+  expect(packageJson.bin["api-ls"]).toBe("./src/index.ts")
 })
 
-test("resolves a packaged gateway binary before workspace and PATH candidates", () => {
+it("resolves a packaged gateway binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
   try {
     const fakePackageRoot = join(temp, "language-server")
@@ -46,13 +45,13 @@ test("resolves a packaged gateway binary before workspace and PATH candidates", 
       wrapperFile: fakeWrapper,
     })
 
-    assert.equal(resolved, fakeGateway)
+    expect(resolved).toBe(fakeGateway)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
 })
 
-test("resolves a local cargo build gateway from the current workspace", () => {
+it("resolves a local cargo build gateway from the current workspace", () => {
   const temp = createTempDir()
   try {
     const workspace = join(temp, "workspace")
@@ -70,13 +69,13 @@ test("resolves a local cargo build gateway from the current workspace", () => {
       wrapperFile: fakeWrapper,
     })
 
-    assert.equal(resolved, fakeGateway)
+    expect(resolved).toBe(fakeGateway)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
 })
 
-test("forwards arguments and stdio to the gateway", () => {
+it("forwards arguments and stdio to the gateway", () => {
   const temp = createTempDir()
   try {
     const fakeGateway = join(temp, binaryName)
@@ -101,9 +100,9 @@ test("forwards arguments and stdio to the gateway", () => {
       API_LS_BINARY: fakeGateway,
     }, "hello from editor")
 
-    assert.equal(result.status, 0)
-    assert.equal(result.stderr, "")
-    assert.deepEqual(JSON.parse(result.stdout), {
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(JSON.parse(result.stdout)).toEqual({
       argv: ["--stdio", "--trace", "verbose"],
       stdin: "hello from editor",
     })
@@ -112,7 +111,7 @@ test("forwards arguments and stdio to the gateway", () => {
   }
 })
 
-test("prints clear diagnostics when the configured gateway is missing", () => {
+it("prints clear diagnostics when the configured gateway is missing", () => {
   const temp = createTempDir()
   try {
     const missingGateway = join(temp, binaryName)
@@ -121,12 +120,12 @@ test("prints clear diagnostics when the configured gateway is missing", () => {
       API_LS_BINARY: missingGateway,
     })
 
-    assert.equal(result.status, 1)
-    assert.equal(result.stdout, "")
-    assert.match(result.stderr, /API_LS_BINARY points to/)
-    assert.match(result.stderr, /it does not exist/)
-    assert.match(result.stderr, /cargo build -p api-ls --bin api-ls/)
-    assert.match(result.stderr, /set API_LS_BINARY/)
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toMatch(/API_LS_BINARY points to/)
+    expect(result.stderr).toMatch(/it does not exist/)
+    expect(result.stderr).toMatch(/cargo build -p api-ls --bin api-ls/)
+    expect(result.stderr).toMatch(/set API_LS_BINARY/)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

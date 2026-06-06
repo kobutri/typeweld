@@ -8,7 +8,8 @@
     "./compat": "./src/compat.ts"
   },
   "scripts": {
-    "test:runtime": "rm -rf ../node_modules/.cache/effect-runtime-runtime-test ../node_modules/.cache/effect-runtime-runtime-test.tsbuildinfo && tsc --project tsconfig.json --outDir ../node_modules/.cache/effect-runtime-runtime-test --tsBuildInfoFile ../node_modules/.cache/effect-runtime-runtime-test.tsbuildinfo --noEmit false && tsx test/sse-runtime.mts ../node_modules/.cache/effect-runtime-runtime-test/index.js && tsx test/binary-runtime.mts ../node_modules/.cache/effect-runtime-runtime-test/index.js",
+    "test": "vitest run",
+    "test:runtime": "npm run test",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
