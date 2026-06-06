@@ -46,19 +46,18 @@ fn run_with_args(args: impl IntoIterator<Item = String>) -> Result<(), String> {
 fn collect_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     let options = CollectOptions::parse(args)?;
 
-    let package_name = options
-        .package_name
-        .clone()
-        .ok_or_else(|| "api collect requires --package-name <ts-package-name>".to_owned())?;
     let out = options
         .out
         .clone()
         .ok_or_else(|| "api collect requires --out <path>".to_owned())?;
 
     let contract = if options.empty {
+        let package_name = options.package_name.clone().ok_or_else(|| {
+            "api collect --empty requires --package-name <ts-package-name>".to_owned()
+        })?;
         collect_empty_contract(package_name)
     } else {
-        collect_cargo_contract(&options, &package_name)?
+        collect_cargo_contract(&options)?
     };
 
     write_contract_json(&contract, out).map_err(|error| error.to_string())
@@ -179,6 +178,20 @@ fn doctor_command(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct RustTsPackageMetadata {
+    ts_package: Option<String>,
+    api_root: Option<String>,
+    features: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct ResolvedCollectTarget {
+    ts_package_name: String,
+    api_root: Vec<String>,
+    features: Vec<String>,
+}
+
 #[derive(Debug)]
 struct CollectOptions {
     package_name: Option<String>,
@@ -240,17 +253,7 @@ impl CollectOptions {
     }
 }
 
-fn collect_cargo_contract(
-    options: &CollectOptions,
-    ts_package_name: &str,
-) -> Result<ApiContract, String> {
-    let cargo_package = options.cargo_package.as_deref().ok_or_else(|| {
-        "api collect requires --package <cargo-package> unless --empty is set".to_owned()
-    })?;
-    let api_root = options.api_root.as_deref().ok_or_else(|| {
-        "api collect requires --api-root <path::to::api> unless --empty is set".to_owned()
-    })?;
-
+fn collect_cargo_contract(options: &CollectOptions) -> Result<ApiContract, String> {
     let metadata = cargo_metadata::MetadataCommand::new()
         .manifest_path(&options.manifest_path)
         .exec()
@@ -260,9 +263,10 @@ fn collect_cargo_contract(
                 options.manifest_path.display()
             )
         })?;
-    let package = resolve_metadata_package(&metadata, cargo_package)?;
+    let package = resolve_collect_package(&metadata, options.cargo_package.as_deref())?;
+    let package_metadata = package_rust_ts_metadata(package)?;
     let lib_crate_name = package_lib_crate_name(package)?;
-    let api_root = normalize_api_root(api_root, &lib_crate_name)?;
+    let resolved = resolve_collect_target(options, package, package_metadata, &lib_crate_name)?;
     let target_dir = options
         .target_dir
         .clone()
@@ -275,23 +279,114 @@ fn collect_cargo_contract(
     write_temp_collector_crate(
         &collector_dir,
         package,
-        &api_root,
-        ts_package_name,
-        options,
+        &resolved,
+        options.no_default_features,
         &metadata,
     )?;
     run_temp_collector(&collector_dir)
 }
 
-fn resolve_metadata_package<'a>(
+fn resolve_collect_package<'a>(
     metadata: &'a cargo_metadata::Metadata,
-    package_name: &str,
+    package_name: Option<&str>,
 ) -> Result<&'a cargo_metadata::Package, String> {
+    if let Some(package_name) = package_name {
+        return metadata
+            .workspace_packages()
+            .into_iter()
+            .find(|package| package.name == package_name)
+            .ok_or_else(|| {
+                format!("api collect could not find workspace package `{package_name}`")
+            });
+    }
+
+    let api_packages = api_enabled_packages(metadata)?;
+    match api_packages.as_slice() {
+        [package] => Ok(*package),
+        [] => Err("api collect requires --package <cargo-package> because no workspace package declares [package.metadata.rust_ts]".to_owned()),
+        packages => Err(format!(
+            "api collect found multiple API-enabled packages ({}) ; pass --package <cargo-package>",
+            packages
+                .iter()
+                .map(|package| package.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn api_enabled_packages<'a>(
+    metadata: &'a cargo_metadata::Metadata,
+) -> Result<Vec<&'a cargo_metadata::Package>, String> {
     metadata
         .workspace_packages()
         .into_iter()
-        .find(|package| package.name == package_name)
-        .ok_or_else(|| format!("api collect could not find workspace package `{package_name}`"))
+        .filter_map(|package| match package_rust_ts_metadata(package) {
+            Ok(Some(_)) => Some(Ok(package)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn package_rust_ts_metadata(
+    package: &cargo_metadata::Package,
+) -> Result<Option<RustTsPackageMetadata>, String> {
+    let Some(value) = package.metadata.get("rust_ts") else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "invalid [package.metadata.rust_ts] for package `{}`: {error}",
+                package.name
+            )
+        })
+}
+
+fn resolve_collect_target(
+    options: &CollectOptions,
+    package: &cargo_metadata::Package,
+    package_metadata: Option<RustTsPackageMetadata>,
+    lib_crate_name: &str,
+) -> Result<ResolvedCollectTarget, String> {
+    let package_metadata = package_metadata.unwrap_or_default();
+    let ts_package_name = options
+        .package_name
+        .clone()
+        .or(package_metadata.ts_package)
+        .ok_or_else(|| {
+            format!(
+                "api collect package `{}` requires --package-name <ts-package-name> or package.metadata.rust_ts.ts_package",
+                package.name
+            )
+        })?;
+    let api_root = options
+        .api_root
+        .clone()
+        .or(package_metadata.api_root)
+        .ok_or_else(|| {
+            format!(
+                "api collect package `{}` requires --api-root <path::to::api> or package.metadata.rust_ts.api_root",
+                package.name
+            )
+        })?;
+    let features = if options.all_features {
+        let mut features = package.features.keys().cloned().collect::<Vec<_>>();
+        features.sort();
+        features
+    } else if options.features.is_empty() {
+        package_metadata.features.unwrap_or_default()
+    } else {
+        options.features.clone()
+    };
+
+    Ok(ResolvedCollectTarget {
+        ts_package_name,
+        api_root: normalize_api_root(&api_root, lib_crate_name)?,
+        features,
+    })
 }
 
 fn package_lib_crate_name(package: &cargo_metadata::Package) -> Result<String, String> {
@@ -338,9 +433,8 @@ fn normalize_api_root(api_root: &str, lib_crate_name: &str) -> Result<Vec<String
 fn write_temp_collector_crate(
     collector_dir: &Path,
     package: &cargo_metadata::Package,
-    api_root: &[String],
-    ts_package_name: &str,
-    options: &CollectOptions,
+    resolved: &ResolvedCollectTarget,
+    no_default_features: bool,
     metadata: &cargo_metadata::Metadata,
 ) -> Result<(), String> {
     let src_dir = collector_dir.join("src");
@@ -364,18 +458,18 @@ fn write_temp_collector_crate(
         })?
         .to_path_buf()
         .into_std_path_buf();
-    let features = selected_dependency_features(package, options);
-    let default_features = if options.no_default_features {
+    let default_features = if no_default_features {
         "default-features = false\n"
     } else {
         ""
     };
-    let features = if features.is_empty() {
+    let features = if resolved.features.is_empty() {
         String::new()
     } else {
         format!(
             "features = [{}]\n",
-            features
+            resolved
+                .features
                 .iter()
                 .map(|feature| toml_string(feature))
                 .collect::<Vec<_>>()
@@ -406,7 +500,7 @@ path = {package_dir}
         package_name = toml_string(package.name.as_str()),
         package_dir = toml_string(&package_dir.display().to_string()),
     );
-    let root_call = format!("target_api_package::{}()", api_root.join("::"));
+    let root_call = format!("target_api_package::{}()", resolved.api_root.join("::"));
     let main_rs = format!(
         r#"fn main() {{
     let root_module: api_core::ApiModule = {root_call};
@@ -422,7 +516,7 @@ path = {package_dir}
     );
 }}
 "#,
-        ts_package_name = rust_string(ts_package_name),
+        ts_package_name = rust_string(&resolved.ts_package_name),
     );
 
     fs::write(collector_dir.join("Cargo.toml"), manifest).map_err(|error| {
@@ -502,18 +596,6 @@ fn tool_package_manifest_dir(
             "api collect could not locate tool package `{package_name}`"
         )),
     }
-}
-
-fn selected_dependency_features(
-    package: &cargo_metadata::Package,
-    options: &CollectOptions,
-) -> Vec<String> {
-    if options.all_features {
-        let mut features = package.features.keys().cloned().collect::<Vec<_>>();
-        features.sort();
-        return features;
-    }
-    options.features.clone()
 }
 
 fn parse_features(value: &str) -> Vec<String> {
@@ -692,7 +774,7 @@ fn read_ts_sources(paths: &[PathBuf]) -> Result<Vec<TypeScriptSourceFile>, Strin
 fn usage() -> String {
     [
         "usage:",
-        "  api collect --package <cargo-package> --api-root <path::to::api> --package-name <ts-package> --out <path> [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--features <list>] [--all-features] [--no-default-features]",
+        "  api collect --package <cargo-package> --out <path> [--api-root <path::to::api>] [--package-name <ts-package>] [--manifest-path <Cargo.toml>] [--target-dir <dir>] [--features <list>] [--all-features] [--no-default-features]",
         "  api collect --empty --package-name <ts-package> --out <path>",
         "  api gen --contract <path> [--target-dir <dir>]",
         "  api watch --contract <path> [--target-dir <dir>] [--once]",
@@ -873,6 +955,11 @@ edition = "2021"
 [features]
 extra = []
 
+[package.metadata.rust_ts]
+ts_package = "@metadata/server-api"
+api_root = "server::api"
+features = ["extra"]
+
 [dependencies]
 api-core = {{ path = {api_core_path} }}
 api-macros = {{ path = {api_macros_path} }}
@@ -940,12 +1027,6 @@ pub fn api() -> ApiModule {
             root.join("target").display().to_string(),
             "--package".to_owned(),
             "server".to_owned(),
-            "--api-root".to_owned(),
-            "server::api".to_owned(),
-            "--features".to_owned(),
-            "extra".to_owned(),
-            "--package-name".to_owned(),
-            "@workspace/server-api".to_owned(),
             "--out".to_owned(),
             contract_path.display().to_string(),
         ])
@@ -966,9 +1047,80 @@ pub fn api() -> ApiModule {
             .collect::<Vec<_>>();
 
         assert_eq!(endpoint_names, ["get_user", "get_audit_event"]);
+        assert_eq!(contract.package_name, "@metadata/server-api");
         assert!(type_names.contains(&"User"));
         assert!(type_names.contains(&"AuditEvent"));
         assert_eq!(contract.errors[0].rust_name, "GetUserError");
+
+        let override_contract_path = root.join("override-contract.json");
+        run_with_args(vec![
+            "collect".to_owned(),
+            "--manifest-path".to_owned(),
+            root.join("Cargo.toml").display().to_string(),
+            "--target-dir".to_owned(),
+            root.join("target").display().to_string(),
+            "--package".to_owned(),
+            "server".to_owned(),
+            "--api-root".to_owned(),
+            "api".to_owned(),
+            "--package-name".to_owned(),
+            "@override/server-api".to_owned(),
+            "--out".to_owned(),
+            override_contract_path.display().to_string(),
+        ])
+        .expect("collect real contract with CLI overrides");
+
+        let override_contract: ApiContract = serde_json::from_str(
+            &fs::read_to_string(override_contract_path).expect("read override contract"),
+        )
+        .expect("parse override contract");
+        assert_eq!(override_contract.package_name, "@override/server-api");
+    }
+
+    #[test]
+    fn collect_reports_multiple_metadata_packages_when_package_is_omitted() {
+        let root = test_root("collect-multiple-metadata");
+        for package in ["server", "admin"] {
+            let package_dir = root.join(package);
+            fs::create_dir_all(package_dir.join("src")).expect("create package src");
+            fs::write(
+                package_dir.join("Cargo.toml"),
+                format!(
+                    r#"[package]
+name = "{package}"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.rust_ts]
+ts_package = "@workspace/{package}-api"
+api_root = "{package}::api"
+"#
+                ),
+            )
+            .expect("write package manifest");
+            fs::write(package_dir.join("src/lib.rs"), "").expect("write package lib");
+        }
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["server", "admin"]
+resolver = "2"
+"#,
+        )
+        .expect("write workspace manifest");
+
+        let error = run_with_args(vec![
+            "collect".to_owned(),
+            "--manifest-path".to_owned(),
+            root.join("Cargo.toml").display().to_string(),
+            "--out".to_owned(),
+            root.join("contract.json").display().to_string(),
+        ])
+        .expect_err("ambiguous metadata packages should require --package");
+
+        assert!(error.contains("multiple API-enabled packages"));
+        assert!(error.contains("server"));
+        assert!(error.contains("admin"));
     }
 
     fn test_root(name: &str) -> PathBuf {

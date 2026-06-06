@@ -44,11 +44,19 @@ pub fn api() -> api_core::ApiModule {
 
 ## 2. Collect the contract
 
+Declare the TypeScript package name and Rust root function in the Rust package
+metadata:
+
+```toml
+[package.metadata.rust_ts]
+ts_package = "@workspace/server-api"
+api_root = "server::api"
+features = []
+```
+
 ```sh
 cargo run -p api-collector --bin api -- collect \
   --package server \
-  --api-root server::api \
-  --package-name @workspace/server-api \
   --out target/api-contract/server-api.json
 ```
 

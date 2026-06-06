@@ -240,7 +240,7 @@ Acceptance criteria:
 - Feature flags and cfgs match normal Cargo compilation.
 - The collected contract includes endpoints and transitive types.
 
-### A4. Read package metadata
+### A4. Read package metadata [done]
 
 Goal: avoid repetitive CLI configuration.
 
