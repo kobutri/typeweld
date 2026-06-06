@@ -2,6 +2,8 @@ import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from "nod
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import * as esbuild from "esbuild"
+
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const extensionRoot = resolve(scriptDir, "..")
 const npmRoot = resolve(extensionRoot, "..")
@@ -27,7 +29,7 @@ const launcherSource = resolve(
   npmRoot,
   "language-server-wrapper",
   "src",
-  "index.js",
+  "index.ts",
 )
 const launcherTarget = join(extensionRoot, "server", "index.js")
 const launcherPackageTarget = join(extensionRoot, "server", "package.json")
@@ -36,7 +38,16 @@ const apiBinaryTarget = join(extensionRoot, "bin", platformDir, apiBinaryName)
 
 mkdirSync(dirname(launcherTarget), { recursive: true })
 mkdirSync(dirname(binaryTarget), { recursive: true })
-copyFileSync(launcherSource, launcherTarget)
+await esbuild.build({
+  bundle: false,
+  entryPoints: [launcherSource],
+  format: "esm",
+  legalComments: "none",
+  logLevel: "silent",
+  outfile: launcherTarget,
+  platform: "node",
+  target: "node20",
+})
 writeFileSync(launcherPackageTarget, `${JSON.stringify({ type: "module" }, null, 2)}\n`)
 copyFileSync(binaryPath, binaryTarget)
 const copiedApiBinary = maybeCopyApiBinary(apiBinaryPath, apiBinaryTarget)

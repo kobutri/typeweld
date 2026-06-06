@@ -4,7 +4,7 @@ import { Effect, Schema } from "effect"
 
 const runtimePath = process.argv[2]
 if (runtimePath === undefined) {
-  throw new Error("Usage: node test/binary-runtime.mjs <compiled-runtime-index.js>")
+  throw new Error("Usage: tsx test/binary-runtime.mts <compiled-runtime-index.js>")
 }
 
 const {

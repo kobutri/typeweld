@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:runtime": "node test/run-e2e.mjs",
+    "test:runtime": "../../../npm/node_modules/.bin/tsx test/run-e2e.mts",
     "typecheck": "../../../npm/node_modules/.bin/tsc --noEmit -p tsconfig.json"
   }
 }

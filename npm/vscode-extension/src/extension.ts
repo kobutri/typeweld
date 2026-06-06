@@ -210,6 +210,30 @@ function serverOptions(
     }
   }
 
+  if (isTypeScriptLauncher(launcher)) {
+    const tsx = bundledTsxPath(context)
+    if (tsx === undefined) {
+      log("TypeScript api-ls launcher was found but tsx was not found; falling back to api-ls on PATH.")
+      return {
+        debug: { command: "api-ls", args, options },
+        run: { command: "api-ls", args, options },
+      }
+    }
+
+    return {
+      debug: {
+        command: process.execPath,
+        args: [tsx, launcher, ...args],
+        options,
+      },
+      run: {
+        command: process.execPath,
+        args: [tsx, launcher, ...args],
+        options,
+      },
+    }
+  }
+
   return {
     debug: {
       module: launcher,
@@ -270,6 +294,10 @@ function hasWorkspaceMarker(startDir: string, markers: readonly string[]): boole
   }
 }
 
+function isTypeScriptLauncher(launcher: string): boolean {
+  return launcher.endsWith(".ts") || launcher.endsWith(".mts")
+}
+
 function bundledLauncherPath(context: vscode.ExtensionContext): string | undefined {
   const packagedLauncher = context.asAbsolutePath(
     path.join("server", "index.js"),
@@ -279,7 +307,7 @@ function bundledLauncherPath(context: vscode.ExtensionContext): string | undefin
   }
 
   try {
-    return nodeRequire.resolve("@rust-ts-integration/language-server/src/index.js")
+    return nodeRequire.resolve("@rust-ts-integration/language-server/src/index.ts")
   } catch {
     const packagedPath = context.asAbsolutePath(
       path.join(
@@ -287,10 +315,21 @@ function bundledLauncherPath(context: vscode.ExtensionContext): string | undefin
         "@rust-ts-integration",
         "language-server",
         "src",
-        "index.js",
+        "index.ts",
       ),
     )
     return fs.existsSync(packagedPath) ? packagedPath : undefined
+  }
+}
+
+function bundledTsxPath(context: vscode.ExtensionContext): string | undefined {
+  try {
+    return nodeRequire.resolve("tsx/cli")
+  } catch {
+    const workspacePath = context.asAbsolutePath(
+      path.join("..", "node_modules", "tsx", "dist", "cli.mjs"),
+    )
+    return fs.existsSync(workspacePath) ? workspacePath : undefined
   }
 }
 
