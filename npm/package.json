@@ -5,17 +5,20 @@
   "packageManager": "npm@11.12.1",
   "workspaces": [
     "effect-runtime",
-    "language-server-wrapper"
+    "language-server-wrapper",
+    "vscode-extension"
   ],
   "scripts": {
-    "test": "npm run typecheck && npm run test:runtime && npm run test:lsp-wrapper",
+    "test": "npm run typecheck && npm run test:runtime && npm run test:lsp-wrapper && npm run test:vscode",
     "test:lsp-wrapper": "npm run test:wrapper --workspace @rust-ts-integration/language-server",
     "test:runtime": "npm run test:runtime --workspace @rust-ts-integration/effect-runtime",
+    "test:vscode": "npm run typecheck --workspace rust-ts-integration && npm run compile --workspace rust-ts-integration",
     "typecheck": "npm run typecheck:workspaces && npm run typecheck:generated",
     "typecheck:generated": "cargo test -p api-gen-effect-v4 generated_package_typecheck_fixture_compiles_against_pinned_effect_beta",
     "typecheck:lsp-wrapper": "npm run typecheck --workspace @rust-ts-integration/language-server",
     "typecheck:runtime": "npm run typecheck --workspace @rust-ts-integration/effect-runtime",
-    "typecheck:workspaces": "tsc --noEmit -p tsconfig.json"
+    "typecheck:vscode": "npm run typecheck --workspace rust-ts-integration",
+    "typecheck:workspaces": "tsc -b --noEmit tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

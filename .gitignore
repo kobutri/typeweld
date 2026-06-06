@@ -1,6 +1,10 @@
 /target/
 /npm/node_modules/
 /npm/**/node_modules/
+/npm/vscode-extension/bin/
+/npm/vscode-extension/dist/
+/npm/vscode-extension/server/
+/npm/vscode-extension/out/
 /target/api-contract/
 
 .DS_Store

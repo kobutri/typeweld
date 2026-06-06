@@ -64,6 +64,40 @@ cargo build -p api-ls --bin api-ls
 In a published install, use the installed `api-ls` command directly; the npm
 wrapper will use the packaged gateway binary when one is present.
 
+## VS Code extension
+
+The repository includes a VS Code client under
+`npm/vscode-extension`. For local development, install npm dependencies and
+compile the extension:
+
+```sh
+cd npm
+npm install
+npm run compile --workspace rust-ts-integration
+```
+
+The extension uses the bundled npm launcher by default and starts one `api-ls`
+client for each workspace folder with `.api-ls.json`, `api-ls.json`, or
+`target/api-contract/effect-v4/packages` in that folder or one of its parents.
+Add `Cargo.toml` to `rustTsIntegration.apiLs.requiredWorkspaceMarkers` if you
+want defaults-only startup before generation. Override the launcher with VS Code
+settings when needed:
+
+```json
+{
+  "rustTsIntegration.apiLs.command": "",
+  "rustTsIntegration.apiLs.args": [],
+  "rustTsIntegration.apiLs.env": {
+    "API_LS_BINARY": "/absolute/path/to/api-ls"
+  }
+}
+```
+
+Use the `Rust TS Integration: Restart api-ls` command after changing backend
+configuration or rebuilding the gateway binary.
+
+For release packaging, see `docs/vscode-extension-release.md`.
+
 ## Generic LSP registration
 
 For any editor or LSP client that accepts a custom server, register one server

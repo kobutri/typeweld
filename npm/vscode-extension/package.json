@@ -1,0 +1,116 @@
+{
+  "name": "rust-ts-integration",
+  "displayName": "Rust TS Integration",
+  "description": "VS Code client for the rust-ts-integration api-ls language server.",
+  "version": "0.0.0",
+  "private": true,
+  "publisher": "rust-ts-integration",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rust-ts-integration/rust-ts-integration.git",
+    "directory": "npm/vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onLanguage:rust",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "workspaceContains:.api-ls.json",
+    "workspaceContains:api-ls.json",
+    "workspaceContains:target/api-contract/effect-v4/packages"
+  ],
+  "main": "./dist/extension.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "server",
+    "package.json"
+  ],
+  "scripts": {
+    "compile": "npm run typecheck && node esbuild.mjs",
+    "package": "npm run typecheck && node esbuild.mjs --production",
+    "package:vsix": "node scripts/ensure-out-dir.mjs && vsce package --no-dependencies",
+    "prepare:server": "node scripts/prepare-package.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "vscode:prepublish": "npm run package",
+    "watch": "node esbuild.mjs --watch"
+  },
+  "dependencies": {
+    "@rust-ts-integration/language-server": "0.0.0",
+    "vscode-languageclient": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "rustTsIntegration.apiLs.restart",
+        "title": "Restart api-ls",
+        "category": "Rust TS Integration"
+      }
+    ],
+    "configuration": {
+      "title": "Rust TS Integration",
+      "properties": {
+        "rustTsIntegration.apiLs.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the api-ls language server client."
+        },
+        "rustTsIntegration.apiLs.command": {
+          "type": "string",
+          "default": "",
+          "description": "Executable path or command name for api-ls. Leave empty to use the bundled npm launcher."
+        },
+        "rustTsIntegration.apiLs.args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments passed to api-ls or to the bundled npm launcher."
+        },
+        "rustTsIntegration.apiLs.env": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables added when starting api-ls. Use API_LS_BINARY here to point the bundled launcher at a local Rust binary."
+        },
+        "rustTsIntegration.apiLs.requiredWorkspaceMarkers": {
+          "type": "array",
+          "default": [
+            ".api-ls.json",
+            "api-ls.json",
+            "target/api-contract/effect-v4/packages"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace marker paths that allow the api-ls client to start. An empty list starts the client for every workspace folder."
+        }
+      }
+    }
+  }
+}

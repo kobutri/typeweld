@@ -25,6 +25,9 @@
     },
     {
       "path": "./language-server-wrapper"
+    },
+    {
+      "path": "./vscode-extension"
     }
   ]
 }

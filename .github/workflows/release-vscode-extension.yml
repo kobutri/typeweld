@@ -1,0 +1,115 @@
+name: Release VS Code Extension
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: GitHub release tag to attach VSIX assets to, for example v0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.vscode-target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            vscode-target: linux-x64
+            binary-name: api-ls
+          - os: macos-latest
+            rust-target: x86_64-apple-darwin
+            vscode-target: darwin-x64
+            binary-name: api-ls
+          - os: macos-latest
+            rust-target: aarch64-apple-darwin
+            vscode-target: darwin-arm64
+            binary-name: api-ls
+          - os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            vscode-target: win32-x64
+            binary-name: api-ls.exe
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
+      - name: Derive extension version
+        id: extension-version
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          node - "$version" <<'NODE'
+          const version = process.argv[2]
+          if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
+            console.error(`Release tag must be vX.Y.Z or X.Y.Z for VS Code packaging; got ${version}`)
+            process.exit(1)
+          }
+          NODE
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Stamp extension manifest version
+        shell: bash
+        env:
+          EXTENSION_VERSION: ${{ steps.extension-version.outputs.value }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs")
+          const path = "npm/vscode-extension/package.json"
+          const manifest = JSON.parse(fs.readFileSync(path, "utf8"))
+          manifest.version = process.env.EXTENSION_VERSION
+          fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
+          NODE
+      - run: cargo build -p api-ls --bin api-ls --release --target "${{ matrix.rust-target }}"
+      - name: Prepare bundled language server
+        shell: bash
+        run: |
+          npm run prepare:server --workspace rust-ts-integration -- \
+            --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.binary-name }}" \
+            --platform-dir "${{ matrix.vscode-target }}"
+        working-directory: npm
+      - name: Package VSIX
+        shell: bash
+        run: |
+          npm run package:vsix --workspace rust-ts-integration -- \
+            --target "${{ matrix.vscode-target }}" \
+            --out "out/rust-ts-integration-${{ steps.extension-version.outputs.value }}-${{ matrix.vscode-target }}.vsix"
+        working-directory: npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension-${{ matrix.vscode-target }}
+          path: npm/vscode-extension/out/*.vsix
+          if-no-files-found: error
+
+  upload-release-assets:
+    name: Upload VSIX release assets
+    runs-on: ubuntu-latest
+    needs: package
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: vscode-extension-*
+          merge-multiple: true
+      - run: gh release upload "$RELEASE_TAG" release-assets/*.vsix --repo "$GITHUB_REPOSITORY" --clobber
