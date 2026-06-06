@@ -23,6 +23,7 @@ use tokio::{
 
 const CONFIG_FILES: [&str; 2] = [".api-ls.json", "api-ls.json"];
 const OPEN_GENERATED_FILE_COMMAND: &str = "api-ls.openGeneratedPackageFile";
+const PRIVATE_TYPESCRIPT_COMMAND_PREFIX: &str = "_typescript.";
 
 /// `api-ls` configuration loaded from the workspace root.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -2693,6 +2694,7 @@ fn initialize_result(
     semantic_tokens: Option<&MergedSemanticTokens>,
 ) -> Value {
     let mut capabilities = merge_capabilities(rust_capabilities, typescript_capabilities);
+    remove_private_typescript_commands(&mut capabilities);
     if let Some(semantic_tokens) = semantic_tokens {
         capabilities["semanticTokensProvider"] = semantic_tokens.provider.clone();
     }
@@ -2784,6 +2786,22 @@ fn add_execute_command(capabilities: &mut Value, command: &str) {
     {
         commands.push(json!(command));
     }
+}
+
+fn remove_private_typescript_commands(capabilities: &mut Value) {
+    let Some(commands) = capabilities
+        .get_mut("executeCommandProvider")
+        .and_then(|provider| provider.get_mut("commands"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    commands.retain(|command| {
+        command
+            .as_str()
+            .is_none_or(|command| !command.starts_with(PRIVATE_TYPESCRIPT_COMMAND_PREFIX))
+    });
 }
 
 fn workspace_symbol_sort_key(value: &Value) -> String {
@@ -4586,6 +4604,46 @@ mod tests {
             capabilities["semanticTokensProvider"]["full"]["delta"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn initialize_does_not_advertise_private_typescript_commands() {
+        let result = initialize_result(
+            &json!({
+                "executeCommandProvider": {
+                    "commands": ["rust-analyzer.applySourceChange"]
+                }
+            }),
+            &json!({
+                "executeCommandProvider": {
+                    "commands": [
+                        "_typescript.configurePlugin",
+                        "_typescript.applyRefactoring",
+                        "typescript.publicCommand"
+                    ]
+                }
+            }),
+            None,
+        );
+        let commands = result["capabilities"]["executeCommandProvider"]["commands"]
+            .as_array()
+            .expect("commands array");
+
+        assert!(!commands
+            .iter()
+            .any(|command| command.as_str() == Some("_typescript.configurePlugin")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.as_str() == Some("_typescript.applyRefactoring")));
+        assert!(commands
+            .iter()
+            .any(|command| command.as_str() == Some("rust-analyzer.applySourceChange")));
+        assert!(commands
+            .iter()
+            .any(|command| command.as_str() == Some("typescript.publicCommand")));
+        assert!(commands
+            .iter()
+            .any(|command| command.as_str() == Some(OPEN_GENERATED_FILE_COMMAND)));
     }
 
     #[test]
