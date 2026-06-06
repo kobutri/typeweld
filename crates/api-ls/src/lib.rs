@@ -168,6 +168,7 @@ struct AsyncLspServer {
     event_rx: mpsc::UnboundedReceiver<GatewayEvent>,
     output_tx: mpsc::UnboundedSender<Value>,
     workspace: Option<WorkspaceConfig>,
+    documents: DocumentStore,
     api_watch: Option<ApiWatchProcess>,
     rust_analyzer: Option<AsyncBackend>,
     typescript: Option<AsyncBackend>,
@@ -198,6 +199,7 @@ impl AsyncLspServer {
             event_rx,
             output_tx,
             workspace: None,
+            documents: DocumentStore::default(),
             api_watch: None,
             rust_analyzer: None,
             typescript: None,
@@ -378,6 +380,13 @@ impl AsyncLspServer {
             "api-ls/generatedPackageFile" => {
                 if let Some(id) = message.id {
                     self.read_generated_package_file(message.params, id)?;
+                }
+            }
+            "textDocument/didOpen" | "textDocument/didChange" | "textDocument/didClose" => {
+                self.documents
+                    .apply_lsp_notification(method, &message.params)?;
+                if let Some(kind) = self.route_backend(method, &message.params) {
+                    self.forward_notification_to_backend(kind, method, message.params)?;
                 }
             }
             "textDocument/definition" => {
@@ -563,7 +572,7 @@ impl AsyncLspServer {
                 && !has_non_generated_typescript_location(&locations, &workspace)
             {
                 if let Some(query) = TextPositionQuery::from_lsp_params(&params) {
-                    if let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? {
+                    if let Some(graph) = self.load_live_symbol_graph(&workspace)? {
                         backend_queries.extend(
                             graph
                                 .generated_typescript_reference_params(&query, &workspace)
@@ -623,6 +632,7 @@ impl AsyncLspServer {
                         client_id: id.clone(),
                         workspace: plan.workspace,
                         api_edit: plan.api_edit,
+                        document_versions: self.documents.version_snapshot(),
                     },
                 );
                 self.forward_request_to_backend(
@@ -960,7 +970,12 @@ impl AsyncLspServer {
             return self.write_error(request.client_id, -32_602, message.to_owned());
         }
         let rust_edit = raw.get("result").cloned().unwrap_or(Value::Null);
-        match merge_workspace_edits(request.api_edit, rust_edit, &request.workspace) {
+        match merge_workspace_edits(
+            request.api_edit,
+            rust_edit,
+            &request.workspace,
+            &request.document_versions,
+        ) {
             Ok(edit) => self.write_response(request.client_id, edit),
             Err(error) => self.write_error(request.client_id, -32_602, error),
         }
@@ -1224,10 +1239,21 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
+        let Some(graph) = self.load_live_symbol_graph(workspace)? else {
             return Ok(None);
         };
         Ok(graph.definition(&query, workspace))
+    }
+
+    fn load_live_symbol_graph(
+        &self,
+        workspace: &WorkspaceConfig,
+    ) -> Result<Option<SymbolGraph>, String> {
+        let Some(mut graph) = SymbolGraph::load_enriched(workspace)? else {
+            return Ok(None);
+        };
+        graph.apply_document_overlays(&self.documents, workspace)?;
+        Ok(Some(graph))
     }
 
     fn cross_language_references_base(
@@ -1240,7 +1266,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load_enriched(&workspace)? else {
+        let Some(graph) = self.load_live_symbol_graph(&workspace)? else {
             return Ok(None);
         };
         let Some(locations) = graph.references(&query, &workspace) else {
@@ -1257,7 +1283,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
+        let Some(graph) = self.load_live_symbol_graph(workspace)? else {
             return Ok(None);
         };
         Ok(graph.hover(&query, workspace))
@@ -1270,7 +1296,7 @@ impl AsyncLspServer {
         let Some(query) = TextPositionQuery::from_lsp_params(params) else {
             return Ok(None);
         };
-        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
+        let Some(graph) = self.load_live_symbol_graph(workspace)? else {
             return Ok(None);
         };
         if let Some(reason) = graph.rename_block_reason(&query, workspace) {
@@ -1289,7 +1315,7 @@ impl AsyncLspServer {
         let Some(new_name) = params.get("newName").and_then(Value::as_str) else {
             return Err("rename requires `newName`".to_owned());
         };
-        let Some(graph) = SymbolGraph::load_enriched(workspace)? else {
+        let Some(graph) = self.load_live_symbol_graph(workspace)? else {
             return Ok(None);
         };
         if let Some(reason) = graph.rename_block_reason(&query, workspace) {
@@ -1307,22 +1333,24 @@ impl AsyncLspServer {
     }
 
     fn publish_unused_endpoint_diagnostics(&mut self) -> Result<(), String> {
-        let Some(workspace) = &self.workspace else {
+        let Some(workspace) = self.workspace.clone() else {
             return Ok(());
         };
         if matches!(workspace.config.unused_endpoint_lints, UsageLintLevel::Off) {
             return Ok(());
         }
-        let Some(graph) = SymbolGraph::load(&workspace.symbol_graph)? else {
+        let Some(graph) = self.load_live_symbol_graph(&workspace)? else {
             return Ok(());
         };
         let Some(index) = EffectUsageIndex::load(&workspace.usage_index)? else {
+            self.clear_unused_endpoint_diagnostics(&graph, &workspace)?;
             return Ok(());
         };
         if index.is_stale_for(&graph) {
+            self.clear_unused_endpoint_diagnostics(&graph, &workspace)?;
             return Ok(());
         }
-        let diagnostics = graph.unused_endpoint_diagnostics(&index, workspace);
+        let diagnostics = graph.unused_endpoint_diagnostics(&index, &workspace);
 
         for (uri, diagnostics) in diagnostics {
             self.write_notification(
@@ -1334,6 +1362,23 @@ impl AsyncLspServer {
             )?;
         }
 
+        Ok(())
+    }
+
+    fn clear_unused_endpoint_diagnostics(
+        &mut self,
+        graph: &SymbolGraph,
+        workspace: &WorkspaceConfig,
+    ) -> Result<(), String> {
+        for uri in graph.endpoint_rust_uris(workspace) {
+            self.write_notification(
+                "textDocument/publishDiagnostics",
+                json!({
+                    "uri": uri,
+                    "diagnostics": [],
+                }),
+            )?;
+        }
         Ok(())
     }
 }
@@ -1385,6 +1430,222 @@ impl BackendRequestKey {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct DocumentStore {
+    documents: HashMap<String, OpenDocument>,
+}
+
+impl DocumentStore {
+    fn apply_lsp_notification(&mut self, method: &str, params: &Value) -> Result<(), String> {
+        match method {
+            "textDocument/didOpen" => self.did_open(params),
+            "textDocument/didChange" => self.did_change(params),
+            "textDocument/didClose" => {
+                self.did_close(params);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn did_open(&mut self, params: &Value) -> Result<(), String> {
+        let document = params
+            .get("textDocument")
+            .ok_or_else(|| "didOpen is missing textDocument".to_owned())?;
+        let uri = document
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "didOpen is missing textDocument.uri".to_owned())?;
+        let text = document
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "didOpen is missing textDocument.text".to_owned())?;
+        let version = document.get("version").and_then(Value::as_i64);
+        self.documents.insert(
+            uri.to_owned(),
+            OpenDocument {
+                uri: uri.to_owned(),
+                text: text.to_owned(),
+                version,
+            },
+        );
+        Ok(())
+    }
+
+    fn did_change(&mut self, params: &Value) -> Result<(), String> {
+        let text_document = params
+            .get("textDocument")
+            .ok_or_else(|| "didChange is missing textDocument".to_owned())?;
+        let uri = text_document
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "didChange is missing textDocument.uri".to_owned())?;
+        let version = text_document.get("version").and_then(Value::as_i64);
+        let changes = params
+            .get("contentChanges")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "didChange is missing contentChanges".to_owned())?;
+        let document = self
+            .documents
+            .entry(uri.to_owned())
+            .or_insert_with(|| OpenDocument {
+                uri: uri.to_owned(),
+                text: String::new(),
+                version,
+            });
+        for change in changes {
+            apply_document_change(&mut document.text, change)?;
+        }
+        document.version = version.or(document.version);
+        Ok(())
+    }
+
+    fn did_close(&mut self, params: &Value) {
+        if let Some(uri) = params
+            .get("textDocument")
+            .and_then(|document| document.get("uri"))
+            .and_then(Value::as_str)
+        {
+            self.documents.remove(uri);
+        }
+    }
+
+    fn values(&self) -> impl Iterator<Item = &OpenDocument> {
+        self.documents.values()
+    }
+
+    fn version_snapshot(&self) -> HashMap<String, Option<i64>> {
+        self.documents
+            .iter()
+            .map(|(uri, document)| (uri.clone(), document.version))
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OpenDocument {
+    uri: String,
+    text: String,
+    version: Option<i64>,
+}
+
+fn apply_document_change(text: &mut String, change: &Value) -> Result<(), String> {
+    let replacement = change
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "content change is missing text".to_owned())?;
+    let Some(range) = change.get("range") else {
+        *text = replacement.to_owned();
+        return Ok(());
+    };
+    let range: GraphRange = serde_json::from_value(range.clone())
+        .map_err(|error| format!("content change has invalid range: {error}"))?;
+    let start = byte_offset_from_position(text, range.start)
+        .ok_or_else(|| "content change range start is outside the document".to_owned())?;
+    let end = byte_offset_from_position(text, range.end)
+        .ok_or_else(|| "content change range end is outside the document".to_owned())?;
+    if start > end {
+        return Err("content change range start is after range end".to_owned());
+    }
+    text.replace_range(start..end, replacement);
+    Ok(())
+}
+
+fn scan_typescript_symbol_usages(
+    document: &OpenDocument,
+    ts_path: &[String],
+) -> Vec<GraphLocation> {
+    let Some((last, prefix)) = ts_path.split_last() else {
+        return Vec::new();
+    };
+    let pattern = if prefix.is_empty() {
+        last.clone()
+    } else {
+        format!("{}.{}", prefix.join("."), last)
+    };
+    document
+        .text
+        .match_indices(&pattern)
+        .filter_map(|(start, _)| {
+            let name_start = start + pattern.len().saturating_sub(last.len());
+            let name_end = name_start + last.len();
+            let range = range_from_byte_offsets(&document.text, name_start, name_end)?;
+            Some(GraphLocation {
+                uri: Some(document.uri.clone()),
+                file: None,
+                range,
+                name_range: Some(range),
+                full_range: Some(range),
+                generated: false,
+                renamable: Some(true),
+                role: Some("liveUserUsage".to_owned()),
+                language: Some("typescript".to_owned()),
+                rename_strategy: Some("typescriptUsage".to_owned()),
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct RouterMountOverlay {
+    handler: String,
+    location: GraphLocation,
+}
+
+fn scan_rust_router_mounts(document: &OpenDocument) -> Vec<RouterMountOverlay> {
+    let mut overlays = Vec::new();
+    let mut search_start = 0;
+    const NEEDLE: &str = ".endpoint(";
+    while let Some(relative) = document.text[search_start..].find(NEEDLE) {
+        let args_start = search_start + relative + NEEDLE.len();
+        let Some((path, path_start, path_end)) =
+            parse_endpoint_handler_path(&document.text, args_start)
+        else {
+            search_start = args_start;
+            continue;
+        };
+        if let Some(range) = range_from_byte_offsets(&document.text, path_start, path_end) {
+            overlays.push(RouterMountOverlay {
+                handler: path.rsplit("::").next().unwrap_or(path.as_str()).to_owned(),
+                location: GraphLocation {
+                    uri: Some(document.uri.clone()),
+                    file: None,
+                    range,
+                    name_range: Some(range),
+                    full_range: Some(range),
+                    generated: false,
+                    renamable: Some(true),
+                    role: Some("rustRouterMount".to_owned()),
+                    language: Some("rust".to_owned()),
+                    rename_strategy: Some("rustAnalyzerReference".to_owned()),
+                },
+            });
+        }
+        search_start = path_end;
+    }
+    overlays
+}
+
+fn parse_endpoint_handler_path(text: &str, args_start: usize) -> Option<(String, usize, usize)> {
+    let mut cursor = args_start;
+    while let Some(character) = text.get(cursor..)?.chars().next() {
+        if !character.is_whitespace() {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    let path_start = cursor;
+    while let Some(character) = text.get(cursor..)?.chars().next() {
+        if !(character == '_' || character == ':' || character.is_ascii_alphanumeric()) {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    let path_end = cursor;
+    let path = text.get(path_start..path_end)?.to_owned();
+    (!path.is_empty()).then_some((path, path_start, path_end))
+}
+
 #[derive(Debug)]
 struct PendingRequest {
     client_id: Value,
@@ -1427,6 +1688,7 @@ struct RenameRequest {
     client_id: Value,
     workspace: WorkspaceConfig,
     api_edit: Value,
+    document_versions: HashMap<String, Option<i64>>,
 }
 
 #[derive(Debug)]
@@ -1496,6 +1758,125 @@ impl SymbolGraph {
                     .any(|existing| existing.same_location(&location))
                 {
                     symbol.typescript.push(location);
+                }
+            }
+        }
+    }
+
+    fn apply_document_overlays(
+        &mut self,
+        documents: &DocumentStore,
+        workspace: &WorkspaceConfig,
+    ) -> Result<(), String> {
+        self.apply_typescript_usage_overlays(documents, workspace);
+        self.apply_rust_router_mount_overlays(documents, workspace);
+        Ok(())
+    }
+
+    fn apply_typescript_usage_overlays(
+        &mut self,
+        documents: &DocumentStore,
+        workspace: &WorkspaceConfig,
+    ) {
+        let open_ts_uris = documents
+            .values()
+            .filter(|document| is_typescript_uri(&document.uri))
+            .map(|document| document.uri.clone())
+            .collect::<BTreeSet<_>>();
+        if open_ts_uris.is_empty() {
+            return;
+        }
+
+        for symbol in &mut self.symbols {
+            let Some(ts_path) = symbol.metadata.ts_path_for_usage() else {
+                continue;
+            };
+            let closed_usage_count = symbol
+                .typescript
+                .iter()
+                .filter(|location| !location.generated)
+                .filter(|location| {
+                    location
+                        .resolved_uri(workspace)
+                        .is_none_or(|uri| !open_ts_uris.contains(&uri))
+                })
+                .count();
+            symbol.typescript.retain(|location| {
+                location.generated
+                    || location
+                        .resolved_uri(workspace)
+                        .is_none_or(|uri| !open_ts_uris.contains(&uri))
+            });
+
+            let mut live_locations = Vec::new();
+            for document in documents
+                .values()
+                .filter(|document| open_ts_uris.contains(&document.uri))
+            {
+                live_locations.extend(scan_typescript_symbol_usages(document, ts_path));
+            }
+            let live_count = live_locations.len();
+            for location in live_locations {
+                if !symbol
+                    .typescript
+                    .iter()
+                    .any(|existing| existing.same_location(&location))
+                {
+                    symbol.typescript.push(location);
+                }
+            }
+            if is_usage_enriched_symbol_kind(&symbol.kind) {
+                symbol.metadata.usage = Some(UsageSummary {
+                    status: UsageStatus::Live,
+                    count: Some((closed_usage_count + live_count) as u64),
+                    reads: None,
+                    writes: None,
+                });
+            }
+        }
+    }
+
+    fn apply_rust_router_mount_overlays(
+        &mut self,
+        documents: &DocumentStore,
+        workspace: &WorkspaceConfig,
+    ) {
+        let open_rust_uris = documents
+            .values()
+            .filter(|document| is_rust_uri(&document.uri))
+            .map(|document| document.uri.clone())
+            .collect::<BTreeSet<_>>();
+        if open_rust_uris.is_empty() {
+            return;
+        }
+        let overlays = documents
+            .values()
+            .filter(|document| open_rust_uris.contains(&document.uri))
+            .flat_map(scan_rust_router_mounts)
+            .collect::<Vec<_>>();
+
+        for symbol in &mut self.symbols {
+            if symbol.kind != "endpoint" {
+                continue;
+            }
+            let Some(rust_name) = symbol.metadata.rust_name_for_matching() else {
+                continue;
+            };
+            symbol.rust_references.retain(|location| {
+                location
+                    .resolved_uri(workspace)
+                    .is_none_or(|uri| !open_rust_uris.contains(&uri))
+            });
+            for overlay in overlays
+                .iter()
+                .filter(|overlay| overlay.handler == rust_name)
+            {
+                if !symbol
+                    .rust_references
+                    .iter()
+                    .any(|existing| existing.same_location(&overlay.location))
+                {
+                    symbol.rust_references.push(overlay.location.clone());
                 }
             }
         }
@@ -1840,6 +2221,18 @@ impl SymbolGraph {
         by_uri
     }
 
+    fn endpoint_rust_uris(&self, workspace: &WorkspaceConfig) -> Vec<String> {
+        let mut uris = self
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == "endpoint")
+            .filter_map(|symbol| symbol.rust.resolved_uri(workspace))
+            .collect::<Vec<_>>();
+        uris.sort();
+        uris.dedup();
+        uris
+    }
+
     fn rename_symbol_at<'a>(
         &'a self,
         query: &TextPositionQuery,
@@ -2077,6 +2470,18 @@ struct SymbolMetadata {
     rust_name: Option<String>,
     wire_name: Option<String>,
     ts_name: Option<String>,
+}
+
+impl SymbolMetadata {
+    fn ts_path_for_usage(&self) -> Option<&[String]> {
+        (!self.ts_path.is_empty()).then_some(self.ts_path.as_slice())
+    }
+
+    fn rust_name_for_matching(&self) -> Option<&str> {
+        self.rust_name
+            .as_deref()
+            .or_else(|| self.rust_path.last().map(String::as_str))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3603,6 +4008,11 @@ fn is_rust_message(method: &str, params: &Value) -> bool {
         })
 }
 
+fn is_rust_uri(uri: &str) -> bool {
+    uri.strip_prefix("file://")
+        .is_some_and(|path| path.ends_with(".rs"))
+}
+
 fn is_typescript_uri(uri: &str) -> bool {
     let Some(path) = uri.strip_prefix("file://") else {
         return false;
@@ -3691,11 +4101,42 @@ fn merge_workspace_edits(
     api_edit: Value,
     rust_edit: Value,
     workspace: &WorkspaceConfig,
+    document_versions: &HashMap<String, Option<i64>>,
 ) -> Result<Value, String> {
     let mut changes = serde_json::Map::new();
     append_workspace_edit_changes(&mut changes, api_edit, workspace)?;
     append_workspace_edit_changes(&mut changes, rust_edit, workspace)?;
-    Ok(json!({ "changes": changes }))
+    Ok(workspace_edit_from_changes(changes, document_versions))
+}
+
+fn workspace_edit_from_changes(
+    changes: serde_json::Map<String, Value>,
+    document_versions: &HashMap<String, Option<i64>>,
+) -> Value {
+    let mut unversioned_changes = serde_json::Map::new();
+    let mut document_changes = Vec::new();
+    for (uri, edits) in changes {
+        if let Some(version) = document_versions.get(&uri) {
+            document_changes.push(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "version": version,
+                },
+                "edits": edits,
+            }));
+        } else {
+            unversioned_changes.insert(uri, edits);
+        }
+    }
+
+    let mut edit = serde_json::Map::new();
+    if !unversioned_changes.is_empty() || document_changes.is_empty() {
+        edit.insert("changes".to_owned(), Value::Object(unversioned_changes));
+    }
+    if !document_changes.is_empty() {
+        edit.insert("documentChanges".to_owned(), Value::Array(document_changes));
+    }
+    Value::Object(edit)
 }
 
 fn append_workspace_edit_changes(
@@ -6125,6 +6566,167 @@ mod tests {
     }
 
     #[test]
+    fn open_typescript_changes_update_live_endpoint_usage_hover() {
+        let root = test_root("live-ts-usage");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let ts_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "schemaVersion": 1,
+                "contractHash": "hash:live-ts",
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": graph_location_json(&rust_uri, 10, 9, 17, false, true, "rustDeclaration"),
+                    "typescript": [],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "usageCount": 0
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": ts_uri,
+                            "languageId": "typescript",
+                            "version": 1,
+                            "text": ""
+                        }
+                    }
+                })),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": ts_uri, "version": 2 },
+                        "contentChanges": [{
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 0 }
+                            },
+                            "text": "import { users } from '@workspace/server-api'\nexport const live = users.getUser({ id: 1n })\n"
+                        }]
+                    }
+                })),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": { "uri": rust_uri },
+                        "position": { "line": 10, "character": 12 }
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("hover response");
+        let hover = response["result"]["contents"]["value"]
+            .as_str()
+            .expect("hover markdown");
+
+        assert!(hover.contains("Usage count: `1`"));
+        assert!(!hover.contains("pending"));
+    }
+
+    #[test]
+    fn open_rust_router_mount_updates_live_references() {
+        let root = test_root("live-rust-router");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let routes_uri = path_to_file_uri(&root.join("src/routes.rs"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "schemaVersion": 1,
+                "contractHash": "hash:live-rust",
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": graph_location_json(&rust_uri, 10, 9, 17, false, true, "rustDeclaration"),
+                    "rustReferences": [],
+                    "typescript": [],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "rustName": "get_user"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": routes_uri,
+                            "languageId": "rust",
+                            "version": 1,
+                            "text": "fn routes() {\n    api_axum::ApiRouter::new(\"server\")\n        .endpoint(get_user);\n}\n"
+                        }
+                    }
+                })),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/references",
+                    "params": {
+                        "textDocument": { "uri": rust_uri },
+                        "position": { "line": 10, "character": 12 },
+                        "context": { "includeDeclaration": true }
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("reference response");
+        let locations = response["result"].as_array().expect("reference result");
+
+        assert!(locations
+            .iter()
+            .any(|location| location["uri"].as_str() == Some(&routes_uri)));
+    }
+
+    #[test]
     fn field_hover_reports_read_write_counts_when_available() {
         let (workspace, rust_uri, _) = write_usage_hover_fixture(
             "hover-field-read-write",
@@ -6353,6 +6955,88 @@ mod tests {
         assert_text_edit(changes, &rust_uri, 10, 9, 17, "fetch_user");
         assert_text_edit(changes, &rust_uri, 30, 4, 12, "fetch_user");
         assert_text_edit(changes, &usage_uri, 2, 4, 11, "fetchUser");
+    }
+
+    #[test]
+    fn rename_uses_open_document_versions_when_available() {
+        let root = test_root("rename-open-version");
+        fs::create_dir_all(root.join("target/api-contract")).expect("create graph dir");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        write_mock_backend_config(&root);
+        let rust_uri = path_to_file_uri(&root.join("src/lib.rs"));
+        let usage_uri = path_to_file_uri(&root.join("client/use-api.ts"));
+        fs::write(
+            root.join("target/api-contract/rust-ts-symbols.json"),
+            json!({
+                "symbols": [{
+                    "id": "endpoint:get_user",
+                    "kind": "endpoint",
+                    "rust": graph_location_json(&rust_uri, 10, 9, 17, false, true, "rustDeclaration"),
+                    "typescript": [],
+                    "metadata": {
+                        "method": "GET",
+                        "route": "/users/{id}",
+                        "rustPath": ["crate", "users", "get_user"],
+                        "tsPath": ["users", "getUser"],
+                        "rustName": "get_user",
+                        "tsName": "getUser",
+                        "renamePlaceholder": "getUser"
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write symbol graph");
+
+        let messages = run_output_messages(
+            [
+                initialize_request(&root),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": usage_uri,
+                            "languageId": "typescript",
+                            "version": 7,
+                            "text": "export const live = users.getUser({ id: 1n })\n"
+                        }
+                    }
+                })),
+                framed(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/rename",
+                    "params": {
+                        "textDocument": { "uri": rust_uri },
+                        "position": { "line": 10, "character": 12 },
+                        "newName": "fetchUser"
+                    }
+                })),
+                shutdown_request(3),
+                exit_notification(),
+            ]
+            .join(""),
+        );
+        let response = messages
+            .iter()
+            .find(|message| message.get("id") == Some(&json!(2)))
+            .expect("rename response");
+        let changes = response["result"]["changes"]
+            .as_object()
+            .expect("rename changes");
+        assert_text_edit(changes, &rust_uri, 10, 9, 17, "fetch_user");
+        let document_changes = response["result"]["documentChanges"]
+            .as_array()
+            .expect("document changes");
+        assert!(document_changes.iter().any(|change| {
+            change["textDocument"]["uri"] == usage_uri
+                && change["textDocument"]["version"] == 7
+                && change["edits"]
+                    .as_array()
+                    .is_some_and(|edits| edits.iter().any(|edit| edit["newText"] == "fetchUser"))
+        }));
     }
 
     #[test]

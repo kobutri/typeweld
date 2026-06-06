@@ -1057,6 +1057,8 @@ Acceptance:
 
 ### Phase 7: Live LSP Overlay
 
+Status: Done.
+
 Files:
 
 - `crates/api-ls/src/lib.rs`
@@ -1065,13 +1067,13 @@ Files:
 
 Steps:
 
-1. Add `DocumentStore`.
-2. Apply LSP incremental text changes.
-3. Add disk graph/index cache invalidation.
-4. Add Rust syntactic overlay parser.
-5. Add TypeScript usage scan scheduler over in-memory documents.
-6. Add snapshot freshness.
-7. Use live graph for hover, definition, references, rename, and diagnostics.
+1. [x] Add `DocumentStore`.
+2. [x] Apply LSP incremental text changes.
+3. [x] Add disk graph/index cache invalidation.
+4. [x] Add Rust syntactic overlay parser.
+5. [x] Add TypeScript usage scan scheduler over in-memory documents.
+6. [x] Add snapshot freshness.
+7. [x] Use live graph for hover, definition, references, rename, and diagnostics.
 
 Acceptance:
 
