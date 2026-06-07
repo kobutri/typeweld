@@ -3458,6 +3458,7 @@ mod tests {
     #[test]
     fn new_project_registry_source_uses_published_packages() {
         let root = test_root("new-project-registry");
+        let version = env!("CARGO_PKG_VERSION");
 
         run_with_args(vec![
             "new".to_owned(),
@@ -3476,29 +3477,31 @@ mod tests {
 
         let root_manifest =
             fs::read_to_string(root.join("package.json")).expect("read root manifest");
-        assert!(root_manifest.contains("\"typeweld\": \"0.0.3\""));
-        assert!(root_manifest.contains("\"@typeweld/language-server\": \"0.0.3\""));
+        assert!(root_manifest.contains(&format!("\"typeweld\": \"{version}\"")));
+        assert!(root_manifest.contains(&format!("\"@typeweld/language-server\": \"{version}\"")));
         assert!(!root_manifest.contains("cargo run --manifest-path"));
         assert!(!root_manifest.contains("file:"));
 
         let app_manifest =
             fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
-        assert!(app_manifest.contains("\"@typeweld/effect-runtime\": \"0.0.3\""));
+        assert!(app_manifest.contains(&format!("\"@typeweld/effect-runtime\": \"{version}\"")));
         assert!(!app_manifest.contains("file:"));
 
         let server_manifest =
             fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
-        assert!(server_manifest.contains("typeweld-axum = \"0.0.3\""));
-        assert!(server_manifest
-            .contains("typeweld-cli = { version = \"0.0.3\", default-features = false }"));
-        assert!(server_manifest.contains("typeweld-core = \"0.0.3\""));
-        assert!(server_manifest.contains("typeweld-macros = \"0.0.3\""));
+        assert!(server_manifest.contains(&format!("typeweld-axum = \"{version}\"")));
+        assert!(server_manifest.contains(&format!(
+            "typeweld-cli = {{ version = \"{version}\", default-features = false }}"
+        )));
+        assert!(server_manifest.contains(&format!("typeweld-core = \"{version}\"")));
+        assert!(server_manifest.contains(&format!("typeweld-macros = \"{version}\"")));
         assert!(!server_manifest.contains("path = "));
     }
 
     #[test]
     fn new_project_github_source_uses_release_assets_and_git_deps() {
         let root = test_root("new-project-github");
+        let version = env!("CARGO_PKG_VERSION");
 
         run_with_args(vec![
             "new".to_owned(),
@@ -3517,27 +3520,27 @@ mod tests {
 
         let root_manifest =
             fs::read_to_string(root.join("package.json")).expect("read root manifest");
-        assert!(root_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-0.0.3.tgz"
-        ));
-        assert!(root_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-language-server-0.0.3.tgz"
-        ));
+        assert!(root_manifest.contains(&format!(
+            "https://github.com/kobutri/typeweld/releases/download/v{version}/typeweld-{version}.tgz"
+        )));
+        assert!(root_manifest.contains(&format!(
+            "https://github.com/kobutri/typeweld/releases/download/v{version}/typeweld-language-server-{version}.tgz"
+        )));
 
         let app_manifest =
             fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
-        assert!(app_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-effect-runtime-0.0.3.tgz"
-        ));
+        assert!(app_manifest.contains(&format!(
+            "https://github.com/kobutri/typeweld/releases/download/v{version}/typeweld-effect-runtime-{version}.tgz"
+        )));
 
         let server_manifest =
             fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
-        assert!(server_manifest.contains(
-            "typeweld-axum = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.3\" }"
-        ));
-        assert!(server_manifest.contains(
-            "typeweld-cli = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.3\", default-features = false }"
-        ));
+        assert!(server_manifest.contains(&format!(
+            "typeweld-axum = {{ git = \"https://github.com/kobutri/typeweld\", tag = \"v{version}\" }}"
+        )));
+        assert!(server_manifest.contains(&format!(
+            "typeweld-cli = {{ git = \"https://github.com/kobutri/typeweld\", tag = \"v{version}\", default-features = false }}"
+        )));
     }
 
     #[test]

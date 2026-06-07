@@ -2,7 +2,7 @@
   "name": "typeweld-vscode",
   "displayName": "Typeweld",
   "description": "VS Code client for the Typeweld language server.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "publisher": "typeweld",
   "license": "MIT OR Apache-2.0",
@@ -55,7 +55,7 @@
     "watch": "vite build --config vite.config.mts --mode development --watch"
   },
   "dependencies": {
-    "@typeweld/language-server": "0.0.3",
+    "@typeweld/language-server": "0.0.4",
     "ovsx": "1.0.0",
     "vscode-languageclient": "^10.0.0"
   },

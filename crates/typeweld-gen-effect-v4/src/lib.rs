@@ -3648,28 +3648,31 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
             package_name: "@workspace/server-api".to_owned(),
             ..ApiContract::default()
         };
+        let version = env!("CARGO_PKG_VERSION");
 
         assert_eq!(
             render_package_json(&contract),
-            r#"{
+            format!(
+                r#"{{
   "name": "@workspace/server-api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "types": "./index.ts",
-  "exports": {
+  "exports": {{
     ".": "./index.ts",
     "./schemas": "./schemas.ts",
     "./errors": "./errors.ts",
     "./endpoints": "./endpoints.ts",
     "./layer": "./layer.ts"
-  },
-  "dependencies": {
-    "@typeweld/effect-runtime": "0.0.3",
+  }},
+  "dependencies": {{
+    "@typeweld/effect-runtime": "{version}",
     "effect": "4.0.0-beta.78"
-  }
-}
+  }}
+}}
 "#
+            )
         );
         assert_eq!(
             render_package_index(&contract),
