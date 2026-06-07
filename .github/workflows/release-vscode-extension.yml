@@ -250,7 +250,7 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
+          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' -exec realpath {} \; | sort)
           npm --prefix npm exec --workspace typeweld-vscode -- \
             vsce publish --skip-duplicate --packagePath "${vsix_files[@]}"
       - name: Publish to Open VSX
@@ -258,6 +258,6 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
-          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
+          mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' -exec realpath {} \; | sort)
           npm --prefix npm exec --workspace typeweld-vscode -- \
             ovsx --pat "$OVSX_PAT" publish --skip-duplicate --packagePath "${vsix_files[@]}"
