@@ -3665,7 +3665,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
     "./layer": "./layer.ts"
   },
   "dependencies": {
-    "@typeweld/effect-runtime": "0.0.1",
+    "@typeweld/effect-runtime": "0.0.3",
     "effect": "4.0.0-beta.78"
   }
 }

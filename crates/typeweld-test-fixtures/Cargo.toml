@@ -10,7 +10,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-typeweld-ir = { version = "0.0.1", path = "../typeweld-ir" }
+typeweld-ir = { version = "0.0.3", path = "../typeweld-ir" }
 
 [lints]
 workspace = true

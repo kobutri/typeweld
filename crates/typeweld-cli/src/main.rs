@@ -3476,23 +3476,23 @@ mod tests {
 
         let root_manifest =
             fs::read_to_string(root.join("package.json")).expect("read root manifest");
-        assert!(root_manifest.contains("\"typeweld\": \"0.0.1\""));
-        assert!(root_manifest.contains("\"@typeweld/language-server\": \"0.0.1\""));
+        assert!(root_manifest.contains("\"typeweld\": \"0.0.3\""));
+        assert!(root_manifest.contains("\"@typeweld/language-server\": \"0.0.3\""));
         assert!(!root_manifest.contains("cargo run --manifest-path"));
         assert!(!root_manifest.contains("file:"));
 
         let app_manifest =
             fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
-        assert!(app_manifest.contains("\"@typeweld/effect-runtime\": \"0.0.1\""));
+        assert!(app_manifest.contains("\"@typeweld/effect-runtime\": \"0.0.3\""));
         assert!(!app_manifest.contains("file:"));
 
         let server_manifest =
             fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
-        assert!(server_manifest.contains("typeweld-axum = \"0.0.1\""));
+        assert!(server_manifest.contains("typeweld-axum = \"0.0.3\""));
         assert!(server_manifest
-            .contains("typeweld-cli = { version = \"0.0.1\", default-features = false }"));
-        assert!(server_manifest.contains("typeweld-core = \"0.0.1\""));
-        assert!(server_manifest.contains("typeweld-macros = \"0.0.1\""));
+            .contains("typeweld-cli = { version = \"0.0.3\", default-features = false }"));
+        assert!(server_manifest.contains("typeweld-core = \"0.0.3\""));
+        assert!(server_manifest.contains("typeweld-macros = \"0.0.3\""));
         assert!(!server_manifest.contains("path = "));
     }
 
@@ -3518,25 +3518,25 @@ mod tests {
         let root_manifest =
             fs::read_to_string(root.join("package.json")).expect("read root manifest");
         assert!(root_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.1/typeweld-0.0.1.tgz"
+            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-0.0.3.tgz"
         ));
         assert!(root_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.1/typeweld-language-server-0.0.1.tgz"
+            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-language-server-0.0.3.tgz"
         ));
 
         let app_manifest =
             fs::read_to_string(root.join("app/package.json")).expect("read app manifest");
         assert!(app_manifest.contains(
-            "https://github.com/kobutri/typeweld/releases/download/v0.0.1/typeweld-effect-runtime-0.0.1.tgz"
+            "https://github.com/kobutri/typeweld/releases/download/v0.0.3/typeweld-effect-runtime-0.0.3.tgz"
         ));
 
         let server_manifest =
             fs::read_to_string(root.join("server/Cargo.toml")).expect("read server manifest");
         assert!(server_manifest.contains(
-            "typeweld-axum = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.1\" }"
+            "typeweld-axum = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.3\" }"
         ));
         assert!(server_manifest.contains(
-            "typeweld-cli = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.1\", default-features = false }"
+            "typeweld-cli = { git = \"https://github.com/kobutri/typeweld\", tag = \"v0.0.3\", default-features = false }"
         ));
     }
 
