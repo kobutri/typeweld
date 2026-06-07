@@ -965,8 +965,9 @@ pub fn generated_package_dir(target_dir: &Path, package_name: &str) -> PathBuf {
 #[must_use]
 pub fn render_package_json(contract: &ApiContract) -> String {
     format!(
-        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@typeweld/effect-runtime\": \"0.0.0\",\n    \"effect\": {effect_version}\n  }}\n}}\n",
+        "{{\n  \"name\": {name},\n  \"version\": \"0.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"types\": \"./index.ts\",\n  \"exports\": {{\n    \".\": \"./index.ts\",\n    \"./schemas\": \"./schemas.ts\",\n    \"./errors\": \"./errors.ts\",\n    \"./endpoints\": \"./endpoints.ts\",\n    \"./layer\": \"./layer.ts\"\n  }},\n  \"dependencies\": {{\n    \"@typeweld/effect-runtime\": {typeweld_version},\n    \"effect\": {effect_version}\n  }}\n}}\n",
         name = ts_string(&contract.package_name),
+        typeweld_version = ts_string(env!("CARGO_PKG_VERSION")),
         effect_version = ts_string(EFFECT_VERSION),
     )
 }
@@ -3664,7 +3665,7 @@ export type UserEncoded = Schema.Codec.Encoded<typeof User>
     "./layer": "./layer.ts"
   },
   "dependencies": {
-    "@typeweld/effect-runtime": "0.0.0",
+    "@typeweld/effect-runtime": "0.0.1",
     "effect": "4.0.0-beta.78"
   }
 }

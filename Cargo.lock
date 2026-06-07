@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "axum-basic"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "typeweld-core",
 ]
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "axum-sse"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "futures-util",
  "serde",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "e2e-axum-effect-server"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "clap",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "monorepo-basic"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "typeweld-axum",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-axum"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-build"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-cli"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-gen-effect-v4"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-ir"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2316,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-ls"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "lsp-types",
  "serde",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-macros"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "bytes",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-test-fixtures"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "typeweld-ir",
 ]

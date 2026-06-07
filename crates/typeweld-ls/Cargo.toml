@@ -25,8 +25,8 @@ serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-typeweld-gen-effect-v4 = { version = "0.0.0", path = "../typeweld-gen-effect-v4" }
-typeweld-test-fixtures = { version = "0.0.0", path = "../typeweld-test-fixtures" }
+typeweld-gen-effect-v4 = { version = "0.0.1", path = "../typeweld-gen-effect-v4" }
+typeweld-test-fixtures = { version = "0.0.1", path = "../typeweld-test-fixtures" }
 
 [lints]
 workspace = true
