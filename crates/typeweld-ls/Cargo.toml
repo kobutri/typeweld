@@ -26,7 +26,7 @@ tokio = { version = "1.52.3", features = ["fs", "io-std", "io-util", "macros", "
 
 [dev-dependencies]
 typeweld-gen-effect-v4 = { version = "0.0.1", path = "../typeweld-gen-effect-v4" }
-typeweld-test-fixtures = { version = "0.0.1", path = "../typeweld-test-fixtures" }
+typeweld-test-fixtures = { path = "../typeweld-test-fixtures" }
 
 [lints]
 workspace = true

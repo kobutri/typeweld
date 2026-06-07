@@ -20,7 +20,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 
 [dev-dependencies]
-typeweld-test-fixtures = { version = "0.0.1", path = "../typeweld-test-fixtures" }
+typeweld-test-fixtures = { path = "../typeweld-test-fixtures" }
 
 [lints]
 workspace = true

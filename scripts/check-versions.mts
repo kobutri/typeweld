@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 type CargoDependency = {
+  kind?: string | null
   name: string
   req: string
 }
@@ -171,6 +172,7 @@ for (const cargoPackage of cargoMetadata.packages) {
 
   for (const dependency of cargoPackage.dependencies) {
     if (
+      dependency.kind !== "dev" &&
       dependency.name.startsWith("typeweld-") &&
       checkedInternalRustDependencies.has(dependency.name) &&
       dependency.req !== `^${expectedVersion}` &&
