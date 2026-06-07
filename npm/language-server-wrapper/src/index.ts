@@ -181,18 +181,17 @@ if (isMainModule(wrapperFile, process.argv[1])) {
 }
 
 function candidateBinaries(options: CandidateOptions): readonly Candidate[] {
-  const packageRoots = findPackageRoots(dirname(options.wrapperFile))
   const candidates: Candidate[] = []
 
-  for (const packageRoot of packageRoots) {
+  for (const installRoot of wrapperInstallRoots(options.wrapperFile)) {
     candidates.push(
       {
         source: "packaged binary",
-        path: join(packageRoot, "bin", `${process.platform}-${process.arch}`, platformBinaryName),
+        path: join(installRoot, "bin", `${process.platform}-${process.arch}`, platformBinaryName),
       },
       {
         source: "packaged binary",
-        path: join(packageRoot, "bin", platformBinaryName),
+        path: join(installRoot, "bin", platformBinaryName),
       },
     )
   }
@@ -232,8 +231,8 @@ function cargoTargetDirs(options: CandidateOptions): readonly string[] {
     roots.push(join(root, "target"))
   }
 
-  for (const packageRoot of findPackageRoots(dirname(options.wrapperFile))) {
-    for (const root of workspaceRoots(packageRoot)) {
+  for (const installRoot of wrapperInstallRoots(options.wrapperFile)) {
+    for (const root of workspaceRoots(installRoot)) {
       roots.push(join(root, "target"))
     }
   }
@@ -295,19 +294,8 @@ function readPathEnv(env: NodeJS.ProcessEnv): string | undefined {
   return pathKey === undefined ? undefined : env[pathKey]
 }
 
-function findPackageRoot(start: string): string | undefined {
-  return findPackageRoots(start)[0]
-}
-
-function findPackageRoots(start: string): readonly string[] {
-  const roots: string[] = []
-  for (const directory of parentDirs(resolve(start))) {
-    if (existsSync(join(directory, "package.json"))) {
-      roots.push(directory)
-    }
-  }
-
-  return roots
+function wrapperInstallRoots(file: string): readonly string[] {
+  return [dirname(dirname(resolve(file)))]
 }
 
 function parentDirs(start: string): readonly string[] {

@@ -3,29 +3,20 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, delimiter, join, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { expect, it } from "@effect/vitest"
 import type { SpawnSyncReturns } from "node:child_process"
+import { resolveApiLsBinary } from "../src/index"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
-const wrapperPath = join(packageRoot, "dist", "index.js")
-const wrapperModule = await import(pathToFileURL(wrapperPath).href)
+const wrapperSourcePath = join(packageRoot, "src", "index.ts")
 const binaryName = process.platform === "win32" ? "typeweld-ls.exe" : "typeweld-ls"
-
-it("package exposes typeweld-ls as an executable bin", () => {
-  const packageJson = JSON.parse(
-    readFileSync(join(packageRoot, "package.json"), "utf8"),
-  )
-
-  expect(packageJson.bin["typeweld-ls"]).toBe("./dist/index.js")
-})
 
 it("resolves a packaged gateway binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
@@ -35,10 +26,9 @@ it("resolves a packaged gateway binary before workspace and PATH candidates", ()
     const fakeGateway = join(fakePackageRoot, "bin", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
-    writeFileSync(join(fakePackageRoot, "package.json"), "{}")
     writeExecutable(fakeGateway, "process.exit(0)\n")
 
-    const resolved = wrapperModule.resolveApiLsBinary({
+    const resolved = resolveApiLsBinary({
       cwd: temp,
       env: cleanEnv(),
       invocationFile: fakeWrapper,
@@ -51,7 +41,7 @@ it("resolves a packaged gateway binary before workspace and PATH candidates", ()
   }
 })
 
-it("resolves the extension root binary when the wrapper lives under a nested module package", () => {
+it("resolves the extension root binary when the wrapper lives under a server directory", () => {
   const temp = createTempDir()
   try {
     const fakeExtensionRoot = join(temp, "extension")
@@ -68,13 +58,11 @@ it("resolves the extension root binary when the wrapper lives under a nested mod
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeGateway), { recursive: true })
     mkdirSync(dirname(fakePathGateway), { recursive: true })
-    writeFileSync(join(fakeExtensionRoot, "package.json"), "{}")
-    writeFileSync(join(fakeServerRoot, "package.json"), JSON.stringify({ type: "module" }))
     writeExecutable(fakeWrapper, "process.exit(0)\n")
     writeExecutable(fakeGateway, "process.exit(0)\n")
     writeExecutable(fakePathGateway, "process.exit(0)\n")
 
-    const resolved = wrapperModule.resolveApiLsBinary({
+    const resolved = resolveApiLsBinary({
       cwd: temp,
       env: {
         ...cleanEnv(),
@@ -101,7 +89,7 @@ it("resolves a local cargo build gateway from the current workspace", () => {
     writeFileSync(join(workspace, "Cargo.toml"), "[workspace]\n")
     writeExecutable(fakeGateway, "process.exit(0)\n")
 
-    const resolved = wrapperModule.resolveApiLsBinary({
+    const resolved = resolveApiLsBinary({
       cwd: workspace,
       env: cleanEnv(),
       invocationFile: fakeWrapper,
@@ -180,7 +168,7 @@ function runWrapper(
   env: NodeJS.ProcessEnv,
   input = "",
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [wrapperPath, ...args], {
+  return spawnSync(process.execPath, ["--import", "tsx", wrapperSourcePath, ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,

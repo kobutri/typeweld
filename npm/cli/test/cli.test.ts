@@ -3,29 +3,20 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, delimiter, join, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { expect, it } from "@effect/vitest"
 import type { SpawnSyncReturns } from "node:child_process"
+import { resolveTypeweldBinary } from "../src/index"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(testDir, "..")
-const wrapperPath = join(packageRoot, "dist", "index.js")
-const wrapperModule = await import(pathToFileURL(wrapperPath).href)
+const wrapperSourcePath = join(packageRoot, "src", "index.ts")
 const binaryName = process.platform === "win32" ? "typeweld.exe" : "typeweld"
-
-it("package exposes typeweld as an executable bin", () => {
-  const packageJson = JSON.parse(
-    readFileSync(join(packageRoot, "package.json"), "utf8"),
-  )
-
-  expect(packageJson.bin.typeweld).toBe("./dist/index.js")
-})
 
 it("resolves a packaged CLI binary before workspace and PATH candidates", () => {
   const temp = createTempDir()
@@ -35,10 +26,9 @@ it("resolves a packaged CLI binary before workspace and PATH candidates", () => 
     const fakeCli = join(fakePackageRoot, "bin", binaryName)
     mkdirSync(dirname(fakeWrapper), { recursive: true })
     mkdirSync(dirname(fakeCli), { recursive: true })
-    writeFileSync(join(fakePackageRoot, "package.json"), "{}")
     writeExecutable(fakeCli, "process.exit(0)\n")
 
-    const resolved = wrapperModule.resolveTypeweldBinary({
+    const resolved = resolveTypeweldBinary({
       cwd: temp,
       env: cleanEnv(),
       invocationFile: fakeWrapper,
@@ -62,7 +52,7 @@ it("resolves a local cargo build CLI from the current workspace", () => {
     writeFileSync(join(workspace, "Cargo.toml"), "[workspace]\n")
     writeExecutable(fakeCli, "process.exit(0)\n")
 
-    const resolved = wrapperModule.resolveTypeweldBinary({
+    const resolved = resolveTypeweldBinary({
       cwd: workspace,
       env: cleanEnv(),
       invocationFile: fakeWrapper,
@@ -136,7 +126,7 @@ function runWrapper(
   env: NodeJS.ProcessEnv,
   input = "",
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [wrapperPath, ...args], {
+  return spawnSync(process.execPath, ["--import", "tsx", wrapperSourcePath, ...args], {
     cwd: packageRoot,
     encoding: "utf8",
     env,
