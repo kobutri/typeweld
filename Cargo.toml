@@ -19,13 +19,13 @@ resolver = "2"
 [workspace.package]
 categories = ["development-tools", "web-programming"]
 description = "Rust-to-TypeScript API contract tooling for Effect clients"
-documentation = "https://github.com/typeweld/typeweld/tree/main/docs"
+documentation = "https://github.com/kobutri/typeweld/tree/main/docs"
 edition = "2021"
-homepage = "https://github.com/typeweld/typeweld"
+homepage = "https://github.com/kobutri/typeweld"
 keywords = ["api", "effect", "lsp", "rust", "typescript"]
 license = "MIT OR Apache-2.0"
 readme = "docs/README.md"
-repository = "https://github.com/typeweld/typeweld"
+repository = "https://github.com/kobutri/typeweld"
 version = "0.0.0"
 
 [workspace.lints.rust]

@@ -89,7 +89,7 @@ const npmPublicPackages = new Set<string>([
   "@typeweld/effect-runtime",
   "@typeweld/language-server",
 ])
-const expectedNpmRepositoryUrl = "https://github.com/typeweld/typeweld.git"
+const expectedNpmRepositoryUrl = "git+https://github.com/kobutri/typeweld.git"
 
 const checkedInternalRustDependencies = new Set(releaseCrates)
 checkedInternalRustDependencies.add("typeweld-test-fixtures")

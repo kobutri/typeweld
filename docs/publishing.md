@@ -119,7 +119,7 @@ registry and marketplace publish jobs all use this environment.
 Configure npm trusted publishing for each public npm package:
 
 - Provider: GitHub Actions
-- Organization/user: `typeweld`
+- Organization/user: `kobutri`
 - Repository: `typeweld`
 - Workflow filename: `release-packages.yml`
 - Environment: `release`
@@ -128,14 +128,14 @@ Configure npm trusted publishing for each public npm package:
 The npm CLI also supports:
 
 ```sh
-npm trust github typeweld --repo typeweld/typeweld --file release-packages.yml --env release --allow-publish
-npm trust github @typeweld/effect-runtime --repo typeweld/typeweld --file release-packages.yml --env release --allow-publish
-npm trust github @typeweld/language-server --repo typeweld/typeweld --file release-packages.yml --env release --allow-publish
+npm trust github typeweld --repo kobutri/typeweld --file release-packages.yml --env release --yes
+npm trust github @typeweld/effect-runtime --repo kobutri/typeweld --file release-packages.yml --env release --yes
+npm trust github @typeweld/language-server --repo kobutri/typeweld --file release-packages.yml --env release --yes
 ```
 
 On crates.io, configure trusted publishing for each publishable crate with:
 
-- GitHub organization/user: `typeweld`
+- GitHub organization/user: `kobutri`
 - Repository: `typeweld`
 - Workflow filename: `release-packages.yml`
 - Environment: `release`
