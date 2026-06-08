@@ -86,8 +86,8 @@ function updateNpmManifests(): void {
 
     if (path === "npm/vscode-extension/package.json") {
       const dependencies = manifest.dependencies as Record<string, string> | undefined
-      if (dependencies?.["@typeweld/language-server"]) {
-        dependencies["@typeweld/language-server"] = targetVersion
+      if (dependencies?.["@typeweld/typescript-plugin"]) {
+        dependencies["@typeweld/typescript-plugin"] = "file:./typescript-plugin"
       }
     }
 

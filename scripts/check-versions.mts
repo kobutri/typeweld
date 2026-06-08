@@ -247,10 +247,10 @@ if (languageServerManifest.bin?.["typeweld-ls"] !== "./dist/index.js") {
 
 const vscodeManifest = readJson<NpmManifest>("npm/vscode-extension/package.json")
 if (
-  vscodeManifest.dependencies?.["@typeweld/language-server"] !== expectedVersion
+  vscodeManifest.dependencies?.["@typeweld/typescript-plugin"] !== "file:./typescript-plugin"
 ) {
   errors.push(
-    `typeweld-vscode depends on @typeweld/language-server ${vscodeManifest.dependencies?.["@typeweld/language-server"]}; expected ${expectedVersion}`,
+    `typeweld-vscode depends on @typeweld/typescript-plugin ${vscodeManifest.dependencies?.["@typeweld/typescript-plugin"]}; expected file:./typescript-plugin`,
   )
 }
 
