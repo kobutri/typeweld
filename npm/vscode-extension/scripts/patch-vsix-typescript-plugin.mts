@@ -21,8 +21,10 @@ const extensionRoot = resolve(scriptDir, "..")
 const manifest = JSON.parse(
   readFileSync(join(extensionRoot, "package.json"), "utf8"),
 )
-const vsixPath = join(extensionRoot, `${manifest.name}-${manifest.version}.vsix`)
-const outPath = parseOutPath(process.argv.slice(2))
+const options = parseOptions(process.argv.slice(2))
+const vsixPath =
+  options.vsixPath ?? join(extensionRoot, `${manifest.name}-${manifest.version}.vsix`)
+const outPath = options.outPath
 const pluginSource = join(extensionRoot, "typescript-plugin")
 const stagingRoot = join(extensionRoot, "out", "vsix-typescript-plugin")
 const pluginTarget = join(
@@ -49,7 +51,13 @@ if (outPath !== undefined) {
   console.log(`Wrote patched VSIX to ${outPath}`)
 }
 
-function parseOutPath(args: readonly string[]): string | undefined {
+function parseOptions(args: readonly string[]): {
+  readonly outPath: string | undefined
+  readonly vsixPath: string | undefined
+} {
+  let outPath: string | undefined
+  let vsixPath: string | undefined
+
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === undefined) {
@@ -60,13 +68,30 @@ function parseOutPath(args: readonly string[]): string | undefined {
       if (value === undefined || value.startsWith("--")) {
         throw new Error("--out requires a path")
       }
-      return resolve(extensionRoot, value)
+      outPath = resolve(extensionRoot, value)
+      index += 1
+      continue
     }
     if (arg.startsWith("--out=")) {
-      return resolve(extensionRoot, arg.slice("--out=".length))
+      outPath = resolve(extensionRoot, arg.slice("--out=".length))
+      continue
+    }
+    if (arg === "--vsix") {
+      const value = args[index + 1]
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error("--vsix requires a path")
+      }
+      vsixPath = resolve(extensionRoot, value)
+      index += 1
+      continue
+    }
+    if (arg.startsWith("--vsix=")) {
+      vsixPath = resolve(extensionRoot, arg.slice("--vsix=".length))
+      continue
     }
   }
-  return undefined
+
+  return { outPath, vsixPath }
 }
 
 function assertFile(path: string, label: string): void {
