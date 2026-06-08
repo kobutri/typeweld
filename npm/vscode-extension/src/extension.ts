@@ -1,5 +1,4 @@
 import * as fs from "node:fs"
-import { createRequire } from "node:module"
 import * as path from "node:path"
 
 import * as vscode from "vscode"
@@ -7,7 +6,6 @@ import {
   LanguageClient,
   RevealOutputChannelOn,
   State,
-  TransportKind,
   type LanguageClientOptions,
   type ServerOptions,
 } from "vscode-languageclient/node"
@@ -29,8 +27,6 @@ const supportedLanguages = [
   "javascript",
   "javascriptreact",
 ]
-
-const nodeRequire = createRequire(__filename)
 
 type ClientEntry = {
   client: LanguageClient
@@ -550,52 +546,17 @@ function serverOptions(
     }
   }
 
-  const launcher = bundledLauncherPath(context)
-  if (launcher === undefined) {
-    log("Bundled typeweld-ls launcher was not found; falling back to typeweld-ls on PATH.")
-    return {
-      debug: { command: "typeweld-ls", args, options },
-      run: { command: "typeweld-ls", args, options },
-    }
-  }
+  const resolvedCommand = bundledTypeweldLsPath(context) ??
+    localRepoTypeweldLsPaths(context).find((candidate) => fs.existsSync(candidate)) ??
+    "typeweld-ls"
 
-  if (isTypeScriptLauncher(launcher)) {
-    const tsx = bundledTsxPath(context)
-    if (tsx === undefined) {
-      log("TypeScript typeweld-ls launcher was found but tsx was not found; falling back to typeweld-ls on PATH.")
-      return {
-        debug: { command: "typeweld-ls", args, options },
-        run: { command: "typeweld-ls", args, options },
-      }
-    }
-
-    return {
-      debug: {
-        command: process.execPath,
-        args: [tsx, launcher, ...args],
-        options,
-      },
-      run: {
-        command: process.execPath,
-        args: [tsx, launcher, ...args],
-        options,
-      },
-    }
+  if (resolvedCommand === "typeweld-ls") {
+    log("Bundled typeweld-ls binary was not found; falling back to typeweld-ls on PATH.")
   }
 
   return {
-    debug: {
-      module: launcher,
-      transport: TransportKind.stdio,
-      args,
-      options,
-    },
-    run: {
-      module: launcher,
-      transport: TransportKind.stdio,
-      args,
-      options,
-    },
+    debug: { command: resolvedCommand, args, options },
+    run: { command: resolvedCommand, args, options },
   }
 }
 
@@ -647,60 +608,42 @@ function hasWorkspaceMarker(startDir: string, markers: readonly string[]): boole
   }
 }
 
-function isTypeScriptLauncher(launcher: string): boolean {
-  return launcher.endsWith(".ts") || launcher.endsWith(".mts")
-}
-
-function bundledLauncherPath(context: vscode.ExtensionContext): string | undefined {
-  const packagedLauncher = context.asAbsolutePath(
-    path.join("server", "index.js"),
+function bundledTypeweldLsPath(context: vscode.ExtensionContext): string | undefined {
+  const binary = context.asAbsolutePath(
+    path.join("bin", vscodeTarget(), binaryName("typeweld-ls")),
   )
-  if (fs.existsSync(packagedLauncher)) {
-    return packagedLauncher
-  }
-
-  try {
-    return nodeRequire.resolve("@typeweld/language-server/dist/index.js")
-  } catch {
-    const packagedDistPath = context.asAbsolutePath(
-      path.join(
-        "node_modules",
-        "@typeweld",
-        "language-server",
-        "dist",
-        "index.js",
-      ),
-    )
-    if (fs.existsSync(packagedDistPath)) {
-      return packagedDistPath
-    }
-  }
-
-  try {
-    return nodeRequire.resolve("@typeweld/language-server/src/index.ts")
-  } catch {
-    const sourcePath = context.asAbsolutePath(
-      path.join(
-        "node_modules",
-        "@typeweld",
-        "language-server",
-        "src",
-        "index.ts",
-      ),
-    )
-    return fs.existsSync(sourcePath) ? sourcePath : undefined
-  }
+  return fs.existsSync(binary) ? binary : undefined
 }
 
-function bundledTsxPath(context: vscode.ExtensionContext): string | undefined {
-  try {
-    return nodeRequire.resolve("tsx/cli")
-  } catch {
-    const workspacePath = context.asAbsolutePath(
-      path.join("..", "node_modules", "tsx", "dist", "cli.mjs"),
-    )
-    return fs.existsSync(workspacePath) ? workspacePath : undefined
+function localRepoTypeweldLsPaths(context: vscode.ExtensionContext): string[] {
+  const repositoryRoot = path.resolve(context.extensionPath, "..", "..")
+  return [
+    path.join(repositoryRoot, "target", "debug", binaryName("typeweld-ls")),
+    path.join(repositoryRoot, "target", "release", binaryName("typeweld-ls")),
+  ]
+}
+
+function vscodeTarget(): string {
+  if (process.platform === "darwin") {
+    return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64"
   }
+  if (process.platform === "win32") {
+    return process.arch === "arm64" ? "win32-arm64" : "win32-x64"
+  }
+  if (process.platform === "linux") {
+    if (process.arch === "arm64") {
+      return "linux-arm64"
+    }
+    if (process.arch === "arm") {
+      return "linux-armhf"
+    }
+    return "linux-x64"
+  }
+  return `${process.platform}-${process.arch}`
+}
+
+function binaryName(base: "typeweld-ls" | "typeweld"): string {
+  return process.platform === "win32" ? `${base}.exe` : base
 }
 
 function mergedEnvironment(

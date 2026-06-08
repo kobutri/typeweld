@@ -2,6 +2,7 @@
   "name": "@typeweld/typescript-plugin",
   "version": "0.0.5",
   "private": true,
+  "type": "commonjs",
   "description": "Typeweld TypeScript server plugin bundled with the VS Code extension.",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -9,8 +10,13 @@
     "url": "git+https://github.com/kobutri/typeweld.git",
     "directory": "npm/vscode-extension/typescript-plugin"
   },
-  "main": "index.js",
+  "main": "./dist/index.js",
   "files": [
-    "index.js"
-  ]
+    "dist",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
 }

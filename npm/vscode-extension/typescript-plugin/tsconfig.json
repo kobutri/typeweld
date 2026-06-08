@@ -3,8 +3,7 @@
   "compilerOptions": {
     "module": "Node16",
     "moduleResolution": "Node16",
-    "noEmit": false,
-    "outDir": "../../node_modules/.cache/vscode-typescript-plugin-build",
+    "noEmit": true,
     "rootDir": ".",
     "sourceMap": false,
     "tsBuildInfoFile": "../../node_modules/.cache/vscode-typescript-plugin.tsbuildinfo",
@@ -12,7 +11,7 @@
       "node"
     ]
   },
-  "files": [
-    "index.ts"
+  "include": [
+    "src/**/*.ts"
   ]
 }

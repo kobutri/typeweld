@@ -7,6 +7,7 @@
 /npm/language-server-wrapper/bin/
 /npm/language-server-wrapper/dist/
 /npm/vscode-extension/dist/
+/npm/vscode-extension/typescript-plugin/dist/
 /npm/vscode-extension/server/
 /npm/vscode-extension/out/
 /target/api-contract/
