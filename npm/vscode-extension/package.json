@@ -4,7 +4,7 @@
   "description": "VS Code client for the Typeweld language server.",
   "version": "0.0.5",
   "private": true,
-  "publisher": "typeweld",
+  "publisher": "kobutri",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",

@@ -210,6 +210,9 @@ jobs:
           merge-multiple: true
       - name: Validate VSIX artifacts
         shell: bash
+        env:
+          EXPECTED_VSCODE_EXTENSION_NAME: typeweld-vscode
+          EXPECTED_VSCODE_MARKETPLACE_PUBLISHER: kobutri
         run: |
           mapfile -t vsix_files < <(find marketplace-assets -maxdepth 1 -type f -name '*.vsix' | sort)
           if [ "${#vsix_files[@]}" -ne 4 ]; then
@@ -218,8 +221,37 @@ jobs:
             printf '  %s\n' "${vsix_files[@]}" >&2
             exit 1
           fi
-          printf 'validated marketplace artifacts:\n'
-          printf '  %s\n' "${vsix_files[@]}"
+          python - "${vsix_files[@]}" <<'PY'
+          import json
+          import os
+          import sys
+          import zipfile
+
+          expected_name = os.environ["EXPECTED_VSCODE_EXTENSION_NAME"]
+          expected_publisher = os.environ["EXPECTED_VSCODE_MARKETPLACE_PUBLISHER"]
+          failed = False
+
+          print("validated marketplace artifacts:")
+          for vsix_file in sys.argv[1:]:
+              with zipfile.ZipFile(vsix_file) as archive:
+                  manifest = json.loads(archive.read("extension/package.json"))
+
+              name = manifest.get("name")
+              publisher = manifest.get("publisher")
+              version = manifest.get("version")
+              item_name = f"{publisher}.{name}"
+              print(f"  {vsix_file}: {item_name} v{version}")
+
+              if name != expected_name or publisher != expected_publisher:
+                  print(
+                      f"expected {expected_publisher}.{expected_name}, got {item_name}",
+                      file=sys.stderr,
+                  )
+                  failed = True
+
+          if failed:
+              sys.exit(1)
+          PY
       - name: Check marketplace credentials
         shell: bash
         env:

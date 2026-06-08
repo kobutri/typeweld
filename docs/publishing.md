@@ -106,9 +106,9 @@ categories. npm leaf packages should keep package metadata, `files`, `bin` or
 
 Set up the VS Code extension registries:
 
-- Visual Studio Marketplace: create the `typeweld` publisher and authorize the
+- Visual Studio Marketplace: create the `kobutri` publisher and authorize the
   release identity or token for extension publishing.
-- Open VSX: create the `typeweld` namespace, sign the Eclipse Publisher
+- Open VSX: create the `kobutri` namespace, sign the Eclipse Publisher
   Agreement, and generate an access token for CI.
 - GitHub: store `VSCE_PAT` and `OVSX_PAT` as `release` environment secrets, not
   repository-wide secrets, and require reviewer approval for that environment.

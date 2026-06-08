@@ -48,13 +48,14 @@ credentials are available.
 
 Before the first marketplace release:
 
-1. Create the `typeweld` publisher in Visual Studio Marketplace.
-2. Create the `typeweld` namespace in Open VSX and sign the Eclipse Publisher
+1. Create the `kobutri` publisher in Visual Studio Marketplace.
+2. Create the `kobutri` namespace in Open VSX and sign the Eclipse Publisher
    Agreement.
 3. Add release environment secrets:
 
-   - `VSCE_PAT`: Visual Studio Marketplace token with Marketplace Manage scope.
-   - `OVSX_PAT`: Open VSX access token for the `typeweld` namespace.
+   - `VSCE_PAT`: Visual Studio Marketplace token with Marketplace Manage scope
+     for the `kobutri` publisher.
+   - `OVSX_PAT`: Open VSX access token for the `kobutri` namespace.
 
 Microsoft recommends Entra ID-based publishing over long-lived Marketplace PATs
 where the release infrastructure supports it. If Typeweld later moves extension
