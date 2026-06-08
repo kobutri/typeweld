@@ -3,8 +3,8 @@
 This extension starts `typeweld-ls` as the language server for Rust, TypeScript,
 TSX, JavaScript, and JSX files in typeweld workspaces.
 
-By default it uses the bundled `@typeweld/language-server` npm
-launcher. For local development, build the Rust gateway first:
+By default it uses the bundled native `typeweld-ls` binary. For local
+development, build the Rust gateway first:
 
 ```sh
 cargo build -p typeweld-ls --bin typeweld-ls
@@ -14,9 +14,7 @@ If the gateway binary is somewhere else, set:
 
 ```json
 {
-  "typeweld.languageServer.env": {
-    "TYPEWELD_LS_BINARY": "/absolute/path/to/typeweld-ls"
-  }
+  "typeweld.languageServer.command": "/absolute/path/to/typeweld-ls"
 }
 ```
 
