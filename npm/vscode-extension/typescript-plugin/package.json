@@ -1,6 +1,6 @@
 {
   "name": "@typeweld/typescript-plugin",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": true,
   "description": "Typeweld TypeScript server plugin bundled with the VS Code extension.",
   "license": "MIT OR Apache-2.0",

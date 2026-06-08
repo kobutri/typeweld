@@ -26,7 +26,7 @@ keywords = ["api", "effect", "lsp", "rust", "typescript"]
 license = "MIT OR Apache-2.0"
 readme = "docs/README.md"
 repository = "https://github.com/kobutri/typeweld"
-version = "0.0.4"
+version = "0.0.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

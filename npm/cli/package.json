@@ -1,6 +1,6 @@
 {
   "name": "typeweld",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "CLI for Typeweld Rust-to-TypeScript API contract tooling.",
   "license": "MIT OR Apache-2.0",
   "repository": {

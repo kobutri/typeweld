@@ -1,6 +1,6 @@
 {
   "name": "@typeweld/language-server",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "npm launcher for the Typeweld language server.",
   "license": "MIT OR Apache-2.0",
   "repository": {
