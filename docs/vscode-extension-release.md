@@ -6,9 +6,9 @@ then attaches them to the GitHub Release after the release is published.
 ## What CI Builds
 
 Regular CI runs the existing Rust and npm test suites, then does a Linux VSIX
-smoke package. The smoke package builds `typeweld-ls` and the `typeweld` CLI in release
-mode, copies both binaries into the extension under `bin/linux-x64/`, copies the
-npm launcher into `server/index.js`, and runs `vsce package`.
+smoke package. The smoke package builds `typeweld-ls` and the `typeweld` CLI in
+release mode, copies both binaries into the extension under `bin/linux-x64/`,
+builds the local TypeScript server plugin package, and runs `vsce package`.
 
 ## Release Outputs
 
@@ -21,9 +21,10 @@ The VS Code workflow builds these VSIX assets:
 - `typeweld-<version>-darwin-arm64.vsix`
 - `typeweld-<version>-win32-x64.vsix`
 
-Each VSIX includes the compiled extension bundle plus the matching `typeweld-ls` and
-`typeweld` binaries. The extension manifest version is stamped from the release tag
-during the workflow, so use tags like `v0.1.0`.
+Each VSIX includes the compiled extension bundle, the matching `typeweld-ls` and
+`typeweld` binaries, and `node_modules/@typeweld/typescript-plugin` built from
+the local extension source. The extension manifest version is stamped from the
+release tag during the workflow, so use tags like `v0.1.0`.
 
 The same workflow also builds and uploads the `typeweld` CLI:
 

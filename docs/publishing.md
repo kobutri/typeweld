@@ -46,7 +46,7 @@ The repository has:
 - `.github/workflows/release-packages.yml` for crates.io and npm publishing,
   triggered only by a published GitHub Release.
 - `npm run check:versions`, which verifies release crate versions, npm package
-  versions, npm lockfile workspace versions, VS Code extension dependency pins,
+  versions, npm lockfile workspace versions, VS Code extension local plugin wiring,
   public npm repository URLs, internal Rust dependency pins, and `GITHUB_REF_NAME`
   tags.
 - `npm run prepare:binary --workspace typeweld` to place a native CLI binary in
@@ -174,6 +174,7 @@ done by creating a GitHub Release.
    npm --prefix npm pack --dry-run --workspace typeweld
    npm --prefix npm pack --dry-run --workspace @typeweld/effect-runtime
    npm --prefix npm pack --dry-run --workspace @typeweld/language-server
+   npm --prefix npm/vscode-extension run package:vsix -- --target linux-x64 --out out/typeweld-vscode-preflight-linux-x64.vsix
    ```
 
    `cargo publish --dry-run` works for leaf crates before the first publish. For

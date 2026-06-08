@@ -88,20 +88,21 @@ npm install
 npm run compile --workspace typeweld-vscode
 ```
 
-The extension uses the bundled npm launcher by default and starts one `typeweld-ls`
+Installed VSIX packages use the bundled native `typeweld-ls` binary by default.
+During local extension development from a repository checkout, the extension
+also looks for `target/debug/typeweld-ls` and `target/release/typeweld-ls`
+before falling back to `typeweld-ls` on `PATH`. It starts one `typeweld-ls`
 client for each workspace folder with `.typeweld.json`, `typeweld.json`, or
 `target/api-contract/effect-v4/packages` in that folder or one of its parents.
 Add `Cargo.toml` to `typeweld.languageServer.requiredWorkspaceMarkers` if you
-want defaults-only startup before generation. Override the launcher with VS Code
+want defaults-only startup before generation. Override the command with VS Code
 settings when needed:
 
 ```json
 {
-  "typeweld.languageServer.command": "",
+  "typeweld.languageServer.command": "/absolute/path/to/typeweld-ls",
   "typeweld.languageServer.args": [],
-  "typeweld.languageServer.env": {
-    "TYPEWELD_LS_BINARY": "/absolute/path/to/typeweld-ls"
-  }
+  "typeweld.languageServer.env": {}
 }
 ```
 
@@ -174,9 +175,9 @@ backend, shows the configured command, and points at `.typeweld.json`.
 
 Common startup diagnostics:
 
-- Missing `typeweld-ls` gateway binary: the npm wrapper prints install help before
-  the LSP process starts. Build with `cargo build -p typeweld-ls --bin typeweld-ls` or
-  set `TYPEWELD_LS_BINARY`.
+- Missing `typeweld-ls` gateway binary: install `typeweld-ls`, build it with
+  `cargo build -p typeweld-ls --bin typeweld-ls`, or set
+  `typeweld.languageServer.command` to an absolute binary path in VS Code.
 - Missing Rust backend: install `rust-analyzer`, put it on `PATH`, or set
   `rustAnalyzer.command`.
 - Missing TypeScript/Effect backend: install `typescript-language-server` for

@@ -18,22 +18,18 @@ jobs:
           - os: ubuntu-latest
             rust-target: x86_64-unknown-linux-gnu
             vscode-target: linux-x64
-            binary-name: typeweld-ls
             cli-binary-name: typeweld
           - os: macos-latest
             rust-target: x86_64-apple-darwin
             vscode-target: darwin-x64
-            binary-name: typeweld-ls
             cli-binary-name: typeweld
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             vscode-target: darwin-arm64
-            binary-name: typeweld-ls
             cli-binary-name: typeweld
           - os: windows-latest
             rust-target: x86_64-pc-windows-msvc
             vscode-target: win32-x64
-            binary-name: typeweld-ls.exe
             cli-binary-name: typeweld.exe
     env:
       RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
@@ -89,19 +85,10 @@ jobs:
           manifest.version = process.env.EXTENSION_VERSION
           fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
           NODE
-      - run: cargo build -p typeweld-ls --bin typeweld-ls --release --target "${{ matrix.rust-target }}"
       - run: cargo build -p typeweld-cli --bin typeweld --release --target "${{ matrix.rust-target }}"
         env:
           TYPEWELD_TEMPLATE_SOURCE: github
           TYPEWELD_TEMPLATE_VERSION: ${{ steps.extension-version.outputs.value }}
-      - name: Prepare bundled language server
-        shell: bash
-        run: |
-          npm run prepare:server --workspace typeweld-vscode -- \
-            --binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.binary-name }}" \
-            --typeweld-binary "$GITHUB_WORKSPACE/target/${{ matrix.rust-target }}/release/${{ matrix.cli-binary-name }}" \
-            --platform-dir "${{ matrix.vscode-target }}"
-        working-directory: npm
       - name: Package CLI release asset
         shell: bash
         env:
@@ -156,9 +143,13 @@ jobs:
           PY
       - name: Package VSIX
         shell: bash
+        env:
+          TYPEWELD_TEMPLATE_SOURCE: github
+          TYPEWELD_TEMPLATE_VERSION: ${{ steps.extension-version.outputs.value }}
         run: |
           npm run package:vsix --workspace typeweld-vscode -- \
             --target "${{ matrix.vscode-target }}" \
+            --rust-target "${{ matrix.rust-target }}" \
             --out "out/typeweld-vscode-${{ steps.extension-version.outputs.value }}-${{ matrix.vscode-target }}.vsix"
         working-directory: npm
       - uses: actions/upload-artifact@v4

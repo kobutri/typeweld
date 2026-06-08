@@ -117,9 +117,6 @@ jobs:
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
         working-directory: npm
-      - run: cargo build --release -p typeweld-ls -p typeweld-cli --bins
-      - run: npm run prepare:server --workspace typeweld-vscode -- --binary "$GITHUB_WORKSPACE/target/release/typeweld-ls" --typeweld-binary "$GITHUB_WORKSPACE/target/release/typeweld" --platform-dir linux-x64
-        working-directory: npm
       - run: npm run package:vsix --workspace typeweld-vscode -- --target linux-x64 --out out/typeweld-vscode-ci-linux-x64.vsix
         working-directory: npm
 
