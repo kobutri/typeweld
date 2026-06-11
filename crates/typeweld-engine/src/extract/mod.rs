@@ -236,7 +236,9 @@ impl Lowering<'_> {
                 ParamKind::Path => {
                     let span = byte_span(file, param.name_span.byte_range());
                     if let Some(ty) = self.lower_scalar(module_key, file, param.inner_ty) {
+                        let owner = rust_path.join("::");
                         path_params.push(Param {
+                            id: SymbolId::from_parts("param", &[&owner, &param.name]),
                             name: param.name.clone(),
                             ty,
                             required: true,
@@ -407,7 +409,11 @@ impl Lowering<'_> {
                 shape.optionality,
                 typeweld_syntax::WireOptionality::Required
             );
+            let mut owner_path = target_module.clone();
+            owner_path.push(item.ident.to_string());
+            let owner = owner_path.join("::");
             params.push(Param {
+                id: SymbolId::from_parts("param", &[&owner, &wire_name]),
                 name: wire_name,
                 ty,
                 required,
@@ -1304,6 +1310,30 @@ fn check_name_collisions(
                 ),
                 Some(decl.spans.name.clone()),
             ));
+        }
+    }
+
+    // Error variant tags become generated TaggedErrorClass names, so they
+    // must be globally unique and distinct from type/error names.
+    let mut variant_tags: HashMap<&str, &SymbolId> = HashMap::new();
+    for decl in errors {
+        for variant in &decl.variants {
+            let taken = variant_tags
+                .insert(variant.tag.as_str(), &variant.id)
+                .is_some()
+                || type_names.contains_key(variant.tag.as_str())
+                || error_names.contains_key(variant.tag.as_str());
+            if taken {
+                diagnostics.push(Diagnostic::error(
+                    "name-collision",
+                    format!(
+                        "API error tag `{}` collides with another generated name; error tags \
+                         become TypeScript error classes and must be unique",
+                        variant.tag
+                    ),
+                    Some(variant.spans.name.clone()),
+                ));
+            }
         }
     }
 

@@ -169,7 +169,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::CREATED);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         let created: serde_json::Value = serde_json::from_slice(&body).expect("json");
         let id = created["id"].as_i64().expect("id");
 
@@ -216,7 +218,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         let error: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(error["_tag"], "UserNotFound");
     }

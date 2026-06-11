@@ -63,7 +63,10 @@ impl EndpointSig<'_> {
 ///
 /// # Errors
 /// Returns an error describing the first rule violation.
-pub fn analyze_endpoint<'a>(attr: &ApiAttr, sig: &'a syn::Signature) -> syn::Result<EndpointSig<'a>> {
+pub fn analyze_endpoint<'a>(
+    attr: &ApiAttr,
+    sig: &'a syn::Signature,
+) -> syn::Result<EndpointSig<'a>> {
     if sig.asyncness.is_none() && !attr.method.is_sse() {
         return Err(syn::Error::new_spanned(
             sig.fn_token,
@@ -588,7 +591,10 @@ mod tests {
             let sig = sig(quote! {
                 async fn x() -> Result<Json<User>, #err> {}
             });
-            assert!(analyze_endpoint(&attr, &sig).is_err(), "expected rejection: {err}");
+            assert!(
+                analyze_endpoint(&attr, &sig).is_err(),
+                "expected rejection: {err}"
+            );
         }
     }
 

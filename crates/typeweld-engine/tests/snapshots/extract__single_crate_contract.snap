@@ -143,6 +143,7 @@ expression: extraction.contract
       "request": {
         "path_params": [
           {
+            "id": "param:85dd7bc7300b27b0",
             "name": "id",
             "ty": {
               "Primitive": "I32"
@@ -216,6 +217,7 @@ expression: extraction.contract
         "path_params": [],
         "query_params": [
           {
+            "id": "param:f277738a3bcfad78",
             "name": "role",
             "ty": {
               "Primitive": "String"
@@ -228,6 +230,7 @@ expression: extraction.contract
             }
           },
           {
+            "id": "param:250d89552dd6e55b",
             "name": "limit",
             "ty": {
               "Primitive": "U32"

@@ -14,6 +14,7 @@
 
 pub mod diag;
 pub mod extract;
+pub mod gen;
 pub mod ir;
 pub mod line_index;
 pub mod vfs;

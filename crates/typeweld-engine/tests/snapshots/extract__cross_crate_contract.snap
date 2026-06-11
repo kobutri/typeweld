@@ -1,6 +1,6 @@
 ---
 source: crates/typeweld-engine/tests/extract.rs
-assertion_line: 246
+assertion_line: 243
 expression: contract
 ---
 {
@@ -25,6 +25,7 @@ expression: contract
       "request": {
         "path_params": [
           {
+            "id": "param:c58ee2e4459ae836",
             "name": "id",
             "ty": {
               "Primitive": "I64"

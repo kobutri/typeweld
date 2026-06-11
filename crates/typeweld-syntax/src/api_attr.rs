@@ -164,7 +164,10 @@ impl StatusAttr {
             .filter(|attr| attr.path().is_ident("status"))
         {
             let literal: LitInt = attr.parse_args().map_err(|_| {
-                syn::Error::new_spanned(attr, "#[status] expects a status code, e.g. #[status(404)]")
+                syn::Error::new_spanned(
+                    attr,
+                    "#[status] expects a status code, e.g. #[status(404)]",
+                )
             })?;
             let value = literal.base10_parse::<u16>()?;
             if !(400..=599).contains(&value) {
@@ -220,7 +223,10 @@ mod tests {
             #[status(404)]
             NotFound { id: i32 }
         };
-        assert_eq!(StatusAttr::from_variant(&variant).expect("parse").status, 404);
+        assert_eq!(
+            StatusAttr::from_variant(&variant).expect("parse").status,
+            404
+        );
 
         let missing: syn::Variant = syn::parse_quote!(NotFound);
         assert!(StatusAttr::from_variant(&missing).is_err());

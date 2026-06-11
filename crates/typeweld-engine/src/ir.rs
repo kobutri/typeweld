@@ -68,6 +68,7 @@ pub struct RequestShape {
 /// One path or query parameter.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Param {
+    pub id: SymbolId,
     /// The wire name (path segment name or query key).
     pub name: String,
     pub ty: TypeExpr,
@@ -435,6 +436,7 @@ mod tests {
                 method: HttpMethod::Get,
                 request: RequestShape {
                     path_params: vec![Param {
+                        id: SymbolId::from_parts("param", &["example", "get_user", "id"]),
                         name: "id".to_owned(),
                         ty: TypeExpr::Primitive(Primitive::I32),
                         required: true,

@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn route_params_support_both_segment_styles() {
-        assert_eq!(route_params("/users/{id}/posts/{post_id}"), ["id", "post_id"]);
+        assert_eq!(
+            route_params("/users/{id}/posts/{post_id}"),
+            ["id", "post_id"]
+        );
         assert_eq!(route_params("/users/:id"), ["id"]);
         assert_eq!(route_params("/static/path"), Vec::<String>::new());
     }

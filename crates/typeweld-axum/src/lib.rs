@@ -690,13 +690,15 @@ mod tests {
         futures_util::stream::Iter<std::array::IntoIter<Result<User, GetUserError>, 2>>;
 
     async fn user_events() -> Response {
-        into_api_response(Sse::<User, UserEventStream>::new(futures_util::stream::iter([
-            Ok(User {
-                id: 1,
-                name: "Ada".to_owned(),
-            }),
-            Err(GetUserError::NotFound { id: 2 }),
-        ])))
+        into_api_response(Sse::<User, UserEventStream>::new(
+            futures_util::stream::iter([
+                Ok(User {
+                    id: 1,
+                    name: "Ada".to_owned(),
+                }),
+                Err(GetUserError::NotFound { id: 2 }),
+            ]),
+        ))
     }
 
     fn mount<S>(path: &'static str, router: MethodRouter<S>) -> EndpointMount<S> {
@@ -709,7 +711,10 @@ mod tests {
     #[tokio::test]
     async fn endpoint_mounts_serve_requests() {
         let app = ApiRouter::new()
-            .endpoint(mount("/users/{id}", method_router(HttpMethod::Get, get_user)))
+            .endpoint(mount(
+                "/users/{id}",
+                method_router(HttpMethod::Get, get_user),
+            ))
             .into_router();
 
         let response = app
@@ -724,7 +729,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(
             std::str::from_utf8(&body).expect("utf8"),
             r#"{"id":42,"name":"Ada"}"#
@@ -752,7 +759,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(
             std::str::from_utf8(&body).expect("utf8"),
             r#"{"_tag":"NotFound","id":99}"#
@@ -762,7 +771,10 @@ mod tests {
     #[tokio::test]
     async fn sse_streams_items_and_error_frames() {
         let app = ApiRouter::new()
-            .endpoint(mount("/events", method_router(HttpMethod::Get, user_events)))
+            .endpoint(mount(
+                "/events",
+                method_router(HttpMethod::Get, user_events),
+            ))
             .into_router();
 
         let response = app
@@ -778,7 +790,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         let body = std::str::from_utf8(&body).expect("utf8");
 
         assert!(body.contains(r#"data: {"id":1,"name":"Ada"}"#));
@@ -789,7 +803,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_colon_route_params_are_normalized() {
         let app = ApiRouter::new()
-            .endpoint(mount("/users/:id", method_router(HttpMethod::Get, get_user)))
+            .endpoint(mount(
+                "/users/:id",
+                method_router(HttpMethod::Get, get_user),
+            ))
             .into_router();
 
         let response = app
