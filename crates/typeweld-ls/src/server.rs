@@ -27,6 +27,7 @@ use crate::convert::{self, path_to_uri, uri_to_path, Encoding};
 use crate::features;
 use crate::rust_backend::RustBackend;
 use crate::state::State;
+use crate::ts_backend::TsBackend;
 
 type RequestResult = Result<serde_json::Value, (ErrorCode, String)>;
 
@@ -52,30 +53,33 @@ pub fn run(connection: &Connection) -> Result<(), String> {
 
     register_file_watchers(connection, &params.capabilities);
 
-    // The private rust-analyzer child is a pure query backend — never exposed
-    // to the editor — and spawns lazily on the first semantic rename.
-    let mut rust_backend =
-        rust_backend_enabled(&params).then(|| RustBackend::new(root.clone(), None));
+    // The private rust-analyzer and typescript-language-server children are
+    // pure query backends — never exposed to the editor — and spawn lazily on
+    // the first semantic rename.
+    let mut rust_backend = backend_enabled(&params, "rustBackend", "TYPEWELD_RUST_BACKEND")
+        .then(|| RustBackend::new(root.clone(), None));
+    let mut ts_backend = backend_enabled(&params, "tsBackend", "TYPEWELD_TS_BACKEND")
+        .then(|| TsBackend::new(root.clone()));
 
     let mut state = State::new(root, encoding);
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
         publish_fresh_diagnostics(&mut state, connection);
     }));
 
-    main_loop(connection, &mut state, &mut rust_backend)
+    main_loop(connection, &mut state, &mut rust_backend, &mut ts_backend)
 }
 
-/// Whether the semantic Rust backend may be used this session: initialization
-/// options `{ "rustBackend": "lazy" | "off" }` (default `lazy`), with the
-/// `TYPEWELD_RUST_BACKEND=off` environment variable as a hard override.
-fn rust_backend_enabled(params: &InitializeParams) -> bool {
-    if std::env::var("TYPEWELD_RUST_BACKEND").is_ok_and(|value| value == "off") {
+/// Whether a semantic backend may be used this session: initialization
+/// options `{ "<option>": "lazy" | "off" }` (default `lazy`), with the
+/// `<env_var>=off` environment variable as a hard override.
+fn backend_enabled(params: &InitializeParams, option: &str, env_var: &str) -> bool {
+    if std::env::var(env_var).is_ok_and(|value| value == "off") {
         return false;
     }
     params
         .initialization_options
         .as_ref()
-        .and_then(|options| options.get("rustBackend"))
+        .and_then(|options| options.get(option))
         .and_then(serde_json::Value::as_str)
         != Some("off")
 }
@@ -84,6 +88,7 @@ fn main_loop(
     connection: &Connection,
     state: &mut State,
     rust_backend: &mut Option<RustBackend>,
+    ts_backend: &mut Option<TsBackend>,
 ) -> Result<(), String> {
     for message in &connection.receiver {
         match message {
@@ -96,7 +101,7 @@ fn main_loop(
                 let id = request.id.clone();
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     publish_fresh_diagnostics(state, connection);
-                    handle_request(state, rust_backend, &request)
+                    handle_request(state, rust_backend, ts_backend, &request)
                 }));
                 let response = match outcome {
                     Ok(Ok(value)) => Response::new_ok(id, value),
@@ -350,6 +355,7 @@ fn is_rust_path(path: &Path) -> bool {
 fn handle_request(
     state: &State,
     rust_backend: &mut Option<RustBackend>,
+    ts_backend: &mut Option<TsBackend>,
     request: &Request,
 ) -> RequestResult {
     match request.method.as_str() {
@@ -371,8 +377,13 @@ fn handle_request(
         }
         Rename::METHOD => {
             let params: RenameParams = parse_params(request)?;
-            let edit = features::rename::handle(state, rust_backend.as_mut(), &params)
-                .map_err(|message| (ErrorCode::InvalidParams, message))?;
+            let edit = features::rename::handle(
+                state,
+                rust_backend.as_mut(),
+                ts_backend.as_mut(),
+                &params,
+            )
+            .map_err(|message| (ErrorCode::InvalidParams, message))?;
             to_result(edit)
         }
         other => Err((

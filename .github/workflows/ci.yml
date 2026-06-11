@@ -48,7 +48,17 @@ jobs:
         with:
           components: rust-analyzer
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
       - run: cargo test -p typeweld-ls
+        env:
+          TYPEWELD_TSLS: ${{ github.workspace }}/npm/node_modules/.bin/typescript-language-server
+          TYPEWELD_TSSERVER: ${{ github.workspace }}/npm/node_modules/typescript/lib/tsserver.js
 
   test-npm:
     name: npm tests

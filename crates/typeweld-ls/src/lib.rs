@@ -12,6 +12,7 @@ mod features;
 mod rust_backend;
 mod server;
 mod state;
+mod ts_backend;
 
 /// Runs the language server on stdio.
 ///

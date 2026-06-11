@@ -4,17 +4,21 @@
 //! the TypeScript usages of derived names; TypeScript-initiated renames are
 //! mapped back to the Rust name first. For Rust-declared API symbols the
 //! private rust-analyzer backend additionally contributes the semantic Rust
-//! references the contract cannot see. Generated files are never edited —
-//! they update through regeneration.
+//! references the contract cannot see; for struct fields and endpoint params
+//! the private typescript-language-server backend contributes the user
+//! TypeScript property accesses. Generated files are never edited — they
+//! update through regeneration.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
     PrepareRenameResponse, RenameParams, TextDocumentEdit, TextDocumentPositionParams, TextEdit,
     Uri, WorkspaceEdit,
 };
+use typeweld_engine::gen::MarkKind;
 use typeweld_engine::ir::{DeclSpans, Endpoint, ErrorVariant, Span, SymbolId};
 use typeweld_engine::usage::{UsageKind, UsageRef};
 use typeweld_syntax::{to_camel_case, to_snake_case};
@@ -22,7 +26,8 @@ use typeweld_syntax::{to_camel_case, to_snake_case};
 use crate::convert::{self, path_to_uri, uri_to_path, Encoding};
 use crate::features::{resolve, trailing_ident};
 use crate::rust_backend::RustBackend;
-use crate::state::{PackageSnapshot, State, SymbolInfo};
+use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, Snapshot, State, SymbolInfo};
+use crate::ts_backend::TsBackend;
 
 /// One pending text replacement, by absolute path and byte range.
 struct Edit {
@@ -48,6 +53,7 @@ pub fn prepare(
 pub fn handle(
     state: &State,
     backend: Option<&mut RustBackend>,
+    ts_backend: Option<&mut TsBackend>,
     params: &RenameParams,
 ) -> Result<Option<WorkspaceEdit>, String> {
     let position = &params.text_document_position;
@@ -72,6 +78,9 @@ pub fn handle(
     // Declarations the semantic backend can chase: the decl ident position
     // and the new Rust-side name to apply there.
     let mut semantic: Option<(Span, String)> = None;
+    // Properties the TS backend can chase: the anchor mark kind and the new
+    // TypeScript-side property name to apply there.
+    let mut ts_property: Option<(MarkKind, String)> = None;
     match symbol.info {
         SymbolInfo::Endpoint(index) => {
             let endpoint = &package.contract.endpoints[index];
@@ -113,17 +122,127 @@ pub fn handle(
             };
             rename_error_variant(state, package, variant, new_name, &mut edits);
         }
-        // v1: Rust-only renames. Derived wire names update via regeneration.
+        // The Rust ident edit; derived wire names in the generated files
+        // update via regeneration, and the TS backend below chases the user
+        // property accesses (fields, params) the contract cannot see.
         SymbolInfo::Field { .. } | SymbolInfo::Variant { .. } | SymbolInfo::Param { .. } => {
             push_span_edit(state, &symbol.name_span, new_name.to_owned(), &mut edits);
+            ts_property = ts_property_target(state, package, symbol, new_name, from_rust);
         }
     }
 
     if let (Some(backend), Some((decl_span, rust_new))) = (backend, semantic) {
         merge_semantic_edits(state, backend, &decl_span, &rust_new, &mut edits);
     }
+    if let (Some(backend), Some((kind, ts_new))) = (ts_backend, ts_property) {
+        merge_ts_property_edits(
+            state,
+            backend,
+            snapshot,
+            package,
+            &resolved.id,
+            kind,
+            &ts_new,
+            &mut edits,
+        );
+    }
 
     Ok(Some(build_workspace_edit(state, package, edits)))
+}
+
+/// The TS backend target for a field or param symbol: the anchor mark kind
+/// and the new TypeScript property name, when the wire name is derived from
+/// the Rust ident. Variants stay Rust-only (v1).
+fn ts_property_target(
+    state: &State,
+    package: &PackageSnapshot,
+    symbol: &RustSymbol,
+    new_name: &str,
+    from_rust: bool,
+) -> Option<(MarkKind, String)> {
+    match symbol.info {
+        SymbolInfo::Field { owner, field } => {
+            let field = field_decl(package, owner, field)?;
+            derived_property(&field.rust_name, &field.wire_name, new_name, from_rust)
+                .map(|ts_new| (MarkKind::Field, ts_new))
+        }
+        SymbolInfo::Param {
+            endpoint,
+            query,
+            param,
+        } => {
+            let request = &package.contract.endpoints.get(endpoint)?.request;
+            let param = if query {
+                request.query_params.get(param)
+            } else {
+                request.path_params.get(param)
+            }?;
+            // Params store only the wire name; the Rust ident is read from
+            // the declaration span to detect explicit serde renames.
+            let rust_ident = span_text(state, &symbol.name_span)?;
+            derived_property(&rust_ident, &param.name, new_name, from_rust)
+                .map(|ts_new| (MarkKind::Param, ts_new))
+        }
+        _ => None,
+    }
+}
+
+/// The current text under a workspace-root-relative span.
+fn span_text(state: &State, span: &Span) -> Option<String> {
+    let text = state.read_text(&state.root().join(&span.file))?;
+    Some(text.get(span.start as usize..span.end as usize)?.to_owned())
+}
+
+/// Looks up the field declaration behind a [`SymbolInfo::Field`].
+fn field_decl(
+    package: &PackageSnapshot,
+    owner: FieldOwner,
+    field: usize,
+) -> Option<&typeweld_engine::ir::Field> {
+    use typeweld_engine::ir::TypeShape;
+    match owner {
+        FieldOwner::Struct(ty) => match &package.contract.types.get(ty)?.shape {
+            TypeShape::Struct { fields } => fields.get(field),
+            _ => None,
+        },
+        FieldOwner::Enum { ty, variant } => match &package.contract.types.get(ty)?.shape {
+            TypeShape::Enum { variants } => variants.get(variant)?.fields.get(field),
+            _ => None,
+        },
+        FieldOwner::Error { error, variant } => package
+            .contract
+            .errors
+            .get(error)?
+            .variants
+            .get(variant)?
+            .fields
+            .get(field),
+    }
+}
+
+/// The new TypeScript property name when the wire name is derived from the
+/// Rust ident; `None` when an explicit serde rename pins the wire name (the
+/// generated property — and therefore the user code — must not change).
+///
+/// Rust-initiated renames carry the new Rust ident, so the wire derivation is
+/// re-applied; TS-initiated renames already carry the TS spelling.
+fn derived_property(
+    rust_name: &str,
+    wire_name: &str,
+    new_name: &str,
+    from_rust: bool,
+) -> Option<String> {
+    if wire_name == rust_name {
+        Some(new_name.to_owned())
+    } else if wire_name == to_camel_case(rust_name) {
+        Some(if from_rust {
+            to_camel_case(new_name)
+        } else {
+            new_name.to_owned()
+        })
+    } else {
+        None
+    }
 }
 
 /// Queries the private rust-analyzer backend at the declaration ident and
@@ -153,7 +272,7 @@ fn merge_semantic_edits(
             return;
         }
     };
-    let backend_edits = flatten_rust_edits(state, &workspace_edit);
+    let backend_edits = flatten_backend_edits(state, &workspace_edit, is_rust);
     if backend_edits.is_empty() {
         return;
     }
@@ -166,21 +285,90 @@ fn merge_semantic_edits(
     edits.extend(backend_edits);
 }
 
+/// Queries the private typescript-language-server backend at the generated
+/// property declaration (the anchor mark) and merges the user-code `.ts`
+/// edits into the plan. Edits inside generated package directories are
+/// dropped — regeneration rewrites the anchor itself. An answer with zero
+/// user-file edits is retried once after a short pause, because tsserver
+/// serves partial answers while the project is still loading (a genuinely
+/// unused property legitimately yields nothing on the retry too). Backend
+/// failures only cost TS coverage — the Rust-side plan applies unchanged.
+#[allow(clippy::too_many_arguments)]
+fn merge_ts_property_edits(
+    state: &State,
+    backend: &mut TsBackend,
+    snapshot: &Snapshot,
+    package: &PackageSnapshot,
+    id: &SymbolId,
+    kind: MarkKind,
+    new_name: &str,
+    edits: &mut Vec<Edit>,
+) {
+    let Some(mark) = package
+        .marks
+        .iter()
+        .find(|mark| mark.kind == kind && &mark.symbol_id == id)
+    else {
+        return;
+    };
+    let anchor = package.package_dir.join(&mark.file);
+    let timeout = TsBackend::request_timeout();
+    let is_user_ts = |path: &Path| {
+        has_extension(path, &["ts", "tsx"])
+            && !snapshot
+                .packages
+                .iter()
+                .any(|package| path.starts_with(&package.package_dir))
+    };
+
+    for retry in [false, true] {
+        let workspace_edit =
+            match backend.rename(&anchor, mark.line, mark.character, new_name, timeout) {
+                Ok(Some(workspace_edit)) => workspace_edit,
+                Ok(None) => WorkspaceEdit::default(),
+                Err(message) => {
+                    eprintln!("typeweld-ls: semantic TypeScript rename unavailable: {message}");
+                    return;
+                }
+            };
+        let backend_edits = flatten_backend_edits(state, &workspace_edit, is_user_ts);
+        if !backend_edits.is_empty() {
+            edits.extend(backend_edits);
+            return;
+        }
+        if retry {
+            return;
+        }
+        // Zero user-file edits: the project may still have been loading.
+        std::thread::sleep(Duration::from_millis(1500));
+    }
+}
+
 fn is_rust(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("rs")
 }
 
-/// Flattens a backend `WorkspaceEdit` into byte-range edits over `.rs` files,
-/// decoding the child's UTF-16 ranges against the current document text.
-/// Non-Rust files stay typeweld's responsibility, and generated package dirs
-/// are filtered later in [`build_workspace_edit`].
-fn flatten_rust_edits(state: &State, workspace_edit: &WorkspaceEdit) -> Vec<Edit> {
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.contains(&extension))
+}
+
+/// Flattens a backend `WorkspaceEdit` into byte-range edits over the files
+/// `keep` accepts, decoding the child's UTF-16 ranges against the current
+/// document text. Generated package dirs are additionally filtered in
+/// [`build_workspace_edit`].
+fn flatten_backend_edits(
+    state: &State,
+    workspace_edit: &WorkspaceEdit,
+    keep: impl Fn(&Path) -> bool,
+) -> Vec<Edit> {
     let mut edits = Vec::new();
     let mut push = |uri: &Uri, text_edits: &mut dyn Iterator<Item = &TextEdit>| {
         let Some(path) = uri_to_path(uri) else {
             return;
         };
-        if !is_rust(&path) {
+        if !keep(&path) {
             return;
         }
         let Some(text) = state.read_text(&path) else {

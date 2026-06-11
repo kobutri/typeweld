@@ -1,24 +1,21 @@
-//! Integration tests for the private rust-analyzer rename backend.
+//! Integration tests for the private typescript-language-server rename
+//! backend.
 //!
-//! The semantic test drives a real rust-analyzer over a compilable fixture
-//! workspace and is skipped (with a note) when the binary is unavailable.
+//! The semantic tests drive a real typescript-language-server over a fixture
+//! workspace and are skipped (with a note) when the binary is unavailable.
 //! Environment-variable–driven tests serialize through a process-wide lock.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
-use lsp_types::notification::{DidOpenTextDocument, Exit, Initialized, Notification as _};
+use lsp_types::notification::{Exit, Initialized, Notification as _};
 use lsp_types::request::{Rename, Request as _, Shutdown};
-use lsp_types::{
-    DidOpenTextDocumentParams, DocumentChanges, OneOf, Position, TextDocumentEdit,
-    TextDocumentItem, WorkspaceEdit,
-};
+use lsp_types::{DocumentChanges, OneOf, Position, TextDocumentEdit, WorkspaceEdit};
 use typeweld_engine::line_index::LineIndex;
 
-/// Generous: the first rust-analyzer query waits for workspace indexing.
+/// Generous: the first tsserver query waits for project loading.
 const TIMEOUT: Duration = Duration::from_mins(3);
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -26,26 +23,42 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Sets process environment variables for one test, restoring on drop.
 struct EnvGuard {
     _lock: MutexGuard<'static, ()>,
-    keys: Vec<&'static str>,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvGuard {
-    fn set(vars: &[(&'static str, String)]) -> Self {
+    /// Locks the process-wide env mutex, computes the variables to set
+    /// *under the lock* (other tests temporarily mutate the same process
+    /// environment, e.g. `TYPEWELD_TSLS=/bin/false`), and applies them.
+    /// `None` from `vars` releases the lock without touching anything.
+    fn try_set(vars: impl FnOnce() -> Option<Vec<(&'static str, String)>>) -> Option<Self> {
         let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        for (key, value) in vars {
+        let vars = vars()?;
+        let previous = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in &vars {
             std::env::set_var(key, value);
         }
-        Self {
+        Some(Self {
             _lock: lock,
-            keys: vars.iter().map(|(key, _)| *key).collect(),
-        }
+            previous,
+        })
+    }
+
+    fn set(vars: &[(&'static str, String)]) -> Self {
+        Self::try_set(|| Some(vars.to_vec())).expect("vars provided")
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        for key in &self.keys {
-            std::env::remove_var(key);
+        for (key, previous) in &self.previous {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
@@ -59,7 +72,9 @@ ts = "@workspace/test-api"
 src = ["app/src/**/*.ts"]
 "#;
 
-const ROOT_MANIFEST: &str = "[workspace]\nmembers = [\"server\"]\nresolver = \"2\"\n";
+const ROOT_MANIFEST: &str = "[workspace]\nmembers = [\"server\"]\n";
+
+const SERVER_MANIFEST: &str = "[package]\nname = \"server\"\n";
 
 const LIB_RS: &str = r#"
 use serde::{Deserialize, Serialize};
@@ -91,40 +106,18 @@ pub async fn get_user(id: Path<i32>) -> Result<Json<User>, UserError> {
 pub fn routes() -> ApiRouter {
     ApiRouter::new().endpoint(get_user)
 }
-
-/// Plain business logic the contract knows nothing about.
-pub fn business_logic(user: User) -> User {
-    let copy: User = user.clone();
-    copy
-}
 "#;
 
+/// The app uses both a renameable property access (`user.displayName`) and a
+/// renameable args-object key (`{ id: 1 }`); both live in user code the
+/// contract cannot see.
 const MAIN_TS: &str = r#"
-import { getUser, User } from "@workspace/test-api"
+import { getUser } from "@workspace/test-api/endpoints/users"
+import type { User } from "@workspace/test-api"
 
 export const program = getUser({ id: 1 })
-export const userSchema = User
+export const show = (user: User) => user.displayName
 "#;
-
-/// The fixture's `server` crate depends on the real `typeweld` crate by path
-/// so `cargo metadata` (and therefore rust-analyzer indexing) succeeds.
-fn server_manifest() -> String {
-    let typeweld_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir")
-        .join("typeweld");
-    format!(
-        "[package]\n\
-         name = \"server\"\n\
-         version = \"0.1.0\"\n\
-         edition = \"2021\"\n\
-         \n\
-         [dependencies]\n\
-         serde = {{ version = \"1\", features = [\"derive\"] }}\n\
-         typeweld = {{ path = \"{}\" }}\n",
-        typeweld_dir.display()
-    )
-}
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -136,23 +129,46 @@ fn fixture() -> tempfile::TempDir {
     };
     write("typeweld.toml", TYPEWELD_TOML);
     write("Cargo.toml", ROOT_MANIFEST);
-    write("server/Cargo.toml", &server_manifest());
+    write("server/Cargo.toml", SERVER_MANIFEST);
     write("server/src/lib.rs", LIB_RS);
     write("app/src/main.ts", MAIN_TS);
     dir
 }
 
-/// The rust-analyzer binary the backend would use, when it actually runs.
-fn rust_analyzer_binary() -> Option<PathBuf> {
-    let binary = std::env::var_os("TYPEWELD_RUST_ANALYZER")
-        .map_or_else(|| PathBuf::from("rust-analyzer"), PathBuf::from);
-    let works = Command::new(&binary)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    works.then_some(binary)
+/// The repo-local npm install used to run a real typescript-language-server.
+fn npm_node_modules() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../npm/node_modules")
+}
+
+/// The typescript-language-server binary, when one is available.
+fn tsls_binary() -> Option<PathBuf> {
+    let binary = std::env::var_os("TYPEWELD_TSLS").map_or_else(
+        || npm_node_modules().join(".bin/typescript-language-server"),
+        PathBuf::from,
+    );
+    binary.exists().then_some(binary)
+}
+
+/// The pinned tsserver module next to the repo-local install, when present.
+fn tsserver_module() -> Option<PathBuf> {
+    let module = std::env::var_os("TYPEWELD_TSSERVER").map_or_else(
+        || npm_node_modules().join("typescript/lib/tsserver.js"),
+        PathBuf::from,
+    );
+    module.exists().then_some(module)
+}
+
+/// The environment for tests that drive the real backend; `None` skips.
+fn real_backend_env() -> Option<Vec<(&'static str, String)>> {
+    let binary = tsls_binary()?;
+    let mut vars = vec![
+        ("TYPEWELD_TSLS", binary.to_string_lossy().into_owned()),
+        ("TYPEWELD_TSLS_TIMEOUT_SECS", "60".to_owned()),
+    ];
+    if let Some(module) = tsserver_module() {
+        vars.push(("TYPEWELD_TSSERVER", module.to_string_lossy().into_owned()));
+    }
+    Some(vars)
 }
 
 struct Client {
@@ -221,18 +237,6 @@ impl Client {
         let value = self.request_value(R::METHOD, serde_json::to_value(params).expect("params"));
         serde_json::from_value(value).expect("result")
     }
-
-    fn open(&self, path: &Path, language: &str, text: &str) {
-        let params = DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri: uri(path).parse().expect("uri"),
-                language_id: language.to_owned(),
-                version: 1,
-                text: text.to_owned(),
-            },
-        };
-        self.notify(DidOpenTextDocument::METHOD, params);
-    }
 }
 
 impl Drop for Client {
@@ -273,6 +277,10 @@ fn uri(path: &Path) -> String {
 
 fn uri_path(uri: &str) -> PathBuf {
     PathBuf::from(uri.strip_prefix("file://").expect("file uri"))
+}
+
+fn package_dir(root: &Path) -> PathBuf {
+    root.join("target/typeweld/packages/@workspace/test-api")
 }
 
 /// Zero-based UTF-16 position of the start of `needle` in `text`. Fixtures
@@ -323,107 +331,120 @@ fn workspace_edits(edit: &WorkspaceEdit) -> Vec<(PathBuf, String, String)> {
     collected
 }
 
-/// Counts standalone `name` identifier occurrences in `text` (so `User` does
-/// not match inside `UserError`).
-fn ident_occurrences(text: &str, name: &str) -> usize {
-    let bytes = text.as_bytes();
-    let is_ident =
-        |byte: Option<&u8>| byte.is_some_and(|&byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    let mut count = 0;
-    let mut offset = 0;
-    while let Some(found) = text[offset..].find(name) {
-        let start = offset + found;
-        let end = start + name.len();
-        if !is_ident(start.checked_sub(1).and_then(|index| bytes.get(index)))
-            && !is_ident(bytes.get(end))
-        {
-            count += 1;
-        }
-        offset = end;
-    }
-    count
+fn assert_no_generated_edits(root: &Path, edits: &[(PathBuf, String, String)]) {
+    let package = package_dir(root);
+    assert!(
+        edits.iter().all(|(path, _, _)| !path.starts_with(&package)),
+        "generated files must never be edited: {edits:?}"
+    );
 }
 
 #[test]
-fn semantic_rename_covers_plain_rust_references() {
-    let Some(binary) = rust_analyzer_binary() else {
+fn field_rename_covers_user_property_accesses() {
+    let Some(vars) = real_backend_env() else {
         eprintln!(
-            "skipping semantic_rename_covers_plain_rust_references: rust-analyzer --version failed"
+            "skipping field_rename_covers_user_property_accesses: \
+             typescript-language-server unavailable (run `npm ci` in npm/ or set TYPEWELD_TSLS)"
         );
         return;
     };
-    let _env = EnvGuard::set(&[
-        (
-            "TYPEWELD_RUST_ANALYZER",
-            binary.to_string_lossy().into_owned(),
-        ),
-        ("TYPEWELD_RA_TIMEOUT_SECS", "120".to_owned()),
-    ]);
+    let _env = EnvGuard::set(&vars);
 
     let dir = fixture();
     let mut client = Client::start(
         dir.path(),
-        &serde_json::json!({ "rustBackend": "lazy", "tsBackend": "off" }),
+        &serde_json::json!({ "rustBackend": "off", "tsBackend": "lazy" }),
     );
     let lib_rs = dir.path().join("server/src/lib.rs");
-    // Exercise the queued document sync: opened before the lazy spawn.
-    client.open(&lib_rs, "rust", LIB_RS);
 
-    let position = position_of(LIB_RS, "pub struct User");
-    let position = Position::new(position.line, position.character + 11);
+    let position = position_of(LIB_RS, "display_name");
     let edit: Option<WorkspaceEdit> = client.request::<Rename>(
-        serde_json::from_value(rename_params(&lib_rs, position, "Account")).expect("params"),
+        serde_json::from_value(rename_params(&lib_rs, position, "nickname")).expect("params"),
     );
     let edits = workspace_edits(&edit.expect("workspace edit"));
 
-    let expected = ident_occurrences(LIB_RS, "User");
-    let in_lib = edits
-        .iter()
-        .filter(|(path, old, new)| path == &lib_rs && old == "User" && new == "Account")
-        .count();
-    assert_eq!(
-        in_lib, expected,
-        "rust-analyzer should cover every `User` ident in lib.rs \
-         (including `business_logic`), got {edits:?}"
+    assert!(
+        edits
+            .iter()
+            .any(|(path, old, new)| path == &lib_rs && old == "display_name" && new == "nickname"),
+        "rust ident edit: {edits:?}"
     );
-
     let main_ts = dir.path().join("app/src/main.ts");
     assert!(
         edits
             .iter()
-            .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Account"),
-        "expected the TS usage edit: {edits:?}"
+            .any(|(path, old, new)| path == &main_ts && old == "displayName" && new == "nickname"),
+        "expected the user property-access edit in main.ts: {edits:?}"
     );
+    assert_no_generated_edits(dir.path(), &edits);
 }
 
 #[test]
-fn rename_survives_a_crashing_backend() {
-    let _env = EnvGuard::set(&[("TYPEWELD_RUST_ANALYZER", "/bin/false".to_owned())]);
+fn param_rename_covers_user_args_object_keys() {
+    let Some(vars) = real_backend_env() else {
+        eprintln!(
+            "skipping param_rename_covers_user_args_object_keys: \
+             typescript-language-server unavailable (run `npm ci` in npm/ or set TYPEWELD_TSLS)"
+        );
+        return;
+    };
+    let _env = EnvGuard::set(&vars);
 
     let dir = fixture();
     let mut client = Client::start(
         dir.path(),
-        &serde_json::json!({ "rustBackend": "lazy", "tsBackend": "off" }),
+        &serde_json::json!({ "rustBackend": "off", "tsBackend": "lazy" }),
     );
     let lib_rs = dir.path().join("server/src/lib.rs");
 
-    let position = position_of(LIB_RS, "pub async fn get_user");
-    let position = Position::new(position.line, position.character + 14);
+    let position = position_of(LIB_RS, "id: Path<i32>");
     let edit: Option<WorkspaceEdit> = client.request::<Rename>(
-        serde_json::from_value(rename_params(&lib_rs, position, "fetch_user")).expect("params"),
+        serde_json::from_value(rename_params(&lib_rs, position, "userId")).expect("params"),
     );
     let edits = workspace_edits(&edit.expect("workspace edit"));
 
-    let rust_edits = edits
-        .iter()
-        .filter(|(path, old, new)| path == &lib_rs && old == "get_user" && new == "fetch_user")
-        .count();
-    assert_eq!(rust_edits, 2, "ident + mount edits: {edits:?}");
+    assert!(
+        edits
+            .iter()
+            .any(|(path, old, new)| path == &lib_rs && old == "id" && new == "userId"),
+        "rust ident edit: {edits:?}"
+    );
     let main_ts = dir.path().join("app/src/main.ts");
     assert!(
         edits
             .iter()
-            .any(|(path, old, new)| path == &main_ts && old == "getUser" && new == "fetchUser"),
-        "main.ts edit: {edits:?}"
+            .any(|(path, old, new)| path == &main_ts && old == "id" && new == "userId"),
+        "expected the `{{ id: 1 }}` args-object key edit in main.ts: {edits:?}"
+    );
+    assert_no_generated_edits(dir.path(), &edits);
+}
+
+#[test]
+fn rename_survives_a_crashing_ts_backend() {
+    let _env = EnvGuard::set(&[("TYPEWELD_TSLS", "/bin/false".to_owned())]);
+
+    let dir = fixture();
+    let mut client = Client::start(
+        dir.path(),
+        &serde_json::json!({ "rustBackend": "off", "tsBackend": "lazy" }),
+    );
+    let lib_rs = dir.path().join("server/src/lib.rs");
+
+    let position = position_of(LIB_RS, "display_name");
+    let edit: Option<WorkspaceEdit> = client.request::<Rename>(
+        serde_json::from_value(rename_params(&lib_rs, position, "nickname")).expect("params"),
+    );
+    let edits = workspace_edits(&edit.expect("workspace edit"));
+
+    assert!(
+        edits
+            .iter()
+            .any(|(path, old, new)| path == &lib_rs && old == "display_name" && new == "nickname"),
+        "the Rust-only plan must survive a dead backend: {edits:?}"
+    );
+    let main_ts = dir.path().join("app/src/main.ts");
+    assert!(
+        edits.iter().all(|(path, _, _)| path != &main_ts),
+        "no TS edits without a live backend: {edits:?}"
     );
 }
