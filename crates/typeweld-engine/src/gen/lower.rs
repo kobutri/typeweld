@@ -66,6 +66,7 @@ impl<'a> Lowering<'a> {
 
     // ===== schemas.ts =====
 
+    #[allow(clippy::too_many_lines)]
     fn schemas_file(&mut self) {
         let sorted = self.topo_sorted_types();
         let mut items = vec![Item::Import {
