@@ -20,9 +20,15 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
-use lsp_types::notification::{Exit, Initialized, Notification as _};
+use lsp_types::notification::{
+    DidChangeTextDocument, DidOpenTextDocument, Exit, Initialized, Notification as _,
+};
 use lsp_types::request::{Request as _, Shutdown};
-use lsp_types::{DocumentChanges, OneOf, TextDocumentEdit, WorkspaceEdit};
+use lsp_types::{
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentChanges, Location, OneOf,
+    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentItem,
+    VersionedTextDocumentIdentifier, WorkspaceEdit,
+};
 use typeweld_engine::line_index::LineIndex;
 
 const TIMEOUT: Duration = Duration::from_mins(3);
@@ -219,6 +225,33 @@ impl LsClient {
         }
     }
 
+    fn open(&self, path: &Path, language: &str, text: &str) {
+        let params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri(path).parse().expect("uri"),
+                language_id: language.to_owned(),
+                version: 1,
+                text: text.to_owned(),
+            },
+        };
+        self.notify(DidOpenTextDocument::METHOD, params);
+    }
+
+    fn change(&self, path: &Path, version: i32, text: &str) {
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri(path).parse().expect("uri"),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_owned(),
+            }],
+        };
+        self.notify(DidChangeTextDocument::METHOD, params);
+    }
+
     /// Waits for a server-initiated request with `method`, answering it.
     fn wait_for_request(&mut self, method: &str, timeout: Duration) -> Option<serde_json::Value> {
         let deadline = Instant::now() + timeout;
@@ -373,11 +406,25 @@ impl Drop for TsServer {
 // --- helpers ---
 
 fn uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    let text = path.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
 }
 
 fn uri_path(uri: &str) -> PathBuf {
-    PathBuf::from(uri.strip_prefix("file://").expect("file uri"))
+    let mut text = uri.strip_prefix("file://").expect("file uri").to_owned();
+    if cfg!(windows) && has_windows_drive_prefix(&text) {
+        text.remove(0);
+    }
+    PathBuf::from(text)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 /// One-based tsserver line/offset of the start of `needle` in `text`
@@ -500,9 +547,33 @@ fn plugin_serves_cross_language_features() {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    // 2. Rust-initiated field rename: the daemon asks the plugin for the
-    //    user property accesses.
-    let rename_position = lsp_position(LIB_RS, "display_name");
+    // 2. Rust-initiated field references include user TypeScript property
+    //    accesses from the daemon -> plugin semantic query.
+    ls.open(&lib_rs, "rust", LIB_RS);
+    let field_position = lsp_position(LIB_RS, "display_name");
+    let references = ls
+        .request_value(
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": uri(&lib_rs) },
+                "position": field_position,
+                "context": { "includeDeclaration": true },
+            }),
+        )
+        .expect("references");
+    let locations: Vec<Location> = serde_json::from_value(references).expect("locations");
+    assert!(
+        locations
+            .iter()
+            .any(|location| uri_path(location.uri.as_str()) == main_ts),
+        "field references must include the TS property access: {locations:?}"
+    );
+
+    // 3. Rust-initiated field rename with a dirty Rust buffer: the daemon asks
+    //    the plugin for the user property accesses.
+    let dirty_lib_rs = format!("{LIB_RS}\nfn broken(\n");
+    ls.change(&lib_rs, 2, &dirty_lib_rs);
+    let rename_position = lsp_position(&dirty_lib_rs, "display_name");
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let value = ls
@@ -543,7 +614,7 @@ fn plugin_serves_cross_language_features() {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    // 3. TypeScript-initiated rename: tsserver's locations exclude generated
+    // 4. TypeScript-initiated rename: tsserver's locations exclude generated
     //    files; once the edit lands, the daemon applies the Rust complement.
     let (line, offset) = ts_position(MAIN_TS, "displayName");
     let response = tsserver.request(
@@ -605,4 +676,16 @@ fn plugin_serves_cross_language_features() {
         rendered.contains("handle"),
         "the Rust complement must carry the new name: {rendered}"
     );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(&lib_rs).expect("read saved Rust complement");
+        if text.contains("pub handle: String") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the TS-initiated Rust complement must be saved to disk: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

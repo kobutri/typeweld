@@ -70,7 +70,7 @@ pub struct UsageRef {
 }
 
 /// Usage index over a set of TS source files for one contract.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct UsageIndex {
     /// Every recorded reference, in scan order.
     pub refs: Vec<UsageRef>,

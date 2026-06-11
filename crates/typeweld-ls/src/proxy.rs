@@ -21,7 +21,8 @@
 //! sidecar behavior: contract-based definitions, references, hover, rename,
 //! and diagnostics.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
@@ -40,8 +41,8 @@ use lsp_types::{
     DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern, GotoDefinitionParams, HoverParams,
     HoverProviderCapability, InitializeParams, Location, NumberOrString, PositionEncodingKind,
     ReferenceParams, Registration, RegistrationParams, RenameOptions, RenameParams,
-    ServerCapabilities, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkDoneProgressOptions, WorkspaceEdit,
+    ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions, WorkspaceEdit,
 };
 use typeweld_engine::diag::{Diagnostic, Severity};
 
@@ -111,7 +112,7 @@ pub fn run(connection: &Connection, options: &Options) -> Result<(), String> {
         .initialize_finish(request_id, initialize_result)
         .map_err(|error| error.to_string())?;
 
-    register_file_watchers(connection, &params.capabilities, ra.is_some());
+    register_file_watchers(connection, &params.capabilities);
 
     let mut server = Proxy {
         connection,
@@ -120,7 +121,8 @@ pub fn run(connection: &Connection, options: &Options) -> Result<(), String> {
         raw_initialize: raw_params,
         plugin: PluginHub::start(&root),
         pending: HashMap::new(),
-        injected_renames: std::collections::HashSet::new(),
+        pending_applies: HashMap::new(),
+        injected_renames: HashMap::new(),
         ra_diagnostics: HashMap::new(),
         our_diagnostics: HashMap::new(),
         next_internal: 0,
@@ -176,10 +178,14 @@ struct Proxy<'a> {
     raw_initialize: serde_json::Value,
     plugin: Option<PluginHub>,
     pending: HashMap<RequestId, Pending>,
+    /// Server-initiated edits we should write through to disk once the
+    /// client accepts them. These are TypeScript-initiated Rust complements;
+    /// `workspace/applyEdit` may leave open files dirty otherwise.
+    pending_applies: HashMap<RequestId, PendingApply>,
     /// Renames we injected into rust-analyzer ourselves (the Rust complement
     /// of a TypeScript-initiated rename): the resulting edit is filtered to
     /// Rust files and applied via `workspace/applyEdit`.
-    injected_renames: std::collections::HashSet<RequestId>,
+    injected_renames: HashMap<RequestId, Vec<PathBuf>>,
     /// rust-analyzer's last published diagnostics per file URI, merged with
     /// ours on every publish from either side.
     ra_diagnostics: HashMap<String, Vec<serde_json::Value>>,
@@ -269,7 +275,14 @@ impl Proxy<'_> {
             Message::Response(response) => {
                 // The editor answering a server-to-client request: ours are
                 // namespaced, everything else belongs to rust-analyzer.
-                if !id_text(&response.id).starts_with("typeweld") {
+                let id = id_text(&response.id);
+                if let Some(files) = self.pending_applies.remove(&response.id) {
+                    if apply_response_succeeded(&response) {
+                        self.persist_applied_edit(files);
+                        self.state.mark_dirty();
+                        self.refresh();
+                    }
+                } else if !id.starts_with("typeweld") {
                     self.forward_to_ra(&Message::Response(response));
                 }
                 false
@@ -287,9 +300,9 @@ impl Proxy<'_> {
                     }));
                     drop(outcome); // fail-open: forward what we have
                     self.respond(response);
-                } else if self.injected_renames.remove(&response.id) {
+                } else if let Some(save_files) = self.injected_renames.remove(&response.id) {
                     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        self.on_injected_rename_response(response);
+                        self.on_injected_rename_response(response, save_files);
                     }));
                 }
             }
@@ -352,7 +365,11 @@ impl Proxy<'_> {
     /// Reacts to a plugin event: a TypeScript-initiated rename of an API
     /// symbol whose Rust complement we now owe.
     fn on_plugin_event(&mut self, event: PluginEvent) {
-        let PluginEvent::RenameLanded { symbol, new_name } = event;
+        let PluginEvent::RenameLanded {
+            symbol,
+            new_name,
+            files,
+        } = event;
         self.state.ensure_fresh();
         let Some(plan) = features::rename::rust_complement(&self.state, &symbol, &new_name) else {
             return;
@@ -360,7 +377,7 @@ impl Proxy<'_> {
         match (&plan.decl_position, &mut self.ra) {
             (Some((path, position)), Some(_)) => {
                 let id = self.fresh_internal_id("rename");
-                self.injected_renames.insert(id.clone());
+                self.injected_renames.insert(id.clone(), files);
                 let params = serde_json::json!({
                     "textDocument": { "uri": path_to_uri(path) },
                     "position": position,
@@ -374,12 +391,12 @@ impl Proxy<'_> {
             }
             _ => {
                 // No semantic backend: apply the contract-known Rust edits.
-                self.apply_edit(&plan.fallback_edit);
+                self.apply_edit(&plan.fallback_edit, files);
             }
         }
     }
 
-    fn on_injected_rename_response(&mut self, response: Response) {
+    fn on_injected_rename_response(&mut self, response: Response, save_files: Vec<PathBuf>) {
         let Some(result) = response.result else {
             return;
         };
@@ -387,7 +404,7 @@ impl Proxy<'_> {
             return;
         };
         let rust_only = features::rename::filter_to_rust(edit);
-        self.apply_edit(&rust_only);
+        self.apply_edit(&rust_only, save_files);
     }
 
     /// Augments a rust-analyzer response in place; any failure leaves it
@@ -402,12 +419,6 @@ impl Proxy<'_> {
                 else {
                     return;
                 };
-                self.state.ensure_fresh();
-                let Some(complement) =
-                    features::rename::ts_complement(&self.state, self.plugin.as_ref(), &params)
-                else {
-                    return;
-                };
                 let base = response.result.take().unwrap_or(serde_json::Value::Null);
                 let parsed = if base.is_null() {
                     Ok(WorkspaceEdit::default())
@@ -416,6 +427,16 @@ impl Proxy<'_> {
                 };
                 let Ok(mut edit) = parsed else {
                     response.result = Some(base);
+                    return;
+                };
+                self.refresh();
+                let Some(complement) = features::rename::ts_complement(
+                    &self.state,
+                    self.plugin.as_ref(),
+                    &params,
+                    Some(&edit),
+                ) else {
+                    response.result = serde_json::to_value(edit).ok().or(Some(base));
                     return;
                 };
                 merge_workspace_edits(&mut edit, complement);
@@ -430,6 +451,7 @@ impl Proxy<'_> {
                 let position = &params.text_document_position;
                 let extra = features::references::ts_locations(
                     &self.state,
+                    self.plugin.as_ref(),
                     &position.text_document.uri,
                     position.position,
                 );
@@ -503,12 +525,19 @@ impl Proxy<'_> {
                 let Some(path) = uri_to_path(&params.text_document.uri) else {
                     return;
                 };
-                // Full sync: the last change carries the complete new text.
-                let Some(change) = params.content_changes.into_iter().next_back() else {
+                if params.content_changes.is_empty() {
                     return;
                 };
-                self.state
-                    .change(path, change.text, params.text_document.version);
+                let current = self
+                    .state
+                    .read_text(&path)
+                    .map_or_else(String::new, |text| text.to_string());
+                let text = apply_text_document_changes(
+                    &current,
+                    params.content_changes,
+                    self.state.encoding(),
+                );
+                self.state.change(path, text, params.text_document.version);
                 self.refresh();
             }
             DidCloseTextDocument::METHOD => {
@@ -629,17 +658,56 @@ impl Proxy<'_> {
     }
 
     /// Applies a workspace edit through the editor.
-    fn apply_edit(&mut self, edit: &WorkspaceEdit) {
+    fn apply_edit(&mut self, edit: &WorkspaceEdit, mut save_files: Vec<PathBuf>) {
         let empty = edit.document_changes.is_none() && edit.changes.is_none();
         if empty {
             return;
         }
         let id = self.fresh_internal_id("apply");
+        let persisted = plan_persisted_edit(&self.state, edit);
+        save_files.extend(persisted.iter().map(|file| file.path.clone()));
+        self.pending_applies.insert(
+            id.clone(),
+            PendingApply {
+                persisted,
+                save_files,
+            },
+        );
         self.send(Message::Request(Request::new(
             id,
             "workspace/applyEdit".to_owned(),
             serde_json::json!({ "edit": edit }),
         )));
+    }
+
+    fn persist_applied_edit(&mut self, apply: PendingApply) {
+        for file in apply.persisted {
+            let current = self
+                .state
+                .read_text(&file.path)
+                .map(|text| text.to_string())
+                .unwrap_or_default();
+            if current != file.before && current != file.after {
+                eprintln!(
+                    "typeweld-ls: not saving {}; it changed while a TypeScript rename was applying",
+                    file.path.display()
+                );
+                continue;
+            }
+            if let Err(error) = fs::write(&file.path, &file.after) {
+                eprintln!(
+                    "typeweld-ls: failed to save {}: {error}",
+                    file.path.display()
+                );
+                continue;
+            }
+            if let Some(version) = self.state.version_of(&file.path) {
+                self.state.change(file.path, file.after, version);
+            }
+        }
+        if let Some(plugin) = &self.plugin {
+            plugin.save_documents(&dedupe_paths(apply.save_files));
+        }
     }
 
     fn fresh_internal_id(&mut self, kind: &str) -> RequestId {
@@ -680,8 +748,146 @@ fn id_text(id: &RequestId) -> String {
     rendered.trim_matches('"').to_owned()
 }
 
+struct PendingApply {
+    persisted: Vec<PersistedFileEdit>,
+    save_files: Vec<PathBuf>,
+}
+
+struct PersistedFileEdit {
+    path: PathBuf,
+    before: String,
+    after: String,
+}
+
+fn apply_response_succeeded(response: &Response) -> bool {
+    response.error.is_none()
+        && response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("applied"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn plan_persisted_edit(state: &State, edit: &WorkspaceEdit) -> Vec<PersistedFileEdit> {
+    let mut by_file: BTreeMap<PathBuf, Vec<lsp_types::TextEdit>> = BTreeMap::new();
+    if let Some(changes) = &edit.changes {
+        for (uri, text_edits) in changes {
+            let Some(path) = uri_to_path(uri) else {
+                continue;
+            };
+            by_file
+                .entry(path)
+                .or_default()
+                .extend(text_edits.iter().cloned());
+        }
+    }
+    if let Some(document_changes) = &edit.document_changes {
+        match document_changes {
+            lsp_types::DocumentChanges::Edits(documents) => {
+                for document in documents {
+                    push_persisted_document_edits(&mut by_file, document);
+                }
+            }
+            lsp_types::DocumentChanges::Operations(operations) => {
+                for operation in operations {
+                    if let lsp_types::DocumentChangeOperation::Edit(document) = operation {
+                        push_persisted_document_edits(&mut by_file, document);
+                    }
+                }
+            }
+        }
+    }
+
+    by_file
+        .into_iter()
+        .filter_map(|(path, edits)| planned_file_edit(state, path, edits))
+        .collect()
+}
+
+fn push_persisted_document_edits(
+    by_file: &mut BTreeMap<PathBuf, Vec<lsp_types::TextEdit>>,
+    document: &lsp_types::TextDocumentEdit,
+) {
+    let Some(path) = uri_to_path(&document.text_document.uri) else {
+        return;
+    };
+    let edits = by_file.entry(path).or_default();
+    for text_edit in &document.edits {
+        edits.push(match text_edit {
+            lsp_types::OneOf::Left(edit) => edit.clone(),
+            lsp_types::OneOf::Right(annotated) => annotated.text_edit.clone(),
+        });
+    }
+}
+
+fn planned_file_edit(
+    state: &State,
+    path: PathBuf,
+    edits: Vec<lsp_types::TextEdit>,
+) -> Option<PersistedFileEdit> {
+    let before = state.read_text(&path)?.to_string();
+    let mut replacements = Vec::new();
+    for edit in edits {
+        let start = convert::offset_at(&before, edit.range.start, state.encoding());
+        let end = convert::offset_at(&before, edit.range.end, state.encoding());
+        if start > end || before.get(start as usize..end as usize).is_none() {
+            return None;
+        }
+        replacements.push((start, end, edit.new_text));
+    }
+    replacements.sort_by_key(|(start, end, _)| (*start, *end));
+    for window in replacements.windows(2) {
+        if window[0].1 > window[1].0 {
+            return None;
+        }
+    }
+
+    let mut after = before.clone();
+    for (start, end, new_text) in replacements.into_iter().rev() {
+        after.replace_range(start as usize..end as usize, &new_text);
+    }
+    Some(PersistedFileEdit {
+        path,
+        before,
+        after,
+    })
+}
+
 fn is_rust(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+fn apply_text_document_changes(
+    current: &str,
+    changes: Vec<TextDocumentContentChangeEvent>,
+    encoding: Encoding,
+) -> String {
+    let mut text = current.to_owned();
+    for change in changes {
+        let Some(range) = change.range else {
+            text = change.text;
+            continue;
+        };
+        let start = convert::offset_at(&text, range.start, encoding) as usize;
+        let end = convert::offset_at(&text, range.end, encoding) as usize;
+        if start > end || text.get(start..end).is_none() {
+            continue;
+        }
+        text.replace_range(start..end, &change.text);
+    }
+    text
 }
 
 /// Merges `extra` into `base`, preserving whichever change representation
@@ -785,14 +991,10 @@ fn server_capabilities(encoding: Encoding) -> ServerCapabilities {
     }
 }
 
-/// Registers our own file watchers (generation inputs rust-analyzer does not
-/// watch for us). In proxy mode rust-analyzer registers its own Rust
-/// watchers; we only add the TypeScript and config patterns.
-fn register_file_watchers(
-    connection: &Connection,
-    capabilities: &ClientCapabilities,
-    proxying: bool,
-) {
+/// Registers file watchers for inputs that can change generated bindings.
+/// rust-analyzer may register overlapping watchers in proxy mode, but these
+/// keep generation current even when Rust files are added, removed, or moved.
+fn register_file_watchers(connection: &Connection, capabilities: &ClientCapabilities) {
     let dynamic = capabilities
         .workspace
         .as_ref()
@@ -802,11 +1004,7 @@ fn register_file_watchers(
     if !dynamic {
         return;
     }
-    let patterns: &[&str] = if proxying {
-        &["**/*.ts", "**/typeweld.toml"]
-    } else {
-        &["**/*.rs", "**/Cargo.toml", "**/typeweld.toml", "**/*.ts"]
-    };
+    let patterns = ["**/*.rs", "**/Cargo.toml", "**/typeweld.toml", "**/*.ts"];
     let watchers = patterns
         .iter()
         .map(|pattern| FileSystemWatcher {
@@ -864,7 +1062,7 @@ fn handle_request(state: &State, plugin: Option<&PluginHub>, request: &Request) 
         }
         References::METHOD => {
             let params: ReferenceParams = parse_params(request)?;
-            to_result(features::references::handle(state, &params))
+            to_result(features::references::handle(state, plugin, &params))
         }
         HoverRequest::METHOD => {
             let params: HoverParams = parse_params(request)?;
@@ -901,4 +1099,49 @@ fn to_result(value: impl serde::Serialize) -> RequestResult {
             format!("serialization failed: {error}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_change_updates_existing_text() {
+        let current = "pub struct User {\n    pub display_name: String,\n}\n";
+        let start = current.find("display_name").expect("field");
+        let end = start + "display_name".len();
+        let start = convert::position_at(
+            current,
+            u32::try_from(start).expect("start"),
+            Encoding::Utf16,
+        );
+        let end = convert::position_at(current, u32::try_from(end).expect("end"), Encoding::Utf16);
+
+        let changed = apply_text_document_changes(
+            current,
+            vec![TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(start, end)),
+                range_length: None,
+                text: "nickname".to_owned(),
+            }],
+            Encoding::Utf16,
+        );
+
+        assert_eq!(changed, "pub struct User {\n    pub nickname: String,\n}\n");
+    }
+
+    #[test]
+    fn full_change_replaces_existing_text() {
+        let changed = apply_text_document_changes(
+            "old",
+            vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "new".to_owned(),
+            }],
+            Encoding::Utf16,
+        );
+
+        assert_eq!(changed, "new");
+    }
 }

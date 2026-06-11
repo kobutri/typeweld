@@ -19,7 +19,7 @@ use typeweld_engine::vfs::{
 };
 use typeweld_engine::workspace;
 
-use crate::convert::Encoding;
+use crate::convert::{self, Encoding};
 
 /// The complete mutable state of one server session.
 pub struct State {
@@ -37,6 +37,7 @@ pub struct State {
 }
 
 /// One coherent rebuild of every configured package.
+#[derive(Clone)]
 pub struct Snapshot {
     pub packages: Vec<PackageSnapshot>,
     /// Files that received diagnostics in this round, for stale clearing.
@@ -44,6 +45,7 @@ pub struct Snapshot {
 }
 
 /// Everything the features need to answer requests for one package.
+#[derive(Clone)]
 pub struct PackageSnapshot {
     /// Generated package name; kept for diagnostics and future multi-package
     /// disambiguation in the UI.
@@ -67,6 +69,7 @@ impl PackageSnapshot {
 }
 
 /// One navigable Rust declaration: its id, name span, and contract position.
+#[derive(Clone)]
 pub struct RustSymbol {
     pub id: SymbolId,
     pub name_span: Span,
@@ -222,6 +225,11 @@ impl State {
     }
 
     fn rebuild(&mut self, diagnostics: &mut Vec<Diagnostic>) -> Vec<PackageSnapshot> {
+        let previous_packages = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.packages.clone())
+            .unwrap_or_default();
         let disk = DiskFileProvider;
         let files = OverlayFileProvider {
             base: &disk,
@@ -286,8 +294,17 @@ impl State {
             let failed = has_errors(&package_diagnostics) || has_errors(&generation_diagnostics);
             package_diagnostics.extend(generation_diagnostics);
             if failed {
-                // Keep the previous generated files; navigation still works
-                // over the partial contract.
+                if let Some(previous) = previous_packages
+                    .iter()
+                    .find(|previous| previous.ts_package == package.ts)
+                {
+                    let mut preserved = previous.clone();
+                    preserved.package_dir = package_dir.clone();
+                    preserved.usage = usage::scan_files(&preserved.contract, &ts_sources);
+                    preserved.diagnostics = package_diagnostics;
+                    snapshots.push(preserved);
+                    continue;
+                }
             } else if let Err(message) = gen::write_package(package_dir, &generated) {
                 package_diagnostics.push(Diagnostic::error("write-failed", message, None));
             }
@@ -335,7 +352,7 @@ fn collect_ts_sources(
         else {
             return;
         };
-        sources.push((path.to_string_lossy().into_owned(), contents.to_string()));
+        sources.push((convert::path_key(&path), contents.to_string()));
     };
 
     for pattern in &config.app_src {

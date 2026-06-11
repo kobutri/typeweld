@@ -11,11 +11,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
-use lsp_types::notification::{DidOpenTextDocument, Exit, Initialized, Notification as _};
+use lsp_types::notification::{
+    DidChangeTextDocument, DidOpenTextDocument, Exit, Initialized, Notification as _,
+};
 use lsp_types::request::{Request as _, Shutdown};
 use lsp_types::{
-    DidOpenTextDocumentParams, DocumentChanges, OneOf, Position, TextDocumentEdit,
-    TextDocumentItem, WorkspaceEdit,
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentChanges, OneOf, Position,
+    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentItem,
+    VersionedTextDocumentIdentifier, WorkspaceEdit,
 };
 use typeweld_engine::line_index::LineIndex;
 
@@ -114,6 +117,7 @@ fn server_manifest() -> String {
         .parent()
         .expect("crates dir")
         .join("typeweld");
+    let typeweld_dir = typeweld_dir.to_string_lossy().replace('\\', "/");
     format!(
         "[package]\n\
          name = \"server\"\n\
@@ -122,8 +126,7 @@ fn server_manifest() -> String {
          \n\
          [dependencies]\n\
          serde = {{ version = \"1\", features = [\"derive\"] }}\n\
-         typeweld = {{ path = \"{}\" }}\n",
-        typeweld_dir.display()
+         typeweld = {{ path = \"{typeweld_dir}\" }}\n"
     )
 }
 
@@ -266,6 +269,21 @@ impl Client {
         };
         self.notify(DidOpenTextDocument::METHOD, params);
     }
+
+    fn change(&self, path: &Path, version: i32, text: &str) {
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri(path).parse().expect("uri"),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_owned(),
+            }],
+        };
+        self.notify(DidChangeTextDocument::METHOD, params);
+    }
 }
 
 impl Drop for Client {
@@ -301,11 +319,25 @@ impl Drop for Client {
 }
 
 fn uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    let text = path.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
 }
 
 fn uri_path(uri: &str) -> PathBuf {
-    PathBuf::from(uri.strip_prefix("file://").expect("file uri"))
+    let mut text = uri.strip_prefix("file://").expect("file uri").to_owned();
+    if cfg!(windows) && has_windows_drive_prefix(&text) {
+        text.remove(0);
+    }
+    PathBuf::from(text)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 /// Zero-based UTF-16 position of the start of `needle` in `text`. Fixtures
@@ -425,10 +457,12 @@ fn proxied_rename_merges_rust_analyzer_and_typescript_edits() {
     let mut client = Client::start(dir.path());
     let lib_rs = dir.path().join("server/src/lib.rs");
     client.open(&lib_rs, "rust", LIB_RS);
+    let dirty = format!("{LIB_RS}\nfn broken(\n");
+    client.change(&lib_rs, 2, &dirty);
 
-    let position = position_of(LIB_RS, "pub struct User");
+    let position = position_of(&dirty, "pub struct User");
     let position = Position::new(position.line, position.character + 11);
-    let expected = ident_occurrences(LIB_RS, "User");
+    let expected = ident_occurrences(&dirty, "User");
     let main_ts = dir.path().join("app/src/main.ts");
     rename_until(&mut client, &lib_rs, position, "Account", |edits| {
         let in_lib = edits
@@ -440,6 +474,22 @@ fn proxied_rename_merges_rust_analyzer_and_typescript_edits() {
             .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Account");
         // rust-analyzer covers every Rust ident (including `business_logic`,
         // which the contract cannot see); our augmentation adds the TS usage.
+        in_lib == expected && in_ts
+    });
+
+    // The same TypeScript augmentation must happen when the Rust rename is
+    // initiated from a usage. rust-analyzer still returns the declaration
+    // edit, and typeweld infers the contract symbol from that edit.
+    let usage_position = position_of(&dirty, "copy: User");
+    let usage_position = Position::new(usage_position.line, usage_position.character + 6);
+    rename_until(&mut client, &lib_rs, usage_position, "Customer", |edits| {
+        let in_lib = edits
+            .iter()
+            .filter(|(path, old, new)| path == &lib_rs && old == "User" && new == "Customer")
+            .count();
+        let in_ts = edits
+            .iter()
+            .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Customer");
         in_lib == expected && in_ts
     });
 

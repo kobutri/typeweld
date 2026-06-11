@@ -197,6 +197,21 @@ impl Client {
         self.notify(DidChangeTextDocument::METHOD, params);
     }
 
+    fn change_range(&self, path: &Path, version: i32, range: Range, text: &str) {
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri(path).parse().expect("uri"),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: Some(range),
+                range_length: None,
+                text: text.to_owned(),
+            }],
+        };
+        self.notify(DidChangeTextDocument::METHOD, params);
+    }
+
     /// Waits for the next publishDiagnostics notification for `path`.
     fn wait_diagnostics(&mut self, path: &Path) -> PublishDiagnosticsParams {
         let wanted = uri(path);
@@ -258,7 +273,12 @@ impl Drop for Client {
 }
 
 fn uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    let text = path.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
 }
 
 /// Zero-based UTF-16 position of the start of `needle` (skipping `skip`
@@ -273,6 +293,24 @@ fn position_of(text: &str, needle: &str, skip: usize) -> Position {
     let offset = u32::try_from(offset + found).expect("offset");
     let (line, character) = LineIndex::new(text).line_col_utf16(offset, text);
     Position::new(line, character)
+}
+
+fn range_of(text: &str, needle: &str, skip: usize) -> Range {
+    let mut offset = 0;
+    for _ in 0..skip {
+        let found = text[offset..].find(needle).expect("needle");
+        offset += found + needle.len();
+    }
+    let found = text[offset..].find(needle).expect("needle");
+    let start = offset + found;
+    let end = start + needle.len();
+    let index = LineIndex::new(text);
+    let (start_line, start_col) = index.line_col_utf16(u32::try_from(start).expect("start"), text);
+    let (end_line, end_col) = index.line_col_utf16(u32::try_from(end).expect("end"), text);
+    Range::new(
+        Position::new(start_line, start_col),
+        Position::new(end_line, end_col),
+    )
 }
 
 fn offset_of(text: &str, range: Range) -> (usize, usize) {
@@ -308,7 +346,15 @@ fn uri_path(uri: &str) -> PathBuf {
             index += 1;
         }
     }
+    if cfg!(windows) && has_windows_drive_prefix(&decoded) {
+        decoded.remove(0);
+    }
     PathBuf::from(decoded)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 fn package_dir(root: &Path) -> PathBuf {
@@ -536,6 +582,33 @@ fn did_change_regenerates_and_updates_hover() {
     let generated = std::fs::read_to_string(&users_ts).expect("read generated");
     assert!(
         generated.contains("/users/{id}/profile"),
+        "generated: {generated}"
+    );
+}
+
+#[test]
+fn did_change_incremental_regenerates_and_updates_hover() {
+    let dir = fixture();
+    let mut client = Client::start(dir.path());
+    let lib_rs = dir.path().join("server/src/lib.rs");
+    client.open(&lib_rs, "rust", LIB_RS);
+
+    let range = range_of(LIB_RS, "\"/users/{id}\"", 0);
+    let changed = LIB_RS.replacen("\"/users/{id}\"", "\"/accounts/{id}\"", 1);
+    client.change_range(&lib_rs, 2, range, "\"/accounts/{id}\"");
+
+    let position = position_of(&changed, "pub async fn get_user", 0);
+    let position = Position::new(position.line, position.character + 14);
+    let hover: Option<Hover> = client.request::<HoverRequest>(
+        serde_json::from_value(position_params(&lib_rs, position)).expect("params"),
+    );
+    let text = hover_text(hover);
+    assert!(text.contains("/accounts/{id}"), "hover: {text}");
+
+    let accounts_ts = package_dir(dir.path()).join("endpoints/accounts.ts");
+    let generated = std::fs::read_to_string(&accounts_ts).expect("read generated");
+    assert!(
+        generated.contains("/accounts/{id}"),
         "generated: {generated}"
     );
 }

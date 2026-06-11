@@ -18,13 +18,13 @@ pub enum Encoding {
 /// Converts an absolute path to a `file://` URI.
 pub fn path_to_uri(path: &Path) -> Uri {
     let mut encoded = String::from("file://");
-    let text = path.to_string_lossy();
+    let text = path.to_string_lossy().replace('\\', "/");
     if !text.starts_with('/') {
         encoded.push('/');
     }
     for byte in text.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
                 encoded.push(char::from(byte));
             }
             other => {
@@ -46,7 +46,16 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     if !rest.starts_with('/') {
         return None;
     }
-    percent_decode(rest).map(PathBuf::from)
+    let mut decoded = percent_decode(rest)?;
+    if cfg!(windows) && has_windows_drive_prefix(&decoded) {
+        decoded.remove(0);
+    }
+    Some(PathBuf::from(decoded))
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 fn percent_decode(input: &str) -> Option<String> {
@@ -125,4 +134,43 @@ pub fn byte_offset_from_utf16(text: &str, utf16: u32) -> u32 {
 pub fn root_relative(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// Renders an absolute path as a stable key for cross-language indexes.
+pub fn path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_uri_decodes_percent_escapes() {
+        let uri: Uri = "file:///tmp/typeweld%20demo/main.rs".parse().expect("uri");
+
+        assert_eq!(
+            uri_to_path(&uri).expect("path"),
+            PathBuf::from("/tmp/typeweld demo/main.rs")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_uri_drops_leading_slash() {
+        let uri: Uri = "file:///E:/rust/typeweld".parse().expect("uri");
+
+        assert_eq!(
+            uri_to_path(&uri).expect("path"),
+            PathBuf::from("E:/rust/typeweld")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_uri_uses_forward_slashes() {
+        let uri = path_to_uri(&PathBuf::from(r"E:\rust\typeweld"));
+
+        assert_eq!(uri.as_str(), "file:///E:/rust/typeweld");
+    }
 }

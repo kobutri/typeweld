@@ -70,7 +70,7 @@ pub fn resolve(state: &State, uri: &Uri, position: Position) -> Option<Resolved>
         return resolve_rust(state, &text, &path, offset);
     }
     if has_extension(&path, &["ts", "tsx"]) {
-        let key = path.to_string_lossy().into_owned();
+        let key = convert::path_key(&path);
         let mut best: Option<Resolved> = None;
         for (index, package) in snapshot.packages.iter().enumerate() {
             if let Some(usage) = package.usage.symbol_at(&key, offset) {
@@ -160,7 +160,7 @@ pub fn plugin_snapshot(state: &State) -> Option<serde_json::Value> {
     let mut generated_dirs = Vec::new();
     let mut marks = Vec::new();
     for package in &snapshot.packages {
-        generated_dirs.push(package.package_dir.to_string_lossy().into_owned());
+        generated_dirs.push(convert::path_key(&package.package_dir));
         for mark in &package.marks {
             let file = package.package_dir.join(&mark.file);
             let Some(text) = state.read_text(&file) else {
@@ -175,13 +175,13 @@ pub fn plugin_snapshot(state: &State) -> Option<serde_json::Value> {
             };
             let hover = hover::markdown_for_symbol(package, symbol);
             marks.push(serde_json::json!({
-                "file": file.to_string_lossy(),
+                "file": convert::path_key(&file),
                 "start": convert::utf16_offset(&text, mark.start),
                 "end": convert::utf16_offset(&text, mark.end),
                 "symbol": mark.symbol_id,
                 "kind": format!("{:?}", mark.kind),
                 "target": {
-                    "file": target_path.to_string_lossy(),
+                    "file": convert::path_key(&target_path),
                     "start": convert::utf16_offset(&target_text, symbol.name_span.start),
                     "end": convert::utf16_offset(&target_text, symbol.name_span.end),
                 },

@@ -7,7 +7,9 @@
 //! connected plugin, answers nothing itself — and asks the plugin for the
 //! semantic TypeScript answers the contract cannot see (property accesses
 //! during a field rename). The plugin reports TypeScript-initiated renames of
-//! API symbols back as [`PluginEvent::RenameLanded`].
+//! API symbols back as [`PluginEvent::RenameLanded`]. The VS Code extension
+//! can also connect to this channel to save editor documents after internal
+//! edits land.
 //!
 //! Wire format: newline-delimited JSON, authenticated by a session token from
 //! the discovery file.
@@ -27,7 +29,11 @@ use crossbeam_channel::Receiver;
 pub enum PluginEvent {
     /// The editor applied a TypeScript-side rename of an API symbol; the
     /// Rust complement still needs to happen.
-    RenameLanded { symbol: String, new_name: String },
+    RenameLanded {
+        symbol: String,
+        new_name: String,
+        files: Vec<PathBuf>,
+    },
 }
 
 /// One rename location reported by the plugin, in UTF-16 code units.
@@ -54,9 +60,16 @@ struct Shared {
 }
 
 struct Session {
+    kind: SessionKind,
     writer: Arc<Mutex<TcpStream>>,
     pending: Arc<Mutex<HashMap<i64, crossbeam_channel::Sender<serde_json::Value>>>>,
     alive: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SessionKind {
+    TypeScript,
+    Vscode,
 }
 
 impl PluginHub {
@@ -110,7 +123,29 @@ impl PluginHub {
         *self.shared.snapshot.lock().expect("snapshot lock") = Some(line.clone());
         let sessions = self.shared.sessions.lock().expect("sessions lock");
         for session in sessions.iter() {
-            if session.alive.load(Ordering::Relaxed) {
+            if session.kind == SessionKind::TypeScript && session.alive.load(Ordering::Relaxed) {
+                let _ = write_line(&session.writer, &line);
+            }
+        }
+    }
+
+    /// Asks connected editor integrations to save these file documents.
+    pub fn save_documents(&self, files: &[PathBuf]) {
+        if files.is_empty() {
+            return;
+        }
+        let files: Vec<String> = files
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let line = serde_json::json!({
+            "method": "saveDocuments",
+            "files": files,
+        })
+        .to_string();
+        let sessions = self.shared.sessions.lock().expect("sessions lock");
+        for session in sessions.iter() {
+            if session.kind == SessionKind::Vscode && session.alive.load(Ordering::Relaxed) {
                 let _ = write_line(&session.writer, &line);
             }
         }
@@ -140,7 +175,9 @@ impl PluginHub {
             let session = sessions
                 .iter()
                 .rev()
-                .find(|session| session.alive.load(Ordering::Relaxed))
+                .find(|session| {
+                    session.kind == SessionKind::TypeScript && session.alive.load(Ordering::Relaxed)
+                })
                 .ok_or_else(|| "no TypeScript plugin connected".to_owned())?;
             let (sender, receiver) = crossbeam_channel::bounded(1);
             session
@@ -192,10 +229,16 @@ fn serve_plugin(
     {
         return;
     }
+    let kind = match hello.get("kind").and_then(serde_json::Value::as_str) {
+        Some("vscode") => SessionKind::Vscode,
+        _ => SessionKind::TypeScript,
+    };
 
-    if let Some(snapshot) = shared.snapshot.lock().expect("snapshot lock").clone() {
-        if write_line(&writer, &snapshot).is_err() {
-            return;
+    if kind == SessionKind::TypeScript {
+        if let Some(snapshot) = shared.snapshot.lock().expect("snapshot lock").clone() {
+            if write_line(&writer, &snapshot).is_err() {
+                return;
+            }
         }
     }
 
@@ -207,6 +250,7 @@ fn serve_plugin(
         .lock()
         .expect("sessions lock")
         .push(Session {
+            kind,
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             alive: Arc::clone(&alive),
@@ -243,8 +287,23 @@ fn serve_plugin(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let files = message
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default();
             if !symbol.is_empty() && !new_name.is_empty() {
-                let _ = events.send(PluginEvent::RenameLanded { symbol, new_name });
+                let _ = events.send(PluginEvent::RenameLanded {
+                    symbol,
+                    new_name,
+                    files,
+                });
             }
         }
     }
@@ -275,4 +334,80 @@ fn fresh_token() -> String {
         hasher.finish().hash(&mut second);
         second.finish()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    use std::time::Instant;
+
+    #[test]
+    fn vscode_sessions_do_not_receive_typescript_queries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let hub = PluginHub::start(dir.path()).expect("hub");
+        let mut ts = connect_session(dir.path(), None);
+        let _vscode = connect_session(dir.path(), Some("vscode"));
+        wait_for_sessions(&hub, 2);
+
+        let mut reader = BufReader::new(ts.try_clone().expect("clone ts"));
+        let answer = std::thread::spawn(move || {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read query");
+            let query: serde_json::Value = serde_json::from_str(&line).expect("query json");
+            let id = query
+                .get("id")
+                .and_then(serde_json::Value::as_i64)
+                .expect("id");
+            let response = serde_json::json!({
+                "id": id,
+                "result": [{ "file": "app.ts", "start": 3, "length": 4 }],
+            });
+            writeln!(ts, "{response}").expect("write response");
+            ts.flush().expect("flush response");
+        });
+
+        let locations = hub
+            .query_rename_locations(Path::new("generated.ts"), 1, Duration::from_secs(2))
+            .expect("locations");
+        answer.join().expect("answer thread");
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].file, "app.ts");
+        assert_eq!(locations[0].start, 3);
+        assert_eq!(locations[0].length, 4);
+    }
+
+    fn connect_session(root: &Path, kind: Option<&str>) -> TcpStream {
+        let discovery =
+            std::fs::read_to_string(root.join("target/typeweld/ls.json")).expect("discovery file");
+        let discovery: serde_json::Value = serde_json::from_str(&discovery).expect("discovery");
+        let port = discovery
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .expect("port") as u16;
+        let token = discovery
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .expect("token");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let hello = match kind {
+            Some(kind) => serde_json::json!({ "method": "hello", "token": token, "kind": kind }),
+            None => serde_json::json!({ "method": "hello", "token": token }),
+        };
+        writeln!(stream, "{hello}").expect("write hello");
+        stream.flush().expect("flush hello");
+        stream
+    }
+
+    fn wait_for_sessions(hub: &PluginHub, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if hub.shared.sessions.lock().expect("sessions").len() >= count {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("sessions did not connect");
+    }
 }

@@ -235,6 +235,7 @@ class Daemon {
           method: "renameLanded",
           symbol: pending.symbol,
           newName: name,
+          files: pending.probes.map((probe) => probe.fileName),
         })
         return
       }

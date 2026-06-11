@@ -15,6 +15,7 @@
 // directly.
 
 import * as fs from "node:fs"
+import * as net from "node:net"
 import * as path from "node:path"
 
 import * as vscode from "vscode"
@@ -36,14 +37,17 @@ const documentSelector = [{ scheme: "file", language: "rust" }]
 let extensionContext: vscode.ExtensionContext | undefined
 let outputChannel: vscode.LogOutputChannel | undefined
 let client: LanguageClient | undefined
+let saveBridge: SaveBridge | undefined
 let reconcileQueue = Promise.resolve()
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context
   outputChannel = vscode.window.createOutputChannel("Typeweld", { log: true })
+  saveBridge = new SaveBridge()
 
   context.subscriptions.push(
     outputChannel,
+    saveBridge,
     vscode.commands.registerCommand("typeweld.server.restart", () => {
       queueReconcile({ restart: true })
     }),
@@ -70,6 +74,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export async function deactivate(): Promise<void> {
   extensionContext = undefined
+  saveBridge?.dispose()
+  saveBridge = undefined
   await stopClient()
 }
 
@@ -257,6 +263,154 @@ function hasMarkerInOrAbove(startDir: string): boolean {
     }
     current = parent
   }
+}
+
+class SaveBridge implements vscode.Disposable {
+  private socket: net.Socket | undefined
+  private buffer = ""
+  private connecting = false
+  private readonly timer: ReturnType<typeof setInterval>
+
+  constructor() {
+    this.timer = setInterval(() => {
+      this.connect()
+    }, 1000)
+    this.timer.unref?.()
+    this.connect()
+  }
+
+  dispose(): void {
+    clearInterval(this.timer)
+    this.socket?.destroy()
+    this.socket = undefined
+  }
+
+  private connect(): void {
+    if (this.socket !== undefined || this.connecting) {
+      return
+    }
+    const discovered = discoverLanguageServer()
+    if (discovered === undefined) {
+      return
+    }
+
+    this.connecting = true
+    const socket = net.connect(discovered.port, "127.0.0.1")
+    socket.setNoDelay(true)
+    socket.unref()
+
+    const drop = () => {
+      if (this.socket === socket) {
+        this.socket = undefined
+      }
+      this.connecting = false
+      socket.destroy()
+    }
+
+    socket.on("connect", () => {
+      this.socket = socket
+      this.buffer = ""
+      this.connecting = false
+      socket.write(
+        JSON.stringify({
+          method: "hello",
+          token: discovered.token,
+          kind: "vscode",
+        }) + "\n",
+      )
+    })
+    socket.on("data", (chunk) => {
+      this.onData(chunk.toString())
+    })
+    socket.on("error", drop)
+    socket.on("close", drop)
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk
+    let index: number
+    while ((index = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, index)
+      this.buffer = this.buffer.slice(index + 1)
+      if (line.trim() === "") {
+        continue
+      }
+      try {
+        this.onMessage(JSON.parse(line) as Record<string, unknown>)
+      } catch {
+        // Ignore malformed daemon messages; the bridge is best-effort.
+      }
+    }
+  }
+
+  private onMessage(message: Record<string, unknown>): void {
+    if (message["method"] !== "saveDocuments" || !Array.isArray(message["files"])) {
+      return
+    }
+    const files = message["files"].filter(
+      (file): file is string => typeof file === "string",
+    )
+    void this.saveDocuments(files)
+  }
+
+  private async saveDocuments(files: string[]): Promise<void> {
+    const wanted = new Set(files.map(normalizeFsPath))
+    for (const document of vscode.workspace.textDocuments) {
+      if (
+        document.uri.scheme !== "file" ||
+        !document.isDirty ||
+        !wanted.has(normalizeFsPath(document.uri.fsPath))
+      ) {
+        continue
+      }
+      const saved = await document.save()
+      if (!saved) {
+        log(`Typeweld could not save ${document.uri.fsPath}.`)
+      }
+    }
+  }
+}
+
+function discoverLanguageServer(): { port: number; token: string } | undefined {
+  const folders = vscode.workspace.workspaceFolders ?? []
+  for (const folder of folders) {
+    const discovered = discoverLanguageServerFrom(folder.uri.fsPath)
+    if (discovered !== undefined) {
+      return discovered
+    }
+  }
+  return undefined
+}
+
+function discoverLanguageServerFrom(
+  startDir: string,
+): { port: number; token: string } | undefined {
+  let current = path.resolve(startDir)
+  for (let depth = 0; depth < 16; depth += 1) {
+    const candidate = path.join(current, "target", "typeweld", "ls.json")
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidate, "utf8")) as {
+        port?: number
+        token?: string
+      }
+      if (typeof parsed.port === "number" && typeof parsed.token === "string") {
+        return { port: parsed.port, token: parsed.token }
+      }
+    } catch {
+      // Keep walking.
+    }
+    const parent = path.dirname(current)
+    if (parent === current) {
+      break
+    }
+    current = parent
+  }
+  return undefined
+}
+
+function normalizeFsPath(fileName: string): string {
+  const normalized = path.resolve(fileName).replace(/\\/g, "/")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
 }
 
 async function startClient(context: vscode.ExtensionContext): Promise<void> {

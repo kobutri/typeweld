@@ -13,22 +13,20 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
     Position, PrepareRenameResponse, RenameParams, TextDocumentEdit, TextDocumentPositionParams,
     TextEdit, WorkspaceEdit,
 };
-use typeweld_engine::gen::MarkKind;
 use typeweld_engine::ir::{Endpoint, ErrorVariant, Span, SymbolId};
 use typeweld_engine::usage::{UsageKind, UsageRef};
 use typeweld_syntax::{to_camel_case, to_snake_case};
 
 use crate::convert::{self, path_to_uri, uri_to_path};
-use crate::features::{resolve, trailing_ident};
+use crate::features::{references, resolve, trailing_ident};
 use crate::plugin::PluginHub;
-use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, State, SymbolInfo};
+use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, Snapshot, State, SymbolInfo};
 
 /// One pending text replacement, by absolute path and byte range.
 struct Edit {
@@ -139,25 +137,150 @@ pub fn ts_complement(
     state: &State,
     plugin: Option<&PluginHub>,
     params: &RenameParams,
+    rust_edit: Option<&WorkspaceEdit>,
 ) -> Option<WorkspaceEdit> {
-    let position = &params.text_document_position;
-    let resolved = resolve(state, &position.text_document.uri, position.position)?;
-    if !resolved.is_from_rust() {
-        return None;
-    }
     let snapshot = state.snapshot()?;
-    let package = &snapshot.packages[resolved.package];
-    let symbol = package.symbol_by_id(&resolved.id)?;
+    let target = ts_complement_target(state, params, rust_edit)?;
+    let package = &snapshot.packages[target.package];
+    let symbol = package.symbol_by_id(&target.symbol)?;
     let new_name = params.new_name.as_str();
     if !is_identifier(new_name) {
         return None;
     }
 
     let mut edits = Vec::new();
+    push_ts_complement_edits(state, plugin, package, symbol, new_name, &mut edits);
+    if edits.is_empty() {
+        return None;
+    }
+    Some(build_workspace_edit(state, package, edits))
+}
+
+struct Target {
+    package: usize,
+    symbol: SymbolId,
+}
+
+fn ts_complement_target(
+    state: &State,
+    params: &RenameParams,
+    rust_edit: Option<&WorkspaceEdit>,
+) -> Option<Target> {
+    let position = &params.text_document_position;
+    if let Some(resolved) = resolve(state, &position.text_document.uri, position.position) {
+        if resolved.is_from_rust() {
+            return Some(Target {
+                package: resolved.package,
+                symbol: resolved.id,
+            });
+        }
+    }
+    rust_edit.and_then(|edit| target_from_rust_edit(state, edit))
+}
+
+fn target_from_rust_edit(state: &State, edit: &WorkspaceEdit) -> Option<Target> {
+    let snapshot = state.snapshot()?;
+    if let Some(changes) = &edit.changes {
+        for (uri, text_edits) in changes {
+            for text_edit in text_edits {
+                if let Some(target) = target_from_text_edit(state, snapshot, uri, text_edit) {
+                    return Some(target);
+                }
+            }
+        }
+    }
+    if let Some(document_changes) = &edit.document_changes {
+        match document_changes {
+            DocumentChanges::Edits(documents) => {
+                for document in documents {
+                    for text_edit in &document.edits {
+                        if let Some(target) =
+                            target_from_document_text_edit(state, snapshot, document, text_edit)
+                        {
+                            return Some(target);
+                        }
+                    }
+                }
+            }
+            DocumentChanges::Operations(operations) => {
+                for operation in operations {
+                    if let DocumentChangeOperation::Edit(document) = operation {
+                        for text_edit in &document.edits {
+                            if let Some(target) =
+                                target_from_document_text_edit(state, snapshot, document, text_edit)
+                            {
+                                return Some(target);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn target_from_document_text_edit(
+    state: &State,
+    snapshot: &Snapshot,
+    document: &TextDocumentEdit,
+    text_edit: &OneOf<TextEdit, lsp_types::AnnotatedTextEdit>,
+) -> Option<Target> {
+    match text_edit {
+        OneOf::Left(text_edit) => {
+            target_from_text_edit(state, snapshot, &document.text_document.uri, text_edit)
+        }
+        OneOf::Right(annotated) => target_from_text_edit(
+            state,
+            snapshot,
+            &document.text_document.uri,
+            &annotated.text_edit,
+        ),
+    }
+}
+
+fn target_from_text_edit(
+    state: &State,
+    snapshot: &Snapshot,
+    uri: &lsp_types::Uri,
+    text_edit: &TextEdit,
+) -> Option<Target> {
+    let path = uri_to_path(uri)?;
+    let text = state.read_text(&path)?;
+    for (package, package_snapshot) in snapshot.packages.iter().enumerate() {
+        for symbol in &package_snapshot.symbols {
+            if path != state.root().join(&symbol.name_span.file) {
+                continue;
+            }
+            let range = convert::range(
+                &text,
+                symbol.name_span.start,
+                symbol.name_span.end,
+                state.encoding(),
+            );
+            if text_edit.range == range {
+                return Some(Target {
+                    package,
+                    symbol: symbol.id.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn push_ts_complement_edits(
+    state: &State,
+    plugin: Option<&PluginHub>,
+    package: &PackageSnapshot,
+    symbol: &RustSymbol,
+    new_name: &str,
+    edits: &mut Vec<Edit>,
+) {
     match symbol.info {
         SymbolInfo::Endpoint(index) => {
             let endpoint = &package.contract.endpoints[index];
-            endpoint_ts_edits(state, package, endpoint, new_name, &mut edits);
+            endpoint_ts_edits(state, package, endpoint, new_name, edits);
         }
         SymbolInfo::Type(index) => {
             let decl = &package.contract.types[index];
@@ -168,7 +291,7 @@ pub fn ts_complement(
                 &decl.rust_name,
                 &decl.ts_name,
                 new_name,
-                &mut edits,
+                edits,
             );
         }
         SymbolInfo::Error(index) => {
@@ -180,21 +303,19 @@ pub fn ts_complement(
                 &decl.rust_name,
                 &decl.ts_name,
                 new_name,
-                &mut edits,
+                edits,
             );
         }
         SymbolInfo::ErrorVariant { error, variant } => {
-            let variant = package.contract.errors[error].variants.get(variant)?;
-            variant_tag_edits(state, package, variant, new_name, &mut edits);
+            let Some(variant) = package.contract.errors[error].variants.get(variant) else {
+                return;
+            };
+            variant_tag_edits(state, package, variant, new_name, edits);
         }
         SymbolInfo::Field { .. } | SymbolInfo::Variant { .. } | SymbolInfo::Param { .. } => {
-            property_edits(state, plugin, package, symbol, new_name, true, &mut edits);
+            property_edits(state, plugin, package, symbol, new_name, true, edits);
         }
     }
-    if edits.is_empty() {
-        return None;
-    }
-    Some(build_workspace_edit(state, package, edits))
 }
 
 /// The planned Rust complement of a TypeScript-initiated rename.
@@ -454,82 +575,32 @@ fn property_edits(
     from_rust: bool,
     edits: &mut Vec<Edit>,
 ) {
-    let Some(plugin) = plugin else { return };
-    let Some((kind, ts_new)) = ts_property_target(state, package, symbol, new_name, from_rust)
-    else {
+    let Some(ts_new) = ts_property_target(state, package, symbol, new_name, from_rust) else {
         return;
     };
-    let Some(mark) = package
-        .marks
-        .iter()
-        .find(|mark| mark.kind == kind && mark.symbol_id == symbol.id)
-    else {
-        return;
-    };
-    let anchor = package.package_dir.join(&mark.file);
-    let Some(anchor_text) = state.read_text(&anchor) else {
-        return;
-    };
-    let offset = convert::utf16_offset(&anchor_text, mark.start);
-    let locations = match plugin.query_rename_locations(&anchor, offset, plugin_timeout()) {
-        Ok(locations) => locations,
-        Err(message) => {
-            eprintln!("typeweld-ls: TypeScript property rename unavailable: {message}");
-            return;
-        }
-    };
-    let Some(snapshot) = state.snapshot() else {
-        return;
-    };
-    for location in locations {
-        let path = PathBuf::from(&location.file);
-        let generated = snapshot
-            .packages
-            .iter()
-            .any(|package| path.starts_with(&package.package_dir));
-        let is_ts = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension == "ts" || extension == "tsx");
-        if generated || !is_ts {
-            continue;
-        }
-        let Some(text) = state.read_text(&path) else {
-            continue;
-        };
-        let start = convert::byte_offset_from_utf16(&text, location.start);
-        let end = convert::byte_offset_from_utf16(&text, location.start + location.length);
+    for span in references::ts_property_spans(state, plugin, package, &symbol.id) {
         edits.push(Edit {
-            path,
-            start,
-            end,
+            path: span.path,
+            start: span.start,
+            end: span.end,
             new_text: ts_new.clone(),
         });
     }
 }
 
-fn plugin_timeout() -> Duration {
-    std::env::var("TYPEWELD_PLUGIN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|seconds| seconds.parse().ok())
-        .map_or(Duration::from_secs(3), Duration::from_secs)
-}
-
-/// The plugin target for a field or param symbol: the anchor mark kind and
-/// the new TypeScript property name, when the wire name is derived from the
-/// Rust ident. Variants stay Rust-only (v1).
+/// The new TypeScript property name for a field or param symbol when the
+/// wire name is derived from the Rust ident. Variants stay Rust-only (v1).
 fn ts_property_target(
     state: &State,
     package: &PackageSnapshot,
     symbol: &RustSymbol,
     new_name: &str,
     from_rust: bool,
-) -> Option<(MarkKind, String)> {
+) -> Option<String> {
     match symbol.info {
         SymbolInfo::Field { owner, field } => {
             let field = field_decl(package, owner, field)?;
             derived_property(&field.rust_name, &field.wire_name, new_name, from_rust)
-                .map(|ts_new| (MarkKind::Field, ts_new))
         }
         SymbolInfo::Param {
             endpoint,
@@ -546,7 +617,6 @@ fn ts_property_target(
             // the declaration span to detect explicit serde renames.
             let rust_ident = span_text(state, &symbol.name_span)?;
             derived_property(&rust_ident, &param.name, new_name, from_rust)
-                .map(|ts_new| (MarkKind::Param, ts_new))
         }
         _ => None,
     }
