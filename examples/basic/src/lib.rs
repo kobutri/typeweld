@@ -160,8 +160,13 @@ mod tests {
 
     use super::*;
 
+    /// The handlers share process-global state (`USERS`); tests that touch
+    /// it serialize here so `clear_users` cannot race the round trip.
+    static STATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn create_then_get_round_trip() {
+        let _state = STATE_LOCK.lock().await;
         let app = routes().into_router();
 
         let response = app
@@ -198,6 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn nested_admin_route_serves() {
+        let _state = STATE_LOCK.lock().await;
         let app = routes().into_router();
         let response = app
             .oneshot(
