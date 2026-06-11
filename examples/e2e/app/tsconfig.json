@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": [
+      "vitest/globals",
+      "node"
+    ],
+    "paths": {
+      "@workspace/e2e-api": [
+        "../target/typeweld/packages/@workspace/e2e-api/index.ts"
+      ],
+      "@workspace/e2e-api/*": [
+        "../target/typeweld/packages/@workspace/e2e-api/*"
+      ],
+      "@typeweld/effect-runtime": [
+        "./node_modules/@typeweld/effect-runtime/src/index.ts"
+      ],
+      "@typeweld/effect-runtime/compat": [
+        "./node_modules/@typeweld/effect-runtime/src/compat.ts"
+      ],
+      "effect": [
+        "./node_modules/effect"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "../target/typeweld/packages"
+  ]
+}

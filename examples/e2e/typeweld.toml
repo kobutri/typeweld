@@ -1,0 +1,9 @@
+[[package]]
+cargo = "e2e-server"
+ts = "@workspace/e2e-api"
+
+[app]
+src = ["app/src/**/*.ts"]
+
+[lint]
+unused-endpoints = "warn"

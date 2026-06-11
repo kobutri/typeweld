@@ -11,5 +11,18 @@ readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "typeweld"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+glob = { workspace = true }
+notify = { workspace = true }
+serde_json = { workspace = true }
+typeweld-engine = { workspace = true }
+typeweld-ls = { workspace = true }
+
 [lints]
 workspace = true

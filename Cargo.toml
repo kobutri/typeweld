@@ -8,10 +8,8 @@ members = [
   "crates/typeweld-macros",
   "crates/typeweld-syntax",
   "examples/basic",
-  "examples/e2e/server",
-  "examples/monorepo/api-types",
-  "examples/monorepo/server",
 ]
+exclude = ["examples/e2e", "examples/monorepo"]
 resolver = "2"
 
 [workspace.package]

@@ -1,9 +1,0 @@
-[package]
-name = "typeweld-example-monorepo-api-types"
-edition.workspace = true
-license.workspace = true
-publish = false
-version.workspace = true
-
-[lints]
-workspace = true

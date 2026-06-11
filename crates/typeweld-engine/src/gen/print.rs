@@ -32,10 +32,6 @@ impl Printer {
         (self.out, self.marks)
     }
 
-    pub fn blank_line(&mut self) {
-        self.out.push('\n');
-    }
-
     pub fn item(&mut self, item: &Item) {
         match item {
             Item::Import {

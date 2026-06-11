@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "../node_modules/.cache/typeweld-build.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

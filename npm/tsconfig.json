@@ -21,16 +21,10 @@
   "files": [],
   "references": [
     {
-      "path": "./cli"
+      "path": "./typeweld"
     },
     {
       "path": "./effect-runtime"
-    },
-    {
-      "path": "./language-server-wrapper"
-    },
-    {
-      "path": "./semantic-usage-scanner"
     },
     {
       "path": "./vscode-extension"

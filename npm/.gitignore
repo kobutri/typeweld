@@ -1,0 +1,6 @@
+typeweld/bin/
+typeweld/dist/
+vscode-extension/bin/
+vscode-extension/dist/
+vscode-extension/typescript-plugin/dist/
+vscode-extension/*.vsix

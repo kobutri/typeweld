@@ -1,9 +1,13 @@
 [package]
-name = "typeweld-example-e2e-server"
-edition.workspace = true
-license.workspace = true
+name = "e2e-server"
+version = "0.1.0"
+edition = "2021"
 publish = false
-version.workspace = true
 
-[lints]
-workspace = true
+[dependencies]
+axum = "0.8"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+typeweld = { path = "../../../crates/typeweld" }

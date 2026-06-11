@@ -2,7 +2,7 @@
   "name": "typeweld-vscode",
   "displayName": "Typeweld",
   "description": "VS Code client for the Typeweld language server.",
-  "version": "0.0.5",
+  "version": "0.1.0",
   "private": true,
   "publisher": "kobutri",
   "license": "MIT OR Apache-2.0",
@@ -20,22 +20,10 @@
   "extensionKind": [
     "workspace"
   ],
-  "capabilities": {
-    "untrustedWorkspaces": {
-      "supported": false
-    }
-  },
   "activationEvents": [
+    "workspaceContains:**/typeweld.toml",
     "onLanguage:rust",
-    "onLanguage:typescript",
-    "onLanguage:typescriptreact",
-    "onLanguage:javascript",
-    "onLanguage:javascriptreact",
-    "workspaceContains:.typeweld.json",
-    "workspaceContains:typeweld.json",
-    "workspaceContains:.typeweld-ls.json",
-    "workspaceContains:typeweld-ls.json",
-    "workspaceContains:target/api-contract/effect-v4/packages"
+    "onLanguage:typescript"
   ],
   "main": "./dist/extension.js",
   "files": [
@@ -46,13 +34,11 @@
     "package.json"
   ],
   "scripts": {
-    "compile": "npm run typecheck && vite build --config vite.config.mts --mode development",
-    "package": "npm run build",
-    "build": "npm run typecheck && vite build --config vite.config.mts --mode production && npm run build --prefix typescript-plugin",
-    "package:vsix": "tsx scripts/package-vsix.mts",
+    "build": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension.js && npm run build --prefix typescript-plugin",
+    "compile": "npm run typecheck && npm run build",
+    "package:vsix": "vsce package",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --prefix typescript-plugin",
-    "vscode:prepublish": "npm run build",
-    "watch": "vite build --config vite.config.mts --mode development --watch"
+    "vscode:prepublish": "npm run build"
   },
   "dependencies": {
     "@typeweld/typescript-plugin": "file:./typescript-plugin"
@@ -62,64 +48,42 @@
     "@types/vscode": "^1.120.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.0",
-    "ovsx": "1.0.0",
-    "tsx": "4.22.4",
     "typescript": "^6.0.3",
-    "vite": "8.0.16",
     "vscode-languageclient": "^10.0.0"
   },
   "contributes": {
     "commands": [
       {
-        "command": "typeweld.languageServer.restart",
-        "title": "Restart typeweld-ls",
+        "command": "typeweld.server.restart",
+        "title": "Restart Language Server",
         "category": "Typeweld"
       }
     ],
     "configuration": {
       "title": "Typeweld",
       "properties": {
-        "typeweld.languageServer.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable the typeweld-ls language server client."
-        },
-        "typeweld.languageServer.command": {
+        "typeweld.server.path": {
           "type": "string",
           "default": "",
-          "description": "Executable path or command name for typeweld-ls. Leave empty to use the bundled native binary."
+          "description": "Path to the typeweld binary. Leave empty to discover it via TYPEWELD_LS_BINARY, PATH, or local cargo builds."
         },
-        "typeweld.languageServer.args": {
+        "typeweld.server.args": {
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
           },
-          "description": "Arguments passed to typeweld-ls."
+          "description": "Additional arguments passed to `typeweld lsp`."
         },
-        "typeweld.languageServer.env": {
-          "type": "object",
-          "default": {},
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Environment variables added when starting typeweld-ls."
-        },
-        "typeweld.languageServer.requiredWorkspaceMarkers": {
-          "type": "array",
-          "default": [
-            ".typeweld.json",
-            "typeweld.json",
-            ".typeweld-ls.json",
-            "typeweld-ls.json",
-            ".api-ls.json",
-            "api-ls.json",
-            "target/api-contract/effect-v4/packages"
+        "typeweld.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
           ],
-          "items": {
-            "type": "string"
-          },
-          "description": "Workspace marker paths that allow the typeweld-ls client to start. An empty list starts the client for every workspace folder."
+          "default": "off",
+          "description": "Traces the communication between VS Code and the typeweld language server."
         }
       }
     },

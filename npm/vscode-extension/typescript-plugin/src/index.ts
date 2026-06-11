@@ -1,6 +1,6 @@
 "use strict"
 
-const generatedPackageSegment = "/target/api-contract/effect-v4/packages/"
+const generatedPackageSegment = "/target/typeweld/packages/"
 const logPrefix = "[typeweld]"
 
 type GeneratedSpan = {

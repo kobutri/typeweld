@@ -12,10 +12,12 @@
 //! and generation are pure functions over source text, fast enough to run on
 //! every keystroke.
 
+pub mod config;
 pub mod diag;
 pub mod extract;
 pub mod gen;
 pub mod ir;
 pub mod line_index;
+pub mod usage;
 pub mod vfs;
 pub mod workspace;
