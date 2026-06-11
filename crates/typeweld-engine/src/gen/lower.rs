@@ -870,6 +870,7 @@ impl<'a> Lowering<'a> {
         self.schema_expr(ty)
     }
 
+    #[allow(clippy::self_only_used_in_recursion)]
     fn ts_type(&mut self, ty: &TypeExpr, imports: &mut EndpointImports) -> String {
         match ty {
             TypeExpr::Primitive(Primitive::Bool) => "boolean".to_owned(),

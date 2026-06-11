@@ -17,4 +17,7 @@ error[E0308]: mismatched types
              found reference `&std::string::String`
 note: method defined here
  --> $RUST/core/src/option.rs
+  |
+  |     pub const fn is_none(&self) -> bool {
+  |                  ^^^^^^^
   = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)

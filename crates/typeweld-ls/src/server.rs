@@ -1,7 +1,7 @@
 //! The main loop: handshake, capability negotiation, and message dispatch.
 
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
@@ -52,23 +52,39 @@ pub fn run(connection: &Connection) -> Result<(), String> {
 
     register_file_watchers(connection, &params.capabilities);
 
-    // Seam: once `RustBackend::available()` returns true, Rust-side rename
-    // requests will be delegated to a private rust-analyzer child process.
-    let rust_backend = RustBackend::default();
-    assert!(
-        !rust_backend.available(),
-        "semantic Rust backend is not wired up yet"
-    );
+    // The private rust-analyzer child is a pure query backend — never exposed
+    // to the editor — and spawns lazily on the first semantic rename.
+    let mut rust_backend =
+        rust_backend_enabled(&params).then(|| RustBackend::new(root.clone(), None));
 
     let mut state = State::new(root, encoding);
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
         publish_fresh_diagnostics(&mut state, connection);
     }));
 
-    main_loop(connection, &mut state)
+    main_loop(connection, &mut state, &mut rust_backend)
 }
 
-fn main_loop(connection: &Connection, state: &mut State) -> Result<(), String> {
+/// Whether the semantic Rust backend may be used this session: initialization
+/// options `{ "rustBackend": "lazy" | "off" }` (default `lazy`), with the
+/// `TYPEWELD_RUST_BACKEND=off` environment variable as a hard override.
+fn rust_backend_enabled(params: &InitializeParams) -> bool {
+    if std::env::var("TYPEWELD_RUST_BACKEND").is_ok_and(|value| value == "off") {
+        return false;
+    }
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("rustBackend"))
+        .and_then(serde_json::Value::as_str)
+        != Some("off")
+}
+
+fn main_loop(
+    connection: &Connection,
+    state: &mut State,
+    rust_backend: &mut Option<RustBackend>,
+) -> Result<(), String> {
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -80,7 +96,7 @@ fn main_loop(connection: &Connection, state: &mut State) -> Result<(), String> {
                 let id = request.id.clone();
                 let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     publish_fresh_diagnostics(state, connection);
-                    handle_request(state, &request)
+                    handle_request(state, rust_backend, &request)
                 }));
                 let response = match outcome {
                     Ok(Ok(value)) => Response::new_ok(id, value),
@@ -101,7 +117,7 @@ fn main_loop(connection: &Connection, state: &mut State) -> Result<(), String> {
                     return Ok(());
                 }
                 let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    handle_notification(state, connection, notification);
+                    handle_notification(state, rust_backend, connection, notification);
                 }));
             }
             Message::Response(_) => {}
@@ -235,7 +251,12 @@ fn lsp_diagnostic(
     }
 }
 
-fn handle_notification(state: &mut State, connection: &Connection, notification: Notification) {
+fn handle_notification(
+    state: &mut State,
+    rust_backend: &mut Option<RustBackend>,
+    connection: &Connection,
+    notification: Notification,
+) {
     match notification.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let Ok(params) =
@@ -246,6 +267,12 @@ fn handle_notification(state: &mut State, connection: &Connection, notification:
             let Some(path) = uri_to_path(&params.text_document.uri) else {
                 return;
             };
+            sync_rust_document(
+                rust_backend,
+                &path,
+                &params.text_document.text,
+                params.text_document.version,
+            );
             state.open(
                 path,
                 params.text_document.text,
@@ -266,6 +293,12 @@ fn handle_notification(state: &mut State, connection: &Connection, notification:
             let Some(change) = params.content_changes.into_iter().last() else {
                 return;
             };
+            sync_rust_document(
+                rust_backend,
+                &path,
+                &change.text,
+                params.text_document.version,
+            );
             state.change(path, change.text, params.text_document.version);
             publish_fresh_diagnostics(state, connection);
         }
@@ -278,6 +311,11 @@ fn handle_notification(state: &mut State, connection: &Connection, notification:
             let Some(path) = uri_to_path(&params.text_document.uri) else {
                 return;
             };
+            if let Some(backend) = rust_backend {
+                if is_rust_path(&path) {
+                    backend.close_document(&path);
+                }
+            }
             state.close(&path);
             publish_fresh_diagnostics(state, connection);
         }
@@ -289,7 +327,31 @@ fn handle_notification(state: &mut State, connection: &Connection, notification:
     }
 }
 
-fn handle_request(state: &State, request: &Request) -> RequestResult {
+/// Mirrors an open Rust document's overlay into the semantic backend.
+fn sync_rust_document(
+    rust_backend: &mut Option<RustBackend>,
+    path: &Path,
+    text: &str,
+    version: i32,
+) {
+    if let Some(backend) = rust_backend {
+        if is_rust_path(path) {
+            backend.sync_document(path, text, version);
+        }
+    }
+}
+
+fn is_rust_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "rs")
+}
+
+fn handle_request(
+    state: &State,
+    rust_backend: &mut Option<RustBackend>,
+    request: &Request,
+) -> RequestResult {
     match request.method.as_str() {
         GotoDefinition::METHOD => {
             let params: GotoDefinitionParams = parse_params(request)?;
@@ -309,7 +371,7 @@ fn handle_request(state: &State, request: &Request) -> RequestResult {
         }
         Rename::METHOD => {
             let params: RenameParams = parse_params(request)?;
-            let edit = features::rename::handle(state, &params)
+            let edit = features::rename::handle(state, rust_backend.as_mut(), &params)
                 .map_err(|message| (ErrorCode::InvalidParams, message))?;
             to_result(edit)
         }

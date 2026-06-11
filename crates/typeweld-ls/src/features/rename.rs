@@ -2,22 +2,26 @@
 //!
 //! Rust-initiated renames edit the Rust declaration, the router mounts, and
 //! the TypeScript usages of derived names; TypeScript-initiated renames are
-//! mapped back to the Rust name first. Generated files are never edited —
+//! mapped back to the Rust name first. For Rust-declared API symbols the
+//! private rust-analyzer backend additionally contributes the semantic Rust
+//! references the contract cannot see. Generated files are never edited —
 //! they update through regeneration.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lsp_types::{
-    DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, PrepareRenameResponse,
-    RenameParams, TextDocumentEdit, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
+    PrepareRenameResponse, RenameParams, TextDocumentEdit, TextDocumentPositionParams, TextEdit,
+    Uri, WorkspaceEdit,
 };
 use typeweld_engine::ir::{DeclSpans, Endpoint, ErrorVariant, Span, SymbolId};
 use typeweld_engine::usage::{UsageKind, UsageRef};
 use typeweld_syntax::{to_camel_case, to_snake_case};
 
-use crate::convert::{self, path_to_uri};
+use crate::convert::{self, path_to_uri, uri_to_path, Encoding};
 use crate::features::{resolve, trailing_ident};
+use crate::rust_backend::RustBackend;
 use crate::state::{PackageSnapshot, State, SymbolInfo};
 
 /// One pending text replacement, by absolute path and byte range.
@@ -41,7 +45,11 @@ pub fn prepare(
     Some(PrepareRenameResponse::RangeWithPlaceholder { range, placeholder })
 }
 
-pub fn handle(state: &State, params: &RenameParams) -> Result<Option<WorkspaceEdit>, String> {
+pub fn handle(
+    state: &State,
+    backend: Option<&mut RustBackend>,
+    params: &RenameParams,
+) -> Result<Option<WorkspaceEdit>, String> {
     let position = &params.text_document_position;
     let Some(resolved) = resolve(state, &position.text_document.uri, position.position) else {
         return Ok(None);
@@ -61,10 +69,15 @@ pub fn handle(state: &State, params: &RenameParams) -> Result<Option<WorkspaceEd
     let from_rust = resolved.is_from_rust();
 
     let mut edits = Vec::new();
+    // Declarations the semantic backend can chase: the decl ident position
+    // and the new Rust-side name to apply there.
+    let mut semantic: Option<(Span, String)> = None;
     match symbol.info {
         SymbolInfo::Endpoint(index) => {
             let endpoint = &package.contract.endpoints[index];
-            rename_endpoint(state, package, endpoint, new_name, from_rust, &mut edits)?;
+            let rust_new =
+                rename_endpoint(state, package, endpoint, new_name, from_rust, &mut edits)?;
+            semantic = Some((endpoint.spans.name.clone(), rust_new));
         }
         SymbolInfo::Type(index) => {
             let decl = &package.contract.types[index];
@@ -78,6 +91,7 @@ pub fn handle(state: &State, params: &RenameParams) -> Result<Option<WorkspaceEd
                 new_name,
                 &mut edits,
             );
+            semantic = Some((decl.spans.name.clone(), new_name.to_owned()));
         }
         SymbolInfo::Error(index) => {
             let decl = &package.contract.errors[index];
@@ -91,6 +105,7 @@ pub fn handle(state: &State, params: &RenameParams) -> Result<Option<WorkspaceEd
                 new_name,
                 &mut edits,
             );
+            semantic = Some((decl.spans.name.clone(), new_name.to_owned()));
         }
         SymbolInfo::ErrorVariant { error, variant } => {
             let Some(variant) = package.contract.errors[error].variants.get(variant) else {
@@ -104,7 +119,107 @@ pub fn handle(state: &State, params: &RenameParams) -> Result<Option<WorkspaceEd
         }
     }
 
+    if let (Some(backend), Some((decl_span, rust_new))) = (backend, semantic) {
+        merge_semantic_edits(state, backend, &decl_span, &rust_new, &mut edits);
+    }
+
     Ok(Some(build_workspace_edit(state, package, edits)))
+}
+
+/// Queries the private rust-analyzer backend at the declaration ident and
+/// merges its Rust-file edits into the plan: the backend wins for `.rs`
+/// spans both sides touch (decl ident, router mounts), typeweld keeps every
+/// non-Rust edit and any span the backend missed. Backend failures only cost
+/// semantic coverage — the contract-based plan still applies unchanged.
+fn merge_semantic_edits(
+    state: &State,
+    backend: &mut RustBackend,
+    decl_span: &Span,
+    new_name: &str,
+    edits: &mut Vec<Edit>,
+) {
+    let path = state.root().join(&decl_span.file);
+    let Some(text) = state.read_text(&path) else {
+        return;
+    };
+    // The backend always speaks UTF-16, independent of the editor encoding.
+    let position = convert::position_at(&text, decl_span.start, Encoding::Utf16);
+    let timeout = RustBackend::request_timeout();
+    let workspace_edit = match backend.rename(&path, position, new_name, timeout) {
+        Ok(Some(workspace_edit)) => workspace_edit,
+        Ok(None) => return,
+        Err(message) => {
+            eprintln!("typeweld-ls: semantic Rust rename unavailable: {message}");
+            return;
+        }
+    };
+    let backend_edits = flatten_rust_edits(state, &workspace_edit);
+    if backend_edits.is_empty() {
+        return;
+    }
+    edits.retain(|edit| {
+        !is_rust(&edit.path)
+            || !backend_edits.iter().any(|other| {
+                other.path == edit.path && other.start < edit.end && edit.start < other.end
+            })
+    });
+    edits.extend(backend_edits);
+}
+
+fn is_rust(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+/// Flattens a backend `WorkspaceEdit` into byte-range edits over `.rs` files,
+/// decoding the child's UTF-16 ranges against the current document text.
+/// Non-Rust files stay typeweld's responsibility, and generated package dirs
+/// are filtered later in [`build_workspace_edit`].
+fn flatten_rust_edits(state: &State, workspace_edit: &WorkspaceEdit) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    let mut push = |uri: &Uri, text_edits: &mut dyn Iterator<Item = &TextEdit>| {
+        let Some(path) = uri_to_path(uri) else {
+            return;
+        };
+        if !is_rust(&path) {
+            return;
+        }
+        let Some(text) = state.read_text(&path) else {
+            return;
+        };
+        for text_edit in text_edits {
+            edits.push(Edit {
+                path: path.clone(),
+                start: convert::offset_at(&text, text_edit.range.start, Encoding::Utf16),
+                end: convert::offset_at(&text, text_edit.range.end, Encoding::Utf16),
+                new_text: text_edit.new_text.clone(),
+            });
+        }
+    };
+
+    if let Some(changes) = &workspace_edit.changes {
+        for (uri, text_edits) in changes {
+            push(uri, &mut text_edits.iter());
+        }
+    }
+    let documents: Vec<&TextDocumentEdit> = match &workspace_edit.document_changes {
+        Some(DocumentChanges::Edits(documents)) => documents.iter().collect(),
+        Some(DocumentChanges::Operations(operations)) => operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DocumentChangeOperation::Edit(document) => Some(document),
+                DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for document in documents {
+        let mut text_edits = document.edits.iter().map(|edit| match edit {
+            OneOf::Left(text_edit) => text_edit,
+            OneOf::Right(annotated) => &annotated.text_edit,
+        });
+        push(&document.text_document.uri, &mut text_edits);
+    }
+    edits
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -148,6 +263,8 @@ fn push_usage_edit(
     });
 }
 
+/// Renames an endpoint, returning the Rust-side new name (mapped back from
+/// camelCase when the rename originated in TypeScript).
 fn rename_endpoint(
     state: &State,
     package: &PackageSnapshot,
@@ -155,7 +272,7 @@ fn rename_endpoint(
     new_name: &str,
     from_rust: bool,
     edits: &mut Vec<Edit>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let rust_new = if from_rust {
         new_name.to_owned()
     } else {
@@ -197,7 +314,7 @@ fn rename_endpoint(
             _ => {}
         }
     }
-    Ok(())
+    Ok(rust_new)
 }
 
 /// Renames a type or error declaration: the name is the same on both sides,

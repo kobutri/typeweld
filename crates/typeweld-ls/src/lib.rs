@@ -19,8 +19,11 @@ mod state;
 /// Returns an error description when the handshake or transport fails.
 pub fn run_stdio() -> Result<(), String> {
     let (connection, io_threads) = lsp_server::Connection::stdio();
-    server::run(&connection)?;
-    io_threads.join().map_err(|error| error.to_string())
+    let result = server::run(&connection);
+    // The writer thread only finishes once the connection's channel closes.
+    drop(connection);
+    io_threads.join().map_err(|error| error.to_string())?;
+    result
 }
 
 /// Runs the language server over an existing connection, performing the
