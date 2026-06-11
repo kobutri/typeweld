@@ -1,0 +1,5 @@
+error: Api enums must use #[serde(tag = "_tag")] so Rust JSON and generated TypeScript schemas share the same discriminator
+ --> tests/ui/fail/api_type_missing_enum_tag.rs:5:10
+  |
+5 | pub enum Role {
+  |          ^^^^

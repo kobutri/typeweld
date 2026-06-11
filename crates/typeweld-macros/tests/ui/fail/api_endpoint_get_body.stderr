@@ -1,0 +1,13 @@
+error: #[api] GET endpoints cannot declare request body extractors; use Query<T> or change the endpoint method to post, put, or patch
+  --> tests/ui/fail/api_endpoint_get_body.rs:10:5
+   |
+10 | pub async fn list_users(filter: Body<Filter>) -> NoContent {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Body`, `Json`, and `NoContent`
+ --> tests/ui/fail/api_endpoint_get_body.rs:2:26
+  |
+2 | use typeweld::{api, Api, Body, Json, NoContent};
+  |                          ^^^^  ^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

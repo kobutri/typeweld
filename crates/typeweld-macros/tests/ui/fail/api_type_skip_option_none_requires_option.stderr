@@ -1,0 +1,20 @@
+error: typeweld supports skip_serializing_if = "Option::is_none" only on Option<T> fields
+ --> tests/ui/fail/api_type_skip_option_none_requires_option.rs:7:16
+  |
+7 |     pub value: String,
+  |                ^^^^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/fail/api_type_skip_option_none_requires_option.rs:4:37
+  |
+4 | #[derive(Clone, Debug, Deserialize, Serialize, Api)]
+  |                                     ^^^^^^^^^ expected `&Option<_>`, found `&String`
+5 | pub struct Bad {
+6 |     #[serde(skip_serializing_if = "Option::is_none")]
+  |                                   ----------------- arguments to this function are incorrect
+  |
+  = note: expected reference `&std::option::Option<_>`
+             found reference `&std::string::String`
+note: method defined here
+ --> $RUST/core/src/option.rs
+  = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)

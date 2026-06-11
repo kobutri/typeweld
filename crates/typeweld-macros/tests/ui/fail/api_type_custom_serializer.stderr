@@ -1,0 +1,5 @@
+error: custom serde serializers are not supported by typeweld unless an explicit API wire-shape override is added; use a representable API DTO or newtype instead
+  --> tests/ui/fail/api_type_custom_serializer.rs:10:13
+   |
+10 |     #[serde(serialize_with = "as_str")]
+   |             ^^^^^^^^^^^^^^

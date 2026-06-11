@@ -1,0 +1,13 @@
+error: #[api] endpoint errors must be typed ApiError enums; `anyhow::Error` is opaque and cannot be represented as a generated error channel. Derive ApiError for a domain enum or map the error into one before returning it.
+  --> tests/ui/fail/api_endpoint_anyhow_error.rs:10:54
+   |
+10 | pub async fn list_users() -> Result<Json<Vec<User>>, anyhow::Error> {
+   |                                                      ^^^^^^^^^^^^^
+
+warning: unused import: `Json`
+ --> tests/ui/fail/api_endpoint_anyhow_error.rs:2:26
+  |
+2 | use typeweld::{api, Api, Json};
+  |                          ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

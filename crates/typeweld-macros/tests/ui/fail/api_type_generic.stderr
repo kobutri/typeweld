@@ -1,0 +1,5 @@
+error: Api types cannot be generic; use concrete API types
+ --> tests/ui/fail/api_type_generic.rs:5:19
+  |
+5 | pub struct Wrapper<T> {
+  |                   ^^^

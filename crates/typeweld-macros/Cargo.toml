@@ -11,5 +11,20 @@ readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+typeweld-syntax = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+trybuild = { workspace = true }
+typeweld = { workspace = true }
+
 [lints]
 workspace = true

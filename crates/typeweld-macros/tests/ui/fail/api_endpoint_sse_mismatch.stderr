@@ -1,0 +1,13 @@
+error: #[api] endpoints must be async functions
+  --> tests/ui/fail/api_endpoint_sse_mismatch.rs:10:5
+   |
+10 | pub fn events() -> Sse<Event> {
+   |     ^^
+
+warning: unused imports: `Json` and `Sse`
+ --> tests/ui/fail/api_endpoint_sse_mismatch.rs:2:26
+  |
+2 | use typeweld::{api, Api, Json, Sse};
+  |                          ^^^^  ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

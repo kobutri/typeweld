@@ -1,0 +1,13 @@
+error: #[api] Binary<T> endpoints currently support bytes::Bytes or axum::body::Bytes only
+ --> tests/ui/fail/api_endpoint_binary_non_bytes.rs:4:34
+  |
+4 | pub async fn upload(data: Binary<Vec<u8>>) -> NoContent {
+  |                                  ^^^^^^^
+
+warning: unused imports: `Binary` and `NoContent`
+ --> tests/ui/fail/api_endpoint_binary_non_bytes.rs:1:21
+  |
+1 | use typeweld::{api, Binary, NoContent};
+  |                     ^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

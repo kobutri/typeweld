@@ -5,5 +5,16 @@ license.workspace = true
 publish = false
 version.workspace = true
 
+[dependencies]
+axum = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+typeweld = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true

@@ -93,7 +93,10 @@ pub fn extract(
         lowering_stack: Vec::new(),
     };
 
-    // Endpoints drive everything: only types reachable from them are emitted.
+    // Every Api/ApiError item is validated (matching the macros, which
+    // validate every derive site), but the emitted contract only contains
+    // declarations reachable from endpoints.
+    cx.lower_all_decls();
     let mut endpoints = cx.lower_endpoints();
     cx.drain_type_queue();
 
@@ -101,9 +104,18 @@ pub fn extract(
     router::apply_mounts(&routers, &mut endpoints, &mut cx.diagnostics);
 
     endpoints.sort_by(|a, b| (&a.ts_module, &a.ts_name).cmp(&(&b.ts_module, &b.ts_name)));
-    let mut types: Vec<TypeDecl> = cx.types.into_values().collect();
+    let reachable = reachable_ids(&endpoints, &cx.types, &cx.errors);
+    let mut types: Vec<TypeDecl> = cx
+        .types
+        .into_values()
+        .filter(|decl| reachable.contains(&decl.id))
+        .collect();
     types.sort_by(|a, b| a.ts_name.cmp(&b.ts_name).then_with(|| a.id.cmp(&b.id)));
-    let mut errors: Vec<ErrorDecl> = cx.errors.into_values().collect();
+    let mut errors: Vec<ErrorDecl> = cx
+        .errors
+        .into_values()
+        .filter(|decl| reachable.contains(&decl.id))
+        .collect();
     errors.sort_by(|a, b| a.ts_name.cmp(&b.ts_name).then_with(|| a.id.cmp(&b.id)));
 
     let mut diagnostics = cx.diagnostics;
@@ -474,6 +486,29 @@ impl Lowering<'_> {
         while let Some((module, name)) = self.queue.pop_front() {
             self.lower_named_decl(&module, &name);
         }
+    }
+
+    /// Lowers (and thereby validates) every Api/ApiError item in the walked
+    /// modules, whether or not an endpoint references it.
+    fn lower_all_decls(&mut self) {
+        let mut decls: Vec<(Vec<String>, String)> = Vec::new();
+        for (module_key, data) in &self.resolver.modules.modules {
+            for item in &data.items {
+                if api_item_kind(item).is_some() {
+                    let name = match item {
+                        syn::Item::Struct(item) => item.ident.to_string(),
+                        syn::Item::Enum(item) => item.ident.to_string(),
+                        _ => continue,
+                    };
+                    decls.push((module_key.clone(), name));
+                }
+            }
+        }
+        decls.sort();
+        for (module, name) in decls {
+            self.lower_named_decl(&module, &name);
+        }
+        self.drain_type_queue();
     }
 
     fn lower_named_decl(&mut self, module: &[String], name: &str) {
@@ -1148,6 +1183,79 @@ fn byte_span(file: &str, range: std::ops::Range<usize>) -> Span {
 fn type_to_string(ty: &syn::Type) -> String {
     use quote::ToTokens as _;
     ty.to_token_stream().to_string().replace(' ', "")
+}
+
+/// Collects the ids of all declarations reachable from the endpoints.
+fn reachable_ids(
+    endpoints: &[Endpoint],
+    types: &BTreeMap<SymbolId, TypeDecl>,
+    errors: &BTreeMap<SymbolId, ErrorDecl>,
+) -> std::collections::HashSet<SymbolId> {
+    fn collect_expr(expr: &TypeExpr, queue: &mut Vec<SymbolId>) {
+        match expr {
+            TypeExpr::Named(type_ref) => queue.push(type_ref.id.clone()),
+            TypeExpr::Option(inner) | TypeExpr::List(inner) => collect_expr(inner, queue),
+            TypeExpr::Map { key, value } => {
+                collect_expr(key, queue);
+                collect_expr(value, queue);
+            }
+            TypeExpr::Primitive(_) | TypeExpr::External(_) => {}
+        }
+    }
+
+    let mut queue = Vec::new();
+    for endpoint in endpoints {
+        for param in endpoint
+            .request
+            .path_params
+            .iter()
+            .chain(&endpoint.request.query_params)
+        {
+            collect_expr(&param.ty, &mut queue);
+        }
+        if let Some(RequestBody::Json(expr)) = &endpoint.request.body {
+            collect_expr(expr, &mut queue);
+        }
+        match &endpoint.success.body {
+            SuccessBody::Json(expr) | SuccessBody::Stream(expr) => collect_expr(expr, &mut queue),
+            SuccessBody::Empty | SuccessBody::Binary => {}
+        }
+        for error in &endpoint.errors {
+            queue.push(error.id.clone());
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(decl) = types.get(&id) {
+            match &decl.shape {
+                TypeShape::Struct { fields } => {
+                    for field in fields {
+                        collect_expr(&field.ty, &mut queue);
+                    }
+                }
+                TypeShape::Enum { variants } => {
+                    for variant in variants {
+                        for field in &variant.fields {
+                            collect_expr(&field.ty, &mut queue);
+                        }
+                    }
+                }
+                TypeShape::Newtype(inner) => collect_expr(inner, &mut queue),
+            }
+        }
+        if let Some(decl) = errors.get(&id) {
+            for variant in &decl.variants {
+                for field in &variant.fields {
+                    collect_expr(&field.ty, &mut queue);
+                }
+            }
+        }
+    }
+    seen
 }
 
 fn check_name_collisions(

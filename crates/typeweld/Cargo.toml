@@ -11,5 +11,15 @@ readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[dependencies]
+typeweld-axum = { workspace = true }
+typeweld-macros = { workspace = true }
+
+[features]
+chrono = ["typeweld-axum/chrono"]
+decimal = ["typeweld-axum/decimal"]
+json = ["typeweld-axum/json"]
+uuid = ["typeweld-axum/uuid"]
+
 [lints]
 workspace = true

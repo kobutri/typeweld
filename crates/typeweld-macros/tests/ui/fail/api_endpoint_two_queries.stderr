@@ -1,0 +1,13 @@
+error: #[api] endpoints can declare at most one Query<T> extractor; the query string deserializes into a single struct whose fields become the query parameters
+  --> tests/ui/fail/api_endpoint_two_queries.rs:10:43
+   |
+10 | pub async fn list_users(a: Query<Filter>, b: Query<Filter>) -> NoContent {
+   |                                           ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NoContent` and `Query`
+ --> tests/ui/fail/api_endpoint_two_queries.rs:2:26
+  |
+2 | use typeweld::{api, Api, NoContent, Query};
+  |                          ^^^^^^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
