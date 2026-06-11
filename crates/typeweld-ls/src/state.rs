@@ -257,7 +257,11 @@ impl State {
                 Err(panic) => std::panic::resume_unwind(panic),
             };
 
-            let (generated, generation_diagnostics) = gen::generate(&extraction.contract);
+            let options = gen::GenOptions {
+                package_dir: Some(self.config.package_dir(&package.ts)),
+                app_src: self.config.app_src.clone(),
+            };
+            let (generated, generation_diagnostics) = gen::generate(&extraction.contract, &options);
             let mut package_diagnostics = extraction.diagnostics;
             let failed = has_errors(&package_diagnostics) || has_errors(&generation_diagnostics);
             package_diagnostics.extend(generation_diagnostics);

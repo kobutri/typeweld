@@ -56,13 +56,27 @@ pub struct Mark {
     pub character: u32,
 }
 
+/// Options controlling package-level output.
+#[derive(Clone, Debug, Default)]
+pub struct GenOptions {
+    /// Workspace-root-relative directory the package will be written to,
+    /// e.g. `target/typeweld/packages/@workspace/api`. Used to compute the
+    /// relative paths inside the generated tsconfig.
+    pub package_dir: Option<std::path::PathBuf>,
+    /// Workspace-root-relative app source globs (from typeweld.toml). The
+    /// generated tsconfig includes them so tsserver sees one project spanning
+    /// the bindings and the code that uses them — required for
+    /// cross-language field renames.
+    pub app_src: Vec<String>,
+}
+
 /// Generates the TypeScript package for `contract`.
 ///
 /// Diagnostics report contract shapes the generator cannot express (e.g.
 /// recursive types); the package is still produced for everything else.
 #[must_use]
-pub fn generate(contract: &Contract) -> (GeneratedPackage, Vec<Diagnostic>) {
-    lower::lower(contract)
+pub fn generate(contract: &Contract, options: &GenOptions) -> (GeneratedPackage, Vec<Diagnostic>) {
+    lower::lower(contract, options)
 }
 
 pub(crate) fn finish_marks(

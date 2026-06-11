@@ -15,7 +15,10 @@ pub enum MarkKind {
     Error,
     ErrorVariant,
     EnumVariant,
+    /// A field's property on a generated interface (the rename anchor).
     Field,
+    /// A field's key inside a `Schema.Struct` object literal.
+    FieldKey,
     Param,
 }
 

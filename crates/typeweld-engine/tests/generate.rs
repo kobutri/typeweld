@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use typeweld_engine::extract::extract;
-use typeweld_engine::gen::{generate, MarkKind};
+use typeweld_engine::gen::{generate, GenOptions, MarkKind};
 use typeweld_engine::vfs::MemoryFileProvider;
 use typeweld_engine::workspace;
 
@@ -131,7 +131,13 @@ fn generated() -> (typeweld_engine::gen::GeneratedPackage, Vec<String>) {
         extraction.diagnostics
     );
 
-    let (package, diagnostics) = generate(&extraction.contract);
+    let options = GenOptions {
+        package_dir: Some(PathBuf::from(
+            "target/typeweld/packages/@workspace/server-api",
+        )),
+        app_src: vec!["app/src/**/*.ts".to_owned()],
+    };
+    let (package, diagnostics) = generate(&extraction.contract, &options);
     let rendered: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
     (package, rendered)
 }
@@ -158,6 +164,7 @@ fn generates_the_full_package() {
             "index.ts",
             "package.json",
             "schemas.ts",
+            "tsconfig.json",
         ]
     );
 
@@ -183,7 +190,7 @@ fn marks_point_at_their_symbols() {
         assert!(
             text.chars()
                 .next()
-                .is_some_and(|first| first.is_ascii_alphabetic() || first == 'S'),
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == 'S' || first == '_'),
             "mark text looks wrong: {text:?}"
         );
         seen_kinds.insert(format!("{:?}", mark.kind));
@@ -213,6 +220,7 @@ fn marks_point_at_their_symbols() {
         "ErrorVariant",
         "EnumVariant",
         "Field",
+        "FieldKey",
         "Param",
     ] {
         assert!(seen_kinds.contains(kind), "no {kind} marks recorded");

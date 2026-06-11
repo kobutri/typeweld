@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use typeweld_engine::config::{Config, LintLevel};
 use typeweld_engine::diag::{Diagnostic, Severity};
 use typeweld_engine::extract::extract;
-use typeweld_engine::gen::{generate, write_package};
+use typeweld_engine::gen::{generate, write_package, GenOptions};
 use typeweld_engine::usage;
 use typeweld_engine::vfs::DiskFileProvider;
 use typeweld_engine::workspace;
@@ -123,7 +123,11 @@ fn run_generate(root: &Path, contract_json: bool) -> anyhow::Result<bool> {
             continue;
         }
 
-        let (generated, generation_diagnostics) = generate(&extraction.contract);
+        let options = GenOptions {
+            package_dir: Some(config.package_dir(&package.ts)),
+            app_src: config.app_src.clone(),
+        };
+        let (generated, generation_diagnostics) = generate(&extraction.contract, &options);
         failed |= report(root, &generation_diagnostics);
         if generation_diagnostics
             .iter()
