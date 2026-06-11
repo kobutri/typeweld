@@ -63,6 +63,18 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // The rust-analyzer VS Code extension can only point `server.path` at a
+    // bare binary with no arguments; `TYPEWELD_RUN_LSP=1` makes that binary
+    // behave as `typeweld lsp`.
+    if std::env::var("TYPEWELD_RUN_LSP").is_ok_and(|value| value == "1") {
+        return match typeweld_ls::run_stdio(&typeweld_ls::Options::default()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let cli = Cli::parse();
     let root = cli
         .root

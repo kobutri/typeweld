@@ -87,8 +87,10 @@ jobs:
       - name: Build and publish the launcher and runtime
         run: |
           npm run build --workspace typeweld
+          npm run build --prefix vscode-extension/typescript-plugin
           npm publish --workspace typeweld --provenance --access public
           npm publish --workspace @typeweld/effect-runtime --provenance --access public
+          npm publish vscode-extension/typescript-plugin --provenance --access public
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -55,10 +55,10 @@ jobs:
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
         working-directory: npm
+      - name: Build the TypeScript plugin
+        run: npm run build --prefix vscode-extension/typescript-plugin
+        working-directory: npm
       - run: cargo test -p typeweld-ls
-        env:
-          TYPEWELD_TSLS: ${{ github.workspace }}/npm/node_modules/.bin/typescript-language-server
-          TYPEWELD_TSSERVER: ${{ github.workspace }}/npm/node_modules/typescript/lib/tsserver.js
 
   test-npm:
     name: npm tests

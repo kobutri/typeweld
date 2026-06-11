@@ -57,6 +57,16 @@
         "command": "typeweld.server.restart",
         "title": "Restart Language Server",
         "category": "Typeweld"
+      },
+      {
+        "command": "typeweld.integration.enable",
+        "title": "Enable rust-analyzer Integration",
+        "category": "Typeweld"
+      },
+      {
+        "command": "typeweld.integration.disable",
+        "title": "Disable rust-analyzer Integration",
+        "category": "Typeweld"
       }
     ],
     "configuration": {

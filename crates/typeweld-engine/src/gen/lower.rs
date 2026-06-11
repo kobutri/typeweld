@@ -1068,10 +1068,14 @@ impl<'a> Lowering<'a> {
             .collect::<Vec<_>>()
             .join(",\n");
         let includes = includes.join(", ");
+        // The plugins entry is honored by hosts that load tsconfig-local
+        // plugins (tsserver with --allowLocalPluginLoads); VS Code loads the
+        // plugin through the extension contribution instead.
         let contents = format!(
             "{{\n  \"compilerOptions\": {{\n    \"strict\": true,\n    \"noEmit\": true,\n    \
              \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \
-             \"bundler\",\n    \"skipLibCheck\": true,\n    \"paths\": {{\n{paths}\n    }}\n  \
+             \"bundler\",\n    \"skipLibCheck\": true,\n    \"plugins\": [{{ \"name\": \
+             \"@typeweld/typescript-plugin\" }}],\n    \"paths\": {{\n{paths}\n    }}\n  \
              }},\n  \"include\": [{includes}]\n}}\n"
         );
         self.files.push(GeneratedFile {

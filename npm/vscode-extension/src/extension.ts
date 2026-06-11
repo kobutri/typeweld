@@ -1,3 +1,19 @@
+// The typeweld VS Code extension.
+//
+// Typeweld's language server is designed to be the one Rust language server
+// the editor runs, transparently wrapping the user's real rust-analyzer. In
+// VS Code the rust-analyzer extension owns the Rust client (and all its UX:
+// runnables, debugging, the status bar), so the integration routes it
+// through typeweld with a one-time, consent-gated rewrite of
+// `rust-analyzer.server.path` in workspace settings; the original server is
+// preserved and still used behind the proxy. Without the rust-analyzer
+// extension, this extension hosts its own client for Rust files.
+//
+// The TypeScript side needs no client at all: the bundled
+// `@typeweld/typescript-plugin` (contributed via `typescriptServerPlugins`)
+// runs inside VS Code's own tsserver and connects to the language server
+// directly.
+
 import * as fs from "node:fs"
 import * as path from "node:path"
 
@@ -12,11 +28,10 @@ import {
 const workspaceMarker = "typeweld.toml"
 const executableName =
   process.platform === "win32" ? "typeweld.exe" : "typeweld"
-const documentSelector = [
-  { scheme: "file", language: "rust" },
-  { scheme: "file", language: "typescript" },
-  { scheme: "file", language: "typescriptreact" },
-]
+const rustAnalyzerExtensionId = "rust-lang.rust-analyzer"
+const declinedKey = "typeweld.integrationDeclined"
+const previousServerPathKey = "typeweld.previousRustAnalyzerPath"
+const documentSelector = [{ scheme: "file", language: "rust" }]
 
 let extensionContext: vscode.ExtensionContext | undefined
 let outputChannel: vscode.LogOutputChannel | undefined
@@ -31,6 +46,14 @@ export function activate(context: vscode.ExtensionContext): void {
     outputChannel,
     vscode.commands.registerCommand("typeweld.server.restart", () => {
       queueReconcile({ restart: true })
+    }),
+    vscode.commands.registerCommand("typeweld.integration.enable", () => {
+      void context.workspaceState.update(declinedKey, undefined).then(() => {
+        queueReconcile()
+      })
+    }),
+    vscode.commands.registerCommand("typeweld.integration.disable", () => {
+      void disableIntegration()
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       queueReconcile()
@@ -71,16 +94,138 @@ async function reconcile(): Promise<void> {
   const wanted = await hasTypeweldWorkspace()
   if (!wanted) {
     if (client !== undefined) {
-      log(`No ${workspaceMarker} found in the workspace; stopping the language server.`)
+      log(
+        `No ${workspaceMarker} found in the workspace; stopping the language server.`,
+      )
       await stopClient()
     }
     return
   }
-  if (client !== undefined) {
+
+  // With the rust-analyzer extension installed, that extension stays the
+  // Rust client; typeweld slots in behind it as the server.
+  if (vscode.extensions.getExtension(rustAnalyzerExtensionId) !== undefined) {
+    if (client !== undefined) {
+      await stopClient()
+    }
+    await ensureRustAnalyzerIntegration(extensionContext)
     return
   }
 
-  await startClient(extensionContext)
+  if (client === undefined) {
+    await startClient(extensionContext)
+  }
+}
+
+/**
+ * Routes the rust-analyzer extension through typeweld: one consent prompt,
+ * then `rust-analyzer.server.path` (workspace settings) points at the
+ * typeweld binary while the original server keeps running behind the proxy
+ * via `rust-analyzer.server.extraEnv`.
+ */
+async function ensureRustAnalyzerIntegration(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  const binary = resolveServerBinary(context, vscode.workspace.getConfiguration("typeweld"))
+  if (binary === undefined) {
+    log("Typeweld binary not found; rust-analyzer integration unavailable.")
+    return
+  }
+
+  const raConfig = vscode.workspace.getConfiguration("rust-analyzer")
+  const currentPath = raConfig.get<string>("server.path", "").trim()
+  if (currentPath === binary) {
+    return
+  }
+  if (context.workspaceState.get<boolean>(declinedKey) === true) {
+    return
+  }
+
+  const choice = await vscode.window.showInformationMessage(
+    "Typeweld can route rust-analyzer through its language server to enable " +
+      "cross-language navigation and renames. This updates " +
+      "`rust-analyzer.server.path` in workspace settings; your current " +
+      "rust-analyzer keeps running behind it. Enable?",
+    "Enable",
+    "Not now",
+  )
+  if (choice !== "Enable") {
+    await context.workspaceState.update(declinedKey, true)
+    return
+  }
+
+  // Preserve the user's server under our own key (we are about to overwrite
+  // the only place it lives), and keep using exactly that binary behind the
+  // proxy — or the extension-bundled one when nothing was configured.
+  await context.workspaceState.update(previousServerPathKey, currentPath)
+  const wrapped = currentPath !== "" ? currentPath : bundledRustAnalyzer()
+  const extraEnv = {
+    ...raConfig.get<Record<string, unknown>>("server.extraEnv", {}),
+    TYPEWELD_RUN_LSP: "1",
+    ...(wrapped !== undefined ? { TYPEWELD_RUST_ANALYZER: wrapped } : {}),
+  }
+  await raConfig.update(
+    "server.extraEnv",
+    extraEnv,
+    vscode.ConfigurationTarget.Workspace,
+  )
+  await raConfig.update(
+    "server.path",
+    binary,
+    vscode.ConfigurationTarget.Workspace,
+  )
+  log(
+    `rust-analyzer now routes through ${binary}` +
+      (wrapped !== undefined ? ` (wrapping ${wrapped})` : ""),
+  )
+  void vscode.commands
+    .executeCommand("rust-analyzer.restartServer")
+    .then(undefined, () => {
+      // Older rust-analyzer builds restart on the config change by themselves.
+    })
+}
+
+/** Restores the rust-analyzer settings the integration rewrote. */
+async function disableIntegration(): Promise<void> {
+  const context = extensionContext
+  if (context === undefined) {
+    return
+  }
+  const raConfig = vscode.workspace.getConfiguration("rust-analyzer")
+  const previous =
+    context.workspaceState.get<string>(previousServerPathKey, "") ?? ""
+  await raConfig.update(
+    "server.path",
+    previous === "" ? undefined : previous,
+    vscode.ConfigurationTarget.Workspace,
+  )
+  const extraEnv = {
+    ...raConfig.get<Record<string, unknown>>("server.extraEnv", {}),
+  }
+  delete extraEnv["TYPEWELD_RUN_LSP"]
+  delete extraEnv["TYPEWELD_RUST_ANALYZER"]
+  await raConfig.update(
+    "server.extraEnv",
+    Object.keys(extraEnv).length === 0 ? undefined : extraEnv,
+    vscode.ConfigurationTarget.Workspace,
+  )
+  await context.workspaceState.update(declinedKey, true)
+  log("rust-analyzer integration disabled; original settings restored.")
+  void vscode.commands
+    .executeCommand("rust-analyzer.restartServer")
+    .then(undefined, () => {})
+}
+
+/** The rust-analyzer binary bundled inside the rust-analyzer extension. */
+function bundledRustAnalyzer(): string | undefined {
+  const extension = vscode.extensions.getExtension(rustAnalyzerExtensionId)
+  if (extension === undefined) {
+    return undefined
+  }
+  const name =
+    process.platform === "win32" ? "rust-analyzer.exe" : "rust-analyzer"
+  const candidate = path.join(extension.extensionPath, "server", name)
+  return isExecutable(candidate) ? candidate : undefined
 }
 
 async function hasTypeweldWorkspace(): Promise<boolean> {

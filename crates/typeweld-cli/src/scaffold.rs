@@ -113,8 +113,7 @@ async fn main() {
             "{{\n  \"name\": \"{name}-app\",\n  \"private\": true,\n  \"type\": \"module\",\n  \
              \"scripts\": {{\n    \"typecheck\": \"tsc --noEmit\"\n  }},\n  \"dependencies\": \
              {{\n    \"@typeweld/effect-runtime\": \"^0.1.0\",\n    \"effect\": \
-             \"4.0.0-beta.78\"\n  }},\n  \"devDependencies\": {{\n    \"typescript\": \"^5.9\"\n  \
-             }}\n}}\n"
+             \"4.0.0-beta.78\"\n  }},\n  \"devDependencies\": {{\n    \"@typeweld/typescript-plugin\": \"^0.1.0\",\n    \"typescript\": \"^5.9\"\n  }}\n}}\n"
         ),
     )?;
     write(

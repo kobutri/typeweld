@@ -10,6 +10,7 @@ expression: file.contents
     "module": "ESNext",
     "moduleResolution": "bundler",
     "skipLibCheck": true,
+    "plugins": [{ "name": "@typeweld/typescript-plugin" }],
     "paths": {
       "@workspace/server-api": ["./index.ts"],
       "@workspace/server-api/*": ["./*"],

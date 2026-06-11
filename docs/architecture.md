@@ -44,14 +44,40 @@ recognized as error-variant usages.
 
 ## The language server (`typeweld-ls`)
 
-A standalone sidecar — it never proxies rust-analyzer or tsserver. The
-editor runs its usual servers; typeweld-ls attaches to Rust and TypeScript
-files and contributes only cross-language features. All state (contract,
-marks, usage index, diagnostics) lives in memory and is recomputed on every
-relevant edit — extraction is milliseconds, so there are no caches to go
-stale. Generated bindings are written to `target/typeweld/` only so the
-user's tsserver can resolve imports; they are content-diffed and never read
-back.
+typeweld-ls is the Rust language server the editor runs; behind it lives
+the user's real rust-analyzer, spawned by typeweld and transparently
+proxied. Every message is forwarded verbatim — opaque JSON, identical ids —
+except a small fail-open interception whitelist: rename responses gain the
+TypeScript half of an API rename (one atomic WorkspaceEdit), references
+gain TypeScript usages, hovers gain the contract block, publishDiagnostics
+gains extraction diagnostics, and document sync is observed in passing for
+live regeneration. Fail-open means an interception error forwards the
+original message untouched: a typeweld bug can cost typeweld features,
+never Rust editing. A crashed rust-analyzer is respawned with the handshake
+and open documents replayed; an unusable one degrades the server to
+engine-only answers.
+
+The TypeScript side runs *inside* the user's own tsserver:
+`@typeweld/typescript-plugin` discovers the server through
+`target/typeweld/ls.json` and connects over localhost TCP (token
+authenticated). The server pushes a snapshot of every generated-file mark
+(with Rust target and hover text); all synchronous plugin hooks answer from
+that local replica — no I/O inside a hook. Over the same socket the server
+asks the plugin for semantic TypeScript answers (the property accesses a
+field rename must cover), answered on the node event loop with the
+project's real LanguageService — so TypeScript analysis is never duplicated
+and always agrees with what the editor shows. TypeScript-initiated renames
+of API symbols cannot carry Rust edits through the tsserver protocol (the
+new name never reaches tsserver), so the plugin filters the generated
+locations from the editor's rename, watches the edit land, and reports the
+observed new name; the server then applies the Rust complement via
+`workspace/applyEdit` using its rust-analyzer.
+
+All engine state (contract, marks, usage index, diagnostics) lives in
+memory and is recomputed on every relevant edit — extraction is
+milliseconds, so there are no caches to go stale. Generated bindings are
+written to `target/typeweld/` only so tsserver can resolve imports; they
+are content-diffed and never read back.
 
 Rebuilds run on short-lived worker threads (proc-macro2 keeps a thread-local
 source map; dropping the thread reclaims it). Requests are answered after an
