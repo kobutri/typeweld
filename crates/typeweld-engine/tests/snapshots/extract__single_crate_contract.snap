@@ -1,0 +1,672 @@
+---
+source: crates/typeweld-engine/tests/extract.rs
+assertion_line: 159
+expression: extraction.contract
+---
+{
+  "schema_version": 3,
+  "package": {
+    "ts_package": "@workspace/test-api",
+    "cargo_package": "server"
+  },
+  "endpoints": [
+    {
+      "id": "endpoint:86c6cac189033613",
+      "rust_path": [
+        "server",
+        "watch_users"
+      ],
+      "rust_name": "watch_users",
+      "ts_module": "events",
+      "ts_name": "watchUsers",
+      "route": "/events/users",
+      "method": "Get",
+      "request": {
+        "path_params": [],
+        "query_params": []
+      },
+      "success": {
+        "transport": "Sse",
+        "status": 200,
+        "body": {
+          "Stream": {
+            "Named": {
+              "id": "type:3cfa12bee2bd12e7",
+              "name": "User"
+            }
+          }
+        }
+      },
+      "errors": [],
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 1603,
+          "end": 1614
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 1567,
+          "end": 1657
+        },
+        "attr": {
+          "file": "server/src/lib.rs",
+          "start": 1567,
+          "end": 1595
+        }
+      },
+      "router_mounts": [
+        {
+          "file": "server/src/lib.rs",
+          "start": 1832,
+          "end": 1843
+        }
+      ]
+    },
+    {
+      "id": "endpoint:13dc73b849393cc9",
+      "rust_path": [
+        "server",
+        "create_user"
+      ],
+      "rust_name": "create_user",
+      "ts_module": "users",
+      "ts_name": "createUser",
+      "route": "/users",
+      "method": "Post",
+      "request": {
+        "path_params": [],
+        "query_params": [],
+        "body": {
+          "Json": {
+            "Named": {
+              "id": "type:c98f9fd95d4eb273",
+              "name": "CreateUser"
+            }
+          }
+        }
+      },
+      "success": {
+        "transport": "Unary",
+        "status": 201,
+        "body": {
+          "Json": {
+            "Named": {
+              "id": "type:3cfa12bee2bd12e7",
+              "name": "User"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "id": "error:69d4cee470bad40b",
+          "name": "UserError"
+        }
+      ],
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 1469,
+          "end": 1480
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 1433,
+          "end": 1565
+        },
+        "attr": {
+          "file": "server/src/lib.rs",
+          "start": 1433,
+          "end": 1455
+        }
+      },
+      "router_mounts": [
+        {
+          "file": "server/src/lib.rs",
+          "start": 1801,
+          "end": 1812
+        }
+      ]
+    },
+    {
+      "id": "endpoint:0110984fd08d870b",
+      "rust_path": [
+        "server",
+        "get_user"
+      ],
+      "rust_name": "get_user",
+      "ts_module": "users",
+      "ts_name": "getUser",
+      "route": "/users/{id}",
+      "method": "Get",
+      "request": {
+        "path_params": [
+          {
+            "name": "id",
+            "ty": {
+              "Primitive": "I32"
+            },
+            "required": true,
+            "span": {
+              "file": "server/src/lib.rs",
+              "start": 1241,
+              "end": 1243
+            }
+          }
+        ],
+        "query_params": []
+      },
+      "success": {
+        "transport": "Unary",
+        "status": 200,
+        "body": {
+          "Json": {
+            "Named": {
+              "id": "type:3cfa12bee2bd12e7",
+              "name": "User"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "id": "error:69d4cee470bad40b",
+          "name": "UserError"
+        }
+      ],
+      "docs": "Fetch one user by id.",
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 1232,
+          "end": 1240
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 1166,
+          "end": 1313
+        },
+        "attr": {
+          "file": "server/src/lib.rs",
+          "start": 1192,
+          "end": 1218
+        }
+      },
+      "router_mounts": [
+        {
+          "file": "server/src/lib.rs",
+          "start": 1743,
+          "end": 1751
+        }
+      ]
+    },
+    {
+      "id": "endpoint:ad866cc6088d4d9a",
+      "rust_path": [
+        "server",
+        "list_users"
+      ],
+      "rust_name": "list_users",
+      "ts_module": "users",
+      "ts_name": "listUsers",
+      "route": "/users",
+      "method": "Get",
+      "request": {
+        "path_params": [],
+        "query_params": [
+          {
+            "name": "role",
+            "ty": {
+              "Primitive": "String"
+            },
+            "required": false,
+            "span": {
+              "file": "server/src/lib.rs",
+              "start": 906,
+              "end": 910
+            }
+          },
+          {
+            "name": "limit",
+            "ty": {
+              "Primitive": "U32"
+            },
+            "required": true,
+            "span": {
+              "file": "server/src/lib.rs",
+              "start": 936,
+              "end": 941
+            }
+          }
+        ]
+      },
+      "success": {
+        "transport": "Unary",
+        "status": 200,
+        "body": {
+          "Json": {
+            "List": {
+              "Named": {
+                "id": "type:3cfa12bee2bd12e7",
+                "name": "User"
+              }
+            }
+          }
+        }
+      },
+      "errors": [],
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 1350,
+          "end": 1360
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 1315,
+          "end": 1431
+        },
+        "attr": {
+          "file": "server/src/lib.rs",
+          "start": 1315,
+          "end": 1336
+        }
+      },
+      "router_mounts": [
+        {
+          "file": "server/src/lib.rs",
+          "start": 1771,
+          "end": 1781
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "id": "type:c98f9fd95d4eb273",
+      "rust_path": [
+        "server",
+        "CreateUser"
+      ],
+      "rust_name": "CreateUser",
+      "ts_name": "CreateUser",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "field:00e5323e7301be24",
+              "rust_name": "display_name",
+              "wire_name": "displayName",
+              "ty": {
+                "Primitive": "String"
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 761,
+                  "end": 773
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 757,
+                  "end": 781
+                }
+              }
+            }
+          ]
+        }
+      },
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 740,
+          "end": 750
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 641,
+          "end": 784
+        }
+      }
+    },
+    {
+      "id": "type:4c6247e888af2c0c",
+      "rust_path": [
+        "server",
+        "Role"
+      ],
+      "rust_name": "Role",
+      "ts_name": "Role",
+      "shape": {
+        "Enum": {
+          "variants": [
+            {
+              "id": "enum_variant:7b80916c91cea232",
+              "rust_name": "Admin",
+              "wire_name": "Admin",
+              "fields": [],
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 602,
+                  "end": 607
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 602,
+                  "end": 607
+                }
+              }
+            },
+            {
+              "id": "enum_variant:b62cd5785e601b61",
+              "rust_name": "Member",
+              "wire_name": "Member",
+              "fields": [
+                {
+                  "id": "field:24cb7d6c28139e9d",
+                  "rust_name": "team",
+                  "wire_name": "team",
+                  "ty": {
+                    "Primitive": "String"
+                  },
+                  "optionality": "Required",
+                  "spans": {
+                    "name": {
+                      "file": "server/src/lib.rs",
+                      "start": 622,
+                      "end": 626
+                    },
+                    "full": {
+                      "file": "server/src/lib.rs",
+                      "start": 622,
+                      "end": 634
+                    }
+                  }
+                }
+              ],
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 613,
+                  "end": 619
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 613,
+                  "end": 636
+                }
+              }
+            }
+          ]
+        }
+      },
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 591,
+          "end": 595
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 506,
+          "end": 639
+        }
+      }
+    },
+    {
+      "id": "type:3cfa12bee2bd12e7",
+      "rust_path": [
+        "server",
+        "User"
+      ],
+      "rust_name": "User",
+      "ts_name": "User",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "field:be8beb042b6d4f35",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ty": {
+                "Primitive": "I32"
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 277,
+                  "end": 279
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 273,
+                  "end": 284
+                }
+              }
+            },
+            {
+              "id": "field:daf7f940c1260730",
+              "rust_name": "display_name",
+              "wire_name": "displayName",
+              "ty": {
+                "Primitive": "String"
+              },
+              "optionality": "Required",
+              "docs": "Public display name.",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 323,
+                  "end": 335
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 290,
+                  "end": 343
+                }
+              }
+            },
+            {
+              "id": "field:812c2315f553992e",
+              "rust_name": "bio",
+              "wire_name": "bio",
+              "ty": {
+                "Primitive": "String"
+              },
+              "optionality": "OptionalNullable",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 375,
+                  "end": 378
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 349,
+                  "end": 394
+                }
+              }
+            },
+            {
+              "id": "field:f2f9cfd797c60ab8",
+              "rust_name": "role",
+              "wire_name": "role",
+              "ty": {
+                "Named": {
+                  "id": "type:4c6247e888af2c0c",
+                  "name": "Role"
+                }
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 404,
+                  "end": 408
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 400,
+                  "end": 414
+                }
+              }
+            },
+            {
+              "id": "field:26fc85a33bf7088b",
+              "rust_name": "scores",
+              "wire_name": "scores",
+              "ty": {
+                "List": {
+                  "Primitive": "F64"
+                }
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 424,
+                  "end": 430
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 420,
+                  "end": 440
+                }
+              }
+            },
+            {
+              "id": "field:b0c76d62af02f85d",
+              "rust_name": "metadata",
+              "wire_name": "metadata",
+              "ty": {
+                "Map": {
+                  "key": {
+                    "Primitive": "String"
+                  },
+                  "value": {
+                    "Primitive": "String"
+                  }
+                }
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 450,
+                  "end": 458
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 446,
+                  "end": 501
+                }
+              }
+            }
+          ]
+        }
+      },
+      "docs": "A user of the system.",
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 262,
+          "end": 266
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 137,
+          "end": 504
+        }
+      }
+    }
+  ],
+  "errors": [
+    {
+      "id": "error:69d4cee470bad40b",
+      "rust_path": [
+        "server",
+        "UserError"
+      ],
+      "rust_name": "UserError",
+      "ts_name": "UserError",
+      "variants": [
+        {
+          "id": "error_variant:7995e3d4b5433ef3",
+          "rust_name": "UserNotFound",
+          "tag": "UserNotFound",
+          "status": 404,
+          "fields": [
+            {
+              "id": "field:7a90aa6e0c04fcb8",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ty": {
+                "Primitive": "I32"
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "server/src/lib.rs",
+                  "start": 1118,
+                  "end": 1120
+                },
+                "full": {
+                  "file": "server/src/lib.rs",
+                  "start": 1118,
+                  "end": 1125
+                }
+              }
+            }
+          ],
+          "spans": {
+            "name": {
+              "file": "server/src/lib.rs",
+              "start": 1103,
+              "end": 1115
+            },
+            "full": {
+              "file": "server/src/lib.rs",
+              "start": 1084,
+              "end": 1127
+            }
+          }
+        },
+        {
+          "id": "error_variant:03886452556a0027",
+          "rust_name": "NameTaken",
+          "tag": "NameTaken",
+          "status": 409,
+          "fields": [],
+          "spans": {
+            "name": {
+              "file": "server/src/lib.rs",
+              "start": 1152,
+              "end": 1161
+            },
+            "full": {
+              "file": "server/src/lib.rs",
+              "start": 1133,
+              "end": 1161
+            }
+          }
+        }
+      ],
+      "spans": {
+        "name": {
+          "file": "server/src/lib.rs",
+          "start": 1068,
+          "end": 1077
+        },
+        "full": {
+          "file": "server/src/lib.rs",
+          "start": 951,
+          "end": 1164
+        }
+      }
+    }
+  ]
+}

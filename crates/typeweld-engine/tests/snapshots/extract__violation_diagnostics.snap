@@ -1,0 +1,13 @@
+---
+source: crates/typeweld-engine/tests/extract.rs
+assertion_line: 363
+expression: render_diagnostics(&extraction)
+---
+[
+    "server/src/lib.rs:564..569 error[invalid-api-item]: Path<T> argument `extra` does not match any route parameter",
+    "server/src/lib.rs:647..697 error[invalid-api-item]: #[api] GET endpoints cannot declare request body extractors; use Query<T> or change the endpoint method to post, put, or patch",
+    "server/src/lib.rs:165..172 error[invalid-api-item]: serde flatten is not supported by typeweld yet; use a named nested DTO field so the generated schema has an explicit shape",
+    "server/src/lib.rs:216..228 error[unresolved-type]: cannot resolve `DoesNotExist` in an API position; derive Api on it (in this workspace) or use a supported type",
+    "server/src/lib.rs:245..253 error[missing-api-derive]: `NoDerive` is used in an API position but does not derive Api or ApiError",
+    "server/src/lib.rs:792..812 warning[unmounted-endpoint]: endpoint `list_bads` is not mounted in any #[api_router]; it will not be served",
+]

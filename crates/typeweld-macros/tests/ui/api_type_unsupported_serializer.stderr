@@ -1,5 +1,0 @@
-error: custom serde serializers are not supported by ApiType unless an explicit API wire-shape override is added; use a representable API DTO or newtype instead
- --> tests/ui/api_type_unsupported_serializer.rs:3:13
-  |
-3 |     #[serde(serialize_with = "serialize_display_name")]
-  |             ^^^^^^^^^^^^^^

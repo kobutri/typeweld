@@ -1,6 +1,6 @@
 [package]
-name = "typeweld-ls"
-description = "typeweld language server: cross-language navigation, rename, and live generation"
+name = "typeweld"
+description = "Rust-to-TypeScript API contract tooling for Effect clients"
 categories.workspace = true
 documentation.workspace = true
 edition.workspace = true

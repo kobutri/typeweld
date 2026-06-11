@@ -1,5 +1,0 @@
-error: serde skip attributes are not represented in the API IR; remove skipped fields from the exported DTO or use a separate API DTO
- --> tests/ui/api_type_unsupported_skip.rs:3:13
-  |
-3 |     #[serde(skip)]
-  |             ^^^^

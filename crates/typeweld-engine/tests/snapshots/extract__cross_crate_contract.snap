@@ -1,0 +1,206 @@
+---
+source: crates/typeweld-engine/tests/extract.rs
+assertion_line: 246
+expression: contract
+---
+{
+  "schema_version": 3,
+  "package": {
+    "ts_package": "@workspace/test-api",
+    "cargo_package": "server"
+  },
+  "endpoints": [
+    {
+      "id": "endpoint:7b2aa797e805d2e1",
+      "rust_path": [
+        "server",
+        "handlers",
+        "get_widget"
+      ],
+      "rust_name": "get_widget",
+      "ts_module": "widgets",
+      "ts_name": "getWidget",
+      "route": "/widgets/{id}",
+      "method": "Get",
+      "request": {
+        "path_params": [
+          {
+            "name": "id",
+            "ty": {
+              "Primitive": "I64"
+            },
+            "required": true,
+            "span": {
+              "file": "server/src/handlers.rs",
+              "start": 154,
+              "end": 156
+            }
+          }
+        ],
+        "query_params": []
+      },
+      "success": {
+        "transport": "Unary",
+        "status": 200,
+        "body": {
+          "Json": {
+            "Named": {
+              "id": "type:950c16ef5468f321",
+              "name": "Widget"
+            }
+          }
+        }
+      },
+      "errors": [],
+      "spans": {
+        "name": {
+          "file": "server/src/handlers.rs",
+          "start": 143,
+          "end": 153
+        },
+        "full": {
+          "file": "server/src/handlers.rs",
+          "start": 101,
+          "end": 214
+        },
+        "attr": {
+          "file": "server/src/handlers.rs",
+          "start": 101,
+          "end": 129
+        }
+      },
+      "router_mounts": [
+        {
+          "file": "server/src/handlers.rs",
+          "start": 291,
+          "end": 301
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "id": "type:26dd2205bb18b720",
+      "rust_path": [
+        "api_types",
+        "models",
+        "Part"
+      ],
+      "rust_name": "Part",
+      "ts_name": "Part",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "field:5058d314c130bf36",
+              "rust_name": "name",
+              "wire_name": "name",
+              "ty": {
+                "Primitive": "String"
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "api-types/src/models.rs",
+                  "start": 296,
+                  "end": 300
+                },
+                "full": {
+                  "file": "api-types/src/models.rs",
+                  "start": 292,
+                  "end": 308
+                }
+              }
+            }
+          ]
+        }
+      },
+      "spans": {
+        "name": {
+          "file": "api-types/src/models.rs",
+          "start": 281,
+          "end": 285
+        },
+        "full": {
+          "file": "api-types/src/models.rs",
+          "start": 217,
+          "end": 311
+        }
+      }
+    },
+    {
+      "id": "type:950c16ef5468f321",
+      "rust_path": [
+        "api_types",
+        "models",
+        "Widget"
+      ],
+      "rust_name": "Widget",
+      "ts_name": "Widget",
+      "shape": {
+        "Struct": {
+          "fields": [
+            {
+              "id": "field:c5616f3a42be7b2a",
+              "rust_name": "id",
+              "wire_name": "id",
+              "ty": {
+                "Primitive": "I64"
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "api-types/src/models.rs",
+                  "start": 165,
+                  "end": 167
+                },
+                "full": {
+                  "file": "api-types/src/models.rs",
+                  "start": 161,
+                  "end": 177
+                }
+              }
+            },
+            {
+              "id": "field:0195404df25336fa",
+              "rust_name": "part",
+              "wire_name": "part",
+              "ty": {
+                "Named": {
+                  "id": "type:26dd2205bb18b720",
+                  "name": "Part"
+                }
+              },
+              "optionality": "Required",
+              "spans": {
+                "name": {
+                  "file": "api-types/src/models.rs",
+                  "start": 187,
+                  "end": 191
+                },
+                "full": {
+                  "file": "api-types/src/models.rs",
+                  "start": 183,
+                  "end": 212
+                }
+              }
+            }
+          ]
+        }
+      },
+      "spans": {
+        "name": {
+          "file": "api-types/src/models.rs",
+          "start": 148,
+          "end": 154
+        },
+        "full": {
+          "file": "api-types/src/models.rs",
+          "start": 84,
+          "end": 215
+        }
+      }
+    }
+  ],
+  "errors": []
+}

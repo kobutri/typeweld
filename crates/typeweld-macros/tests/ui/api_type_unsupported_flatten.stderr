@@ -1,5 +1,0 @@
-error: serde flatten is not supported by ApiType yet; use a named nested DTO field so the generated schema has an explicit shape
- --> tests/ui/api_type_unsupported_flatten.rs:3:13
-  |
-3 |     #[serde(flatten)]
-  |             ^^^^^^^

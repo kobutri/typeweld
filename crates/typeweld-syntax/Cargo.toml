@@ -1,6 +1,6 @@
 [package]
-name = "typeweld-ls"
-description = "typeweld language server: cross-language navigation, rename, and live generation"
+name = "typeweld-syntax"
+description = "Shared syn-based parsing and validation rules for typeweld macros and the static extractor"
 categories.workspace = true
 documentation.workspace = true
 edition.workspace = true
@@ -10,6 +10,13 @@ license.workspace = true
 readme.workspace = true
 repository.workspace = true
 version.workspace = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+quote = { workspace = true }
 
 [lints]
 workspace = true

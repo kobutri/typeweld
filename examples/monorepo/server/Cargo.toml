@@ -1,0 +1,9 @@
+[package]
+name = "typeweld-example-monorepo-server"
+edition.workspace = true
+license.workspace = true
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true

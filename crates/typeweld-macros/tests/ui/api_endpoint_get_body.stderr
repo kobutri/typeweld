@@ -1,5 +1,0 @@
-error: #[api] GET endpoints cannot declare request body extractors; use Query<T> or change the endpoint method to POST, PUT, or PATCH
- --> tests/ui/api_endpoint_get_body.rs:7:1
-  |
-7 | async fn get_user(body: typeweld_core::Body<User>) -> typeweld_core::Json<User> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

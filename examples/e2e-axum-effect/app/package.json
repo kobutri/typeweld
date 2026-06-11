@@ -1,9 +1,0 @@
-{
-  "name": "e2e-axum-effect-app",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test:runtime": "../../../npm/node_modules/.bin/tsx test/run-e2e.mts",
-    "typecheck": "../../../npm/node_modules/.bin/tsc --noEmit -p tsconfig.json"
-  }
-}
