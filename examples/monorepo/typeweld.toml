@@ -1,0 +1,3 @@
+[[package]]
+cargo = "monorepo-server"
+ts = "@workspace/monorepo-api"

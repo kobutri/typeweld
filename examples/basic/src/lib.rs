@@ -1,4 +1,9 @@
 //! Basic typeweld example: unary endpoints, SSE, and router composition.
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::unused_async
+)]
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -107,6 +112,7 @@ type UserEventStream = stream::Iter<std::vec::IntoIter<Result<UserEvent, UserErr
 
 /// Watch user events as server-sent events.
 #[api(sse, "/events/users")]
+#[must_use]
 pub fn watch_users() -> Sse<UserEvent, UserEventStream> {
     Sse::new(stream::iter(vec![
         Ok(UserEvent::Created { id: 1 }),
@@ -129,11 +135,13 @@ mod admin {
 }
 
 #[api_router]
+#[must_use]
 pub fn admin_routes() -> ApiRouter {
     ApiRouter::new().endpoint(admin::clear_users)
 }
 
 #[api_router]
+#[must_use]
 pub fn routes() -> ApiRouter {
     ApiRouter::new()
         .endpoint(get_user)

@@ -103,14 +103,13 @@ pub fn analyze_endpoint<'a>(
                 "#[api] endpoints returning Sse<T> must use the sse method",
             ));
         }
-        (ResponseKind::Sse(_), true) => {}
-        (_, true) => {
+        (_, true) if !matches!(response, ResponseKind::Sse(_)) => {
             return Err(syn::Error::new_spanned(
                 &sig.output,
                 "#[api(sse, ...)] endpoints must return Sse<T, S> or Result<Sse<T, S>, E>",
             ));
         }
-        (_, false) => {}
+        _ => {}
     }
     if is_binary_body && matches!(response, ResponseKind::Binary) {
         return Err(syn::Error::new_spanned(
@@ -417,10 +416,9 @@ fn is_anyhow_error(ty: &Type) -> bool {
 fn is_std_io_error(ty: &Type) -> bool {
     type_path_segments(ty).is_some_and(|segments| {
         segments.last().is_some_and(|segment| segment == "Error")
-            && segments.windows(2).any(|window| {
-                (window[0] == "std" && window[1] == "io")
-                    || (window[0] == "tokio" && window[1] == "io")
-            })
+            && segments
+                .windows(2)
+                .any(|window| matches!(window[0].as_str(), "std" | "tokio") && window[1] == "io")
     })
 }
 

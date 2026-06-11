@@ -48,6 +48,7 @@ struct Lowering<'a> {
 }
 
 impl<'a> Lowering<'a> {
+    #[allow(clippy::similar_names)]
     fn emit(&mut self, path: &str, items: &[Item]) {
         let mut printer = Printer::new(HEADER);
         for item in items {
@@ -128,6 +129,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// Schema consts must be declared before use; cycles are unsupported.
+    #[allow(clippy::items_after_statements)]
     fn topo_sorted_types(&mut self) -> Vec<&'a TypeDecl> {
         let by_id: HashMap<&'a SymbolId, &'a TypeDecl> = self
             .contract
@@ -488,6 +490,7 @@ impl<'a> Lowering<'a> {
         self.emit(&format!("endpoints/{module}.ts"), &items);
     }
 
+    #[allow(clippy::unused_self)]
     fn error_names(&self, endpoints: &[Endpoint]) -> Vec<String> {
         let mut names = BTreeSet::new();
         for endpoint in endpoints {
@@ -722,6 +725,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// The runtime endpoint definition object passed to the client factory.
+    #[allow(clippy::too_many_lines, clippy::ref_option)]
     fn endpoint_object(
         &mut self,
         endpoint: &Endpoint,

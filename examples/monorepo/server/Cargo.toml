@@ -1,0 +1,12 @@
+[package]
+name = "monorepo-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+api-types = { path = "../api-types" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+typeweld = { path = "../../../crates/typeweld", features = ["uuid", "chrono"] }

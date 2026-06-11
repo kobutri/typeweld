@@ -55,6 +55,7 @@ rust_decimal = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full", "extra-traits", "visit", "visit-mut"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml = "0.8"
 tower-layer = "0.3"

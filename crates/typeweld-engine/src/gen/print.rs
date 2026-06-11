@@ -32,6 +32,7 @@ impl Printer {
         (self.out, self.marks)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn item(&mut self, item: &Item) {
         match item {
             Item::Import {
@@ -162,6 +163,7 @@ impl Printer {
         self.push(&format!(": {}\n", field.ty));
     }
 
+    #[allow(clippy::ref_option)]
     fn doc(&mut self, doc: &Option<String>, indent: usize) {
         let Some(doc) = doc else { return };
         let pad = "  ".repeat(indent);
@@ -270,6 +272,7 @@ impl Printer {
         }
     }
 
+    #[allow(clippy::ref_option)]
     fn marked_text(&mut self, text: &str, mark: &Option<MarkRef>) {
         let start = self.position();
         self.push(text);

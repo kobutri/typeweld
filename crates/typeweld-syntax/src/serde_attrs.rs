@@ -10,6 +10,7 @@ use syn::{Attribute, LitStr};
 use crate::rename::RenameRule;
 
 /// Parsed serde attributes for a container, variant, or field.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub struct SerdeAttrs {
     pub rename: Option<String>,

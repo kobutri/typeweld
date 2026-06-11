@@ -48,7 +48,7 @@ primitive_api_bound!(
 impl<T: ApiBound> ApiBound for Option<T> {}
 impl<T: ApiBound> ApiBound for Vec<T> {}
 impl<T: ApiBound> ApiBound for Box<T> {}
-impl<T: ApiBound> ApiBound for std::collections::HashMap<String, T> {}
+impl<T: ApiBound, S> ApiBound for std::collections::HashMap<String, T, S> {}
 impl<T: ApiBound> ApiBound for std::collections::BTreeMap<String, T> {}
 
 #[cfg(feature = "uuid")]
@@ -198,7 +198,6 @@ where
     }
 
     /// Finishes the builder, returning the underlying Axum router.
-    #[must_use]
     pub fn into_router(self) -> Router<S> {
         self.router
     }
@@ -211,7 +210,6 @@ impl<S> From<ApiRouter<S>> for Router<S> {
 }
 
 /// Builds a method router for the generated mount helpers.
-#[must_use]
 pub fn method_router<H, T, S>(method: HttpMethod, handler: H) -> MethodRouter<S>
 where
     H: Handler<T, S>,

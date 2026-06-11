@@ -1,16 +1,13 @@
 /target/
-/npm/node_modules/
-/npm/**/node_modules/
-/npm/vscode-extension/bin/
-/npm/cli/bin/
-/npm/cli/dist/
-/npm/language-server-wrapper/bin/
-/npm/language-server-wrapper/dist/
+node_modules/
+target/typeweld/
+
+/npm/typeweld/dist/
+/npm/typeweld/bin/
 /npm/vscode-extension/dist/
+/npm/vscode-extension/bin/
 /npm/vscode-extension/typescript-plugin/dist/
-/npm/vscode-extension/server/
-/npm/vscode-extension/out/
-/target/api-contract/
+*.vsix
 
 .DS_Store
 *.log

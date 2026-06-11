@@ -154,9 +154,8 @@ impl Resolver<'_> {
 
         // Glob imports of walked modules.
         for glob in &data.globs {
-            let target = match self.resolve_path_inner(module, glob, depth + 1) {
-                Entity::Module(target) => target,
-                _ => continue,
+            let Entity::Module(target) = self.resolve_path_inner(module, glob, depth + 1) else {
+                continue;
             };
             let resolved = self.resolve_name(&target, name, depth + 1);
             if resolved != Entity::Unknown {

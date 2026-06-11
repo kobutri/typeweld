@@ -143,6 +143,7 @@ enum ApiItemKind {
     Error,
 }
 
+#[allow(clippy::struct_field_names)]
 struct Lowering<'a> {
     resolver: Resolver<'a>,
     diagnostics: Vec<Diagnostic>,
@@ -200,6 +201,7 @@ impl Lowering<'_> {
         endpoints
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_endpoint(
         &mut self,
         module_key: &[String],
@@ -900,6 +902,7 @@ impl Lowering<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_type_path(
         &mut self,
         module: &[String],

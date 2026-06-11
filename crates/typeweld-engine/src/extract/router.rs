@@ -71,6 +71,7 @@ pub fn analyze(resolver: &Resolver<'_>, diagnostics: &mut Vec<Diagnostic>) -> Ve
 
 /// Applies router mount information to extracted endpoints: effective routes
 /// (with nest prefixes), mount spans, and unmounted-endpoint warnings.
+#[allow(clippy::similar_names)]
 pub fn apply_mounts(
     routers: &[RouterFn],
     endpoints: &mut [Endpoint],
