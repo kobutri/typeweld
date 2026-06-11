@@ -124,6 +124,7 @@ pub fn run(connection: &Connection, options: &Options) -> Result<(), String> {
         ra_diagnostics: HashMap::new(),
         our_diagnostics: HashMap::new(),
         next_internal: 0,
+        pushed_generation: 0,
         shutting_down: false,
     };
     if let Some(error) = spawn_error {
@@ -184,6 +185,8 @@ struct Proxy<'a> {
     ra_diagnostics: HashMap<String, Vec<serde_json::Value>>,
     our_diagnostics: HashMap<String, Vec<serde_json::Value>>,
     next_internal: u64,
+    /// The engine generation last pushed to the plugins.
+    pushed_generation: u64,
     shutting_down: bool,
 }
 
@@ -532,9 +535,6 @@ impl Proxy<'_> {
     /// pushes the plugin snapshot.
     fn refresh(&mut self) {
         let publishes = self.state.ensure_fresh();
-        if publishes.is_empty() {
-            return;
-        }
         for (path, diagnostics) in publishes {
             let text = self.state.read_text(&path);
             let text = text.as_deref().unwrap_or("");
@@ -555,8 +555,11 @@ impl Proxy<'_> {
             self.publish_merged(&key, None);
         }
         if let Some(hub) = &self.plugin {
-            if let Some(snapshot) = features::plugin_snapshot(&self.state) {
-                hub.set_snapshot(&snapshot);
+            if self.pushed_generation != self.state.generation() {
+                if let Some(snapshot) = features::plugin_snapshot(&self.state) {
+                    hub.set_snapshot(&snapshot);
+                    self.pushed_generation = self.state.generation();
+                }
             }
         }
     }
