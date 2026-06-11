@@ -19,7 +19,7 @@ use lsp_types::{
 use typeweld_engine::line_index::LineIndex;
 
 /// Generous: the first rust-analyzer query waits for workspace indexing.
-const TIMEOUT: Duration = Duration::from_secs(180);
+const TIMEOUT: Duration = Duration::from_mins(3);
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

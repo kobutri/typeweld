@@ -26,7 +26,7 @@
         "./node_modules/@typeweld/effect-runtime/src/compat.ts"
       ],
       "effect": [
-        "./node_modules/effect"
+        "./node_modules/effect/dist/index.d.ts"
       ]
     }
   },

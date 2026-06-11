@@ -1,0 +1,6 @@
+# Pinned so trybuild UI snapshots and clippy lints are reproducible between
+# local development and CI. Bump deliberately, regenerating the macro UI
+# .stderr files (TRYBUILD=overwrite) in the same change.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt", "rust-analyzer"]

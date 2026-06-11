@@ -128,7 +128,7 @@ async fn main() {
              [\"./node_modules/@typeweld/effect-runtime/src/index.ts\"],\n      \
              \"@typeweld/effect-runtime/compat\": \
              [\"./node_modules/@typeweld/effect-runtime/src/compat.ts\"],\n      \"effect\": \
-             [\"./node_modules/effect\"]\n    }}\n  }},\n  \"include\": [\"src\", \
+             [\"./node_modules/effect/dist/index.d.ts\"]\n    }}\n  }},\n  \"include\": [\"src\", \
              \"../{package_path}\"]\n}}\n"
         ),
     )?;

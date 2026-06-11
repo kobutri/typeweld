@@ -19,7 +19,7 @@ use lsp_types::{
 };
 use typeweld_engine::line_index::LineIndex;
 
-const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMEOUT: Duration = Duration::from_mins(1);
 
 const TYPEWELD_TOML: &str = r#"
 [[package]]

@@ -19,7 +19,7 @@ use lsp_types::{Position, WorkspaceEdit};
 
 use crate::convert::path_to_uri;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Supervisor for the private rust-analyzer child process.
 pub struct RustBackend {
