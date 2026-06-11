@@ -87,10 +87,10 @@ jobs:
       - name: Build and publish the launcher and runtime
         run: |
           npm run build --workspace typeweld
-          npm run build --prefix vscode-extension/typescript-plugin
+          npm run build --workspace @typeweld/typescript-plugin
           npm publish --workspace typeweld --provenance --access public
           npm publish --workspace @typeweld/effect-runtime --provenance --access public
-          npm publish vscode-extension/typescript-plugin --provenance --access public
+          npm publish --workspace @typeweld/typescript-plugin --provenance --access public
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -117,8 +117,8 @@ jobs:
           mkdir -p npm/vscode-extension/bin
           cp -r artifacts/typeweld-*/. npm/vscode-extension/bin/
       - name: Package VSIX
-        run: npx --yes @vscode/vsce package --no-dependencies -o typeweld.vsix
-        working-directory: npm/vscode-extension
+        run: npm run package:vsix --workspace typeweld-vscode
+        working-directory: npm
       - name: Publish to Marketplace and OpenVSX
         if: ${{ !github.event.release.prerelease }}
         run: |

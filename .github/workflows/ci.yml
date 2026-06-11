@@ -56,7 +56,7 @@ jobs:
       - run: npm ci
         working-directory: npm
       - name: Build the TypeScript plugin
-        run: npm run build --prefix vscode-extension/typescript-plugin
+        run: npm run build --workspace @typeweld/typescript-plugin
         working-directory: npm
       - run: cargo test -p typeweld-ls
 
@@ -113,8 +113,10 @@ jobs:
           npm run build --workspace typeweld
           npm pack --workspace typeweld --workspace @typeweld/effect-runtime --dry-run
         working-directory: npm
-      - name: Bundle the VS Code extension
-        run: npm run compile --workspace typeweld-vscode --if-present
+      - name: Bundle and package the VS Code extension
+        run: |
+          npm run compile --workspace typeweld-vscode
+          npm run package:vsix --workspace typeweld-vscode
         working-directory: npm
 
   validate:

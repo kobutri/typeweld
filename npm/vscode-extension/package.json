@@ -29,19 +29,17 @@
   "files": [
     "bin",
     "dist",
+    "LICENSE.md",
     "README.md",
     "node_modules/@typeweld/typescript-plugin/**",
     "package.json"
   ],
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension.js && npm run build --prefix typescript-plugin",
+    "build": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/extension.js && npm run build --prefix typescript-plugin && node scripts/stage.mjs",
     "compile": "npm run typecheck && npm run build",
-    "package:vsix": "vsce package",
+    "package:vsix": "npm run build && node scripts/package.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --prefix typescript-plugin",
     "vscode:prepublish": "npm run build"
-  },
-  "dependencies": {
-    "@typeweld/typescript-plugin": "file:./typescript-plugin"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",

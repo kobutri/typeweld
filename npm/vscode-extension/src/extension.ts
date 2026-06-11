@@ -342,7 +342,25 @@ function resolveServerBinary(
     return onPath
   }
 
+  const bundled = bundledTypeweldBinary(context)
+  if (bundled !== undefined) {
+    return bundled
+  }
+
   return cargoTargetCandidates(context).find(isExecutable)
+}
+
+/** The platform binary release builds bundle into the extension. */
+function bundledTypeweldBinary(
+  context: vscode.ExtensionContext,
+): string | undefined {
+  const candidate = path.join(
+    context.extensionPath,
+    "bin",
+    `${process.platform}-${process.arch}`,
+    executableName,
+  )
+  return isExecutable(candidate) ? candidate : undefined
 }
 
 function findOnPath(): string | undefined {
