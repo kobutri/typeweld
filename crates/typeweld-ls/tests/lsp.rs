@@ -116,7 +116,7 @@ impl Client {
             "capabilities": {},
             // These tests exercise the contract-based plans; the semantic
             // Rust and TypeScript backends have their own integration tests.
-            "initializationOptions": { "rustBackend": "off", "tsBackend": "off" },
+            "initializationOptions": { "rustAnalyzer": "off" },
         });
         client.request_value("initialize", params);
         client.notify(Initialized::METHOD, serde_json::json!({}));

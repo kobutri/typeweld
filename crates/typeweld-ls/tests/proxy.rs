@@ -1,8 +1,9 @@
-//! Integration tests for the private rust-analyzer rename backend.
+//! Integration tests for the rust-analyzer proxy.
 //!
-//! The semantic test drives a real rust-analyzer over a compilable fixture
-//! workspace and is skipped (with a note) when the binary is unavailable.
-//! Environment-variable–driven tests serialize through a process-wide lock.
+//! The proxied test drives a real rust-analyzer behind typeweld-ls over a
+//! compilable fixture workspace and is skipped (with a note) when the binary
+//! is unavailable. Environment-variable–driven tests serialize through a
+//! process-wide lock.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidOpenTextDocument, Exit, Initialized, Notification as _};
-use lsp_types::request::{Rename, Request as _, Shutdown};
+use lsp_types::request::{Request as _, Shutdown};
 use lsp_types::{
     DidOpenTextDocumentParams, DocumentChanges, OneOf, Position, TextDocumentEdit,
     TextDocumentItem, WorkspaceEdit,
@@ -142,17 +143,27 @@ fn fixture() -> tempfile::TempDir {
     dir
 }
 
-/// The rust-analyzer binary the backend would use, when it actually runs.
+/// A working rust-analyzer binary, probed without reading the environment
+/// (the other test mutates `TYPEWELD_RUST_ANALYZER` under the env lock).
 fn rust_analyzer_binary() -> Option<PathBuf> {
-    let binary = std::env::var_os("TYPEWELD_RUST_ANALYZER")
-        .map_or_else(|| PathBuf::from("rust-analyzer"), PathBuf::from);
-    let works = Command::new(&binary)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    works.then_some(binary)
+    let works = |binary: &Path| {
+        Command::new(binary)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let candidate = PathBuf::from("rust-analyzer");
+    if works(&candidate) {
+        return Some(candidate);
+    }
+    let output = Command::new("rustup")
+        .args(["which", "rust-analyzer"])
+        .output()
+        .ok()?;
+    let candidate = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+    (output.status.success() && works(&candidate)).then_some(candidate)
 }
 
 struct Client {
@@ -162,7 +173,7 @@ struct Client {
 }
 
 impl Client {
-    fn start(root: &Path, initialization_options: &serde_json::Value) -> Self {
+    fn start(root: &Path) -> Self {
         let (server_side, client_side) = Connection::memory();
         let handle = std::thread::spawn(move || typeweld_ls::run_with_connection(server_side));
         let mut client = Client {
@@ -173,9 +184,14 @@ impl Client {
         let params = serde_json::json!({
             "rootUri": uri(root),
             "capabilities": {},
-            "initializationOptions": initialization_options,
         });
-        client.request_value("initialize", params);
+        let result = client
+            .request_value("initialize", params)
+            .expect("initialize");
+        assert!(
+            result.pointer("/capabilities/renameProvider").is_some(),
+            "initialize must advertise rename: {result}"
+        );
         client.notify(Initialized::METHOD, serde_json::json!({}));
         client
     }
@@ -188,7 +204,14 @@ impl Client {
             .expect("send");
     }
 
-    fn request_value(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+    /// Sends one request and waits for its response; protocol-level errors
+    /// come back as `Err` so callers can retry while indexing finishes.
+    /// Server-to-client requests arriving in the meantime get a null answer.
+    fn request_value(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
         let request = Request::new(id.clone(), method.to_owned(), params);
@@ -204,22 +227,32 @@ impl Client {
                 .receiver
                 .recv_timeout(remaining)
                 .expect("response");
-            if let Message::Response(response) = message {
-                if response.id == id {
-                    assert!(
-                        response.error.is_none(),
-                        "request `{method}` failed: {:?}",
-                        response.error
-                    );
-                    return response.result.unwrap_or(serde_json::Value::Null);
+            match message {
+                Message::Response(response) if response.id == id => {
+                    if let Some(error) = response.error {
+                        return Err(error.message);
+                    }
+                    return Ok(response.result.unwrap_or(serde_json::Value::Null));
                 }
+                Message::Request(request) => {
+                    let answer = if request.method == "workspace/configuration" {
+                        let items = request
+                            .params
+                            .get("items")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(1, Vec::len);
+                        serde_json::Value::Array(vec![serde_json::Value::Null; items])
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    let _ = self
+                        .connection
+                        .sender
+                        .send(Message::Response(Response::new_ok(request.id, answer)));
+                }
+                _ => {}
             }
         }
-    }
-
-    fn request<R: lsp_types::request::Request>(&mut self, params: R::Params) -> R::Result {
-        let value = self.request_value(R::METHOD, serde_json::to_value(params).expect("params"));
-        serde_json::from_value(value).expect("result")
     }
 
     fn open(&self, path: &Path, language: &str, text: &str) {
@@ -344,75 +377,125 @@ fn ident_occurrences(text: &str, name: &str) -> usize {
     count
 }
 
+/// Renames through the proxy, retrying while the wrapped rust-analyzer is
+/// still indexing (errors or incomplete coverage), like a human retrying.
+fn rename_until(
+    client: &mut Client,
+    path: &Path,
+    position: Position,
+    new_name: &str,
+    complete: impl Fn(&[(PathBuf, String, String)]) -> bool,
+) -> Vec<(PathBuf, String, String)> {
+    let deadline = Instant::now() + TIMEOUT;
+    let mut last = Vec::new();
+    while Instant::now() < deadline {
+        let result = client.request_value(
+            "textDocument/rename",
+            rename_params(path, position, new_name),
+        );
+        if let Ok(value) = result {
+            if !value.is_null() {
+                let edit: WorkspaceEdit = serde_json::from_value(value).expect("edit");
+                last = workspace_edits(&edit);
+                if complete(&last) {
+                    return last;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    panic!("rename never completed; last edits: {last:?}");
+}
+
 #[test]
-fn semantic_rename_covers_plain_rust_references() {
+fn proxied_rename_merges_rust_analyzer_and_typescript_edits() {
     let Some(binary) = rust_analyzer_binary() else {
         eprintln!(
-            "skipping semantic_rename_covers_plain_rust_references: rust-analyzer --version failed"
+            "skipping proxied_rename_merges_rust_analyzer_and_typescript_edits: \
+             rust-analyzer --version failed"
         );
         return;
     };
-    let _env = EnvGuard::set(&[
-        (
-            "TYPEWELD_RUST_ANALYZER",
-            binary.to_string_lossy().into_owned(),
-        ),
-        ("TYPEWELD_RA_TIMEOUT_SECS", "120".to_owned()),
-    ]);
+    let _env = EnvGuard::set(&[(
+        "TYPEWELD_RUST_ANALYZER",
+        binary.to_string_lossy().into_owned(),
+    )]);
 
     let dir = fixture();
-    let mut client = Client::start(
-        dir.path(),
-        &serde_json::json!({ "rustBackend": "lazy", "tsBackend": "off" }),
-    );
+    let mut client = Client::start(dir.path());
     let lib_rs = dir.path().join("server/src/lib.rs");
-    // Exercise the queued document sync: opened before the lazy spawn.
     client.open(&lib_rs, "rust", LIB_RS);
 
     let position = position_of(LIB_RS, "pub struct User");
     let position = Position::new(position.line, position.character + 11);
-    let edit: Option<WorkspaceEdit> = client.request::<Rename>(
-        serde_json::from_value(rename_params(&lib_rs, position, "Account")).expect("params"),
-    );
-    let edits = workspace_edits(&edit.expect("workspace edit"));
-
     let expected = ident_occurrences(LIB_RS, "User");
-    let in_lib = edits
-        .iter()
-        .filter(|(path, old, new)| path == &lib_rs && old == "User" && new == "Account")
-        .count();
-    assert_eq!(
-        in_lib, expected,
-        "rust-analyzer should cover every `User` ident in lib.rs \
-         (including `business_logic`), got {edits:?}"
+    let main_ts = dir.path().join("app/src/main.ts");
+    rename_until(&mut client, &lib_rs, position, "Account", |edits| {
+        let in_lib = edits
+            .iter()
+            .filter(|(path, old, new)| path == &lib_rs && old == "User" && new == "Account")
+            .count();
+        let in_ts = edits
+            .iter()
+            .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Account");
+        // rust-analyzer covers every Rust ident (including `business_logic`,
+        // which the contract cannot see); our augmentation adds the TS usage.
+        in_lib == expected && in_ts
+    });
+
+    // Hover augmentation: rust-analyzer's hover plus the contract block.
+    let hover_position = position_of(LIB_RS, "get_user");
+    let hover = client
+        .request_value(
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": uri(&lib_rs) },
+                "position": hover_position,
+            }),
+        )
+        .expect("hover");
+    let rendered = hover.to_string();
+    assert!(
+        rendered.contains("GET /users/{id}"),
+        "hover must include the contract block: {rendered}"
     );
 
-    let main_ts = dir.path().join("app/src/main.ts");
+    // References augmentation: the TS usage joins rust-analyzer's results.
+    let references = client
+        .request_value(
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": uri(&lib_rs) },
+                "position": hover_position,
+                "context": { "includeDeclaration": true },
+            }),
+        )
+        .expect("references");
+    let rendered = references.to_string();
     assert!(
-        edits
-            .iter()
-            .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Account"),
-        "expected the TS usage edit: {edits:?}"
+        rendered.contains("main.ts"),
+        "references must include the TS usage: {rendered}"
     );
 }
 
 #[test]
-fn rename_survives_a_crashing_backend() {
+fn degrades_when_rust_analyzer_cannot_start() {
     let _env = EnvGuard::set(&[("TYPEWELD_RUST_ANALYZER", "/bin/false".to_owned())]);
 
     let dir = fixture();
-    let mut client = Client::start(
-        dir.path(),
-        &serde_json::json!({ "rustBackend": "lazy", "tsBackend": "off" }),
-    );
+    let mut client = Client::start(dir.path());
     let lib_rs = dir.path().join("server/src/lib.rs");
 
     let position = position_of(LIB_RS, "pub async fn get_user");
     let position = Position::new(position.line, position.character + 14);
-    let edit: Option<WorkspaceEdit> = client.request::<Rename>(
-        serde_json::from_value(rename_params(&lib_rs, position, "fetch_user")).expect("params"),
-    );
-    let edits = workspace_edits(&edit.expect("workspace edit"));
+    let value = client
+        .request_value(
+            "textDocument/rename",
+            rename_params(&lib_rs, position, "fetch_user"),
+        )
+        .expect("rename");
+    let edit: WorkspaceEdit = serde_json::from_value(value).expect("edit");
+    let edits = workspace_edits(&edit);
 
     let rust_edits = edits
         .iter()

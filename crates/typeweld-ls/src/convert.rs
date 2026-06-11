@@ -93,6 +93,33 @@ pub fn range(text: &str, start: u32, end: u32, encoding: Encoding) -> Range {
     )
 }
 
+/// Converts a byte offset into a UTF-16 code-unit offset over the whole
+/// text (tsserver's position representation).
+pub fn utf16_offset(text: &str, byte_offset: u32) -> u32 {
+    let prefix = text.get(..byte_offset as usize).unwrap_or(text);
+    prefix
+        .chars()
+        .map(|character| if character.len_utf16() == 2 { 2 } else { 1 })
+        .sum()
+}
+
+/// Converts a UTF-16 code-unit offset back into a byte offset.
+pub fn byte_offset_from_utf16(text: &str, utf16: u32) -> u32 {
+    let mut remaining = utf16;
+    for (byte, character) in text.char_indices() {
+        let byte = u32::try_from(byte).unwrap_or(u32::MAX);
+        if remaining == 0 {
+            return byte;
+        }
+        let width = if character.len_utf16() == 2 { 2 } else { 1 };
+        if width > remaining {
+            return byte;
+        }
+        remaining -= width;
+    }
+    u32::try_from(text.len()).unwrap_or(u32::MAX)
+}
+
 /// Renders `path` relative to `root` with `/` separators, matching the
 /// `ir::Span::file` convention.
 pub fn root_relative(root: &Path, path: &Path) -> Option<String> {

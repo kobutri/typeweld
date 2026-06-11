@@ -54,7 +54,12 @@ enum Command {
         unused: bool,
     },
     /// Run the typeweld language server on stdio.
-    Lsp,
+    Lsp {
+        /// rust-analyzer binary to wrap (defaults to `TYPEWELD_RUST_ANALYZER`,
+        /// `PATH`, then `rustup which rust-analyzer`).
+        #[arg(long)]
+        rust_analyzer: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -77,9 +82,11 @@ fn main() -> ExitCode {
             }
         }
         Command::Check { unused } => run_check(&root, unused),
-        Command::Lsp => typeweld_ls::run_stdio()
-            .map(|()| false)
-            .map_err(anyhow::Error::msg),
+        Command::Lsp { rust_analyzer } => {
+            typeweld_ls::run_stdio(&typeweld_ls::Options { rust_analyzer })
+                .map(|()| false)
+                .map_err(anyhow::Error::msg)
+        }
     };
 
     match result {

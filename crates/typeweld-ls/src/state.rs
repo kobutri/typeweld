@@ -32,6 +32,8 @@ pub struct State {
     open_docs: HashMap<PathBuf, i32>,
     snapshot: Option<Snapshot>,
     dirty: bool,
+    /// Monotonic rebuild counter, used to version plugin snapshots.
+    generation: u64,
 }
 
 /// One coherent rebuild of every configured package.
@@ -117,6 +119,7 @@ impl State {
             open_docs: HashMap::new(),
             snapshot: None,
             dirty: true,
+            generation: 0,
         }
     }
 
@@ -134,6 +137,22 @@ impl State {
 
     pub fn version_of(&self, path: &Path) -> Option<i32> {
         self.open_docs.get(path).copied()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The open editor documents with their overlay text and version, for
+    /// replay into a respawned rust-analyzer.
+    pub fn open_documents(&self) -> Vec<(PathBuf, String, i32)> {
+        self.open_docs
+            .iter()
+            .filter_map(|(path, version)| {
+                let text = self.overlays.read(path)?;
+                Some((path.clone(), text.to_string(), *version))
+            })
+            .collect()
     }
 
     /// Current text of `path`: editor overlay first, then disk.
@@ -172,6 +191,7 @@ impl State {
             return Vec::new();
         }
         self.dirty = false;
+        self.generation += 1;
 
         let mut global_diagnostics = Vec::new();
         let packages = self.rebuild(&mut global_diagnostics);

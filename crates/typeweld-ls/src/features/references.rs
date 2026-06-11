@@ -35,7 +35,34 @@ pub fn handle(state: &State, params: &ReferenceParams) -> Option<Vec<Location>> 
         }
     }
 
-    for usage in package.usage.refs_for(&resolved.id) {
+    locations.extend(usage_locations(state, package, &resolved.id));
+    (!locations.is_empty()).then_some(locations)
+}
+
+/// The TypeScript usage locations of the API symbol at a position — the
+/// cross-language half merged into rust-analyzer's references response.
+pub fn ts_locations(
+    state: &State,
+    uri: &lsp_types::Uri,
+    position: lsp_types::Position,
+) -> Vec<Location> {
+    let Some(resolved) = resolve(state, uri, position) else {
+        return Vec::new();
+    };
+    let Some(snapshot) = state.snapshot() else {
+        return Vec::new();
+    };
+    let package = &snapshot.packages[resolved.package];
+    usage_locations(state, package, &resolved.id)
+}
+
+fn usage_locations(
+    state: &State,
+    package: &crate::state::PackageSnapshot,
+    id: &typeweld_engine::ir::SymbolId,
+) -> Vec<Location> {
+    let mut locations = Vec::new();
+    for usage in package.usage.refs_for(id) {
         let path = PathBuf::from(&usage.file);
         let Some(text) = state.read_text(&path) else {
             continue;
@@ -48,6 +75,5 @@ pub fn handle(state: &State, params: &ReferenceParams) -> Option<Vec<Location>> 
             state.encoding(),
         ));
     }
-
-    (!locations.is_empty()).then_some(locations)
+    locations
 }

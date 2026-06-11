@@ -152,6 +152,51 @@ pub fn trailing_ident(text: &str, mount: &Span, name: &str) -> Option<(u32, u32)
     (text.get(start as usize..mount.end as usize)? == name).then_some((start, mount.end))
 }
 
+/// Builds the snapshot pushed to the TypeScript plugin: every generated-file
+/// mark with its Rust target and hover text, plus the generated directories,
+/// all in UTF-16 code units (the plugin lives in tsserver's string world).
+pub fn plugin_snapshot(state: &State) -> Option<serde_json::Value> {
+    let snapshot = state.snapshot()?;
+    let mut generated_dirs = Vec::new();
+    let mut marks = Vec::new();
+    for package in &snapshot.packages {
+        generated_dirs.push(package.package_dir.to_string_lossy().into_owned());
+        for mark in &package.marks {
+            let file = package.package_dir.join(&mark.file);
+            let Some(text) = state.read_text(&file) else {
+                continue;
+            };
+            let Some(symbol) = package.symbol_by_id(&mark.symbol_id) else {
+                continue;
+            };
+            let target_path = state.root().join(&symbol.name_span.file);
+            let Some(target_text) = state.read_text(&target_path) else {
+                continue;
+            };
+            let hover = hover::markdown_for_symbol(package, symbol);
+            marks.push(serde_json::json!({
+                "file": file.to_string_lossy(),
+                "start": convert::utf16_offset(&text, mark.start),
+                "end": convert::utf16_offset(&text, mark.end),
+                "symbol": mark.symbol_id,
+                "kind": format!("{:?}", mark.kind),
+                "target": {
+                    "file": target_path.to_string_lossy(),
+                    "start": convert::utf16_offset(&target_text, symbol.name_span.start),
+                    "end": convert::utf16_offset(&target_text, symbol.name_span.end),
+                },
+                "hover": hover,
+            }));
+        }
+    }
+    Some(serde_json::json!({
+        "method": "snapshot",
+        "generation": state.generation(),
+        "generatedDirs": generated_dirs,
+        "marks": marks,
+    }))
+}
+
 /// Converts a workspace-root-relative span to an LSP location.
 pub fn span_location(state: &State, span: &Span) -> Option<Location> {
     let path = state.root().join(&span.file);

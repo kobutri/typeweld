@@ -1,33 +1,34 @@
 //! Bidirectional rename across the contract.
 //!
-//! Rust-initiated renames edit the Rust declaration, the router mounts, and
-//! the TypeScript usages of derived names; TypeScript-initiated renames are
-//! mapped back to the Rust name first. For Rust-declared API symbols the
-//! private rust-analyzer backend additionally contributes the semantic Rust
-//! references the contract cannot see; for struct fields and endpoint params
-//! the private typescript-language-server backend contributes the user
-//! TypeScript property accesses. Generated files are never edited — they
-//! update through regeneration.
+//! Rust-initiated renames are answered by rust-analyzer (through the proxy);
+//! [`ts_complement`] contributes the TypeScript half: usage-index edits for
+//! endpoints, types, errors, and tags, plus semantic property-access edits
+//! from the TypeScript plugin for fields and params. TypeScript-initiated
+//! renames arrive as plugin events; [`rust_complement`] maps them back to the
+//! Rust name and plans the Rust-side edit. Generated files are never edited —
+//! they update through regeneration.
+//!
+//! Without rust-analyzer the degraded [`handle`] path produces the
+//! contract-known edits (declaration ident, router mounts) itself.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
-    PrepareRenameResponse, RenameParams, TextDocumentEdit, TextDocumentPositionParams, TextEdit,
-    Uri, WorkspaceEdit,
+    Position, PrepareRenameResponse, RenameParams, TextDocumentEdit, TextDocumentPositionParams,
+    TextEdit, WorkspaceEdit,
 };
 use typeweld_engine::gen::MarkKind;
-use typeweld_engine::ir::{DeclSpans, Endpoint, ErrorVariant, Span, SymbolId};
+use typeweld_engine::ir::{Endpoint, ErrorVariant, Span, SymbolId};
 use typeweld_engine::usage::{UsageKind, UsageRef};
 use typeweld_syntax::{to_camel_case, to_snake_case};
 
-use crate::convert::{self, path_to_uri, uri_to_path, Encoding};
+use crate::convert::{self, path_to_uri, uri_to_path};
 use crate::features::{resolve, trailing_ident};
-use crate::rust_backend::RustBackend;
-use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, Snapshot, State, SymbolInfo};
-use crate::ts_backend::TsBackend;
+use crate::plugin::PluginHub;
+use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, State, SymbolInfo};
 
 /// One pending text replacement, by absolute path and byte range.
 struct Edit {
@@ -50,10 +51,11 @@ pub fn prepare(
     Some(PrepareRenameResponse::RangeWithPlaceholder { range, placeholder })
 }
 
+/// The degraded-mode rename: contract-known Rust edits plus the TypeScript
+/// complement, without semantic Rust coverage.
 pub fn handle(
     state: &State,
-    backend: Option<&mut RustBackend>,
-    ts_backend: Option<&mut TsBackend>,
+    plugin: Option<&PluginHub>,
     params: &RenameParams,
 ) -> Result<Option<WorkspaceEdit>, String> {
     let position = &params.text_document_position;
@@ -75,84 +77,447 @@ pub fn handle(
     let from_rust = resolved.is_from_rust();
 
     let mut edits = Vec::new();
-    // Declarations the semantic backend can chase: the decl ident position
-    // and the new Rust-side name to apply there.
-    let mut semantic: Option<(Span, String)> = None;
-    // Properties the TS backend can chase: the anchor mark kind and the new
-    // TypeScript-side property name to apply there.
-    let mut ts_property: Option<(MarkKind, String)> = None;
     match symbol.info {
         SymbolInfo::Endpoint(index) => {
             let endpoint = &package.contract.endpoints[index];
-            let rust_new =
-                rename_endpoint(state, package, endpoint, new_name, from_rust, &mut edits)?;
-            semantic = Some((endpoint.spans.name.clone(), rust_new));
+            let rust_new = endpoint_rust_name(endpoint, new_name, from_rust)?;
+            push_span_edit(state, &endpoint.spans.name, rust_new.clone(), &mut edits);
+            push_mount_edits(state, endpoint, &rust_new, &mut edits);
+            endpoint_ts_edits(state, package, endpoint, &rust_new, &mut edits);
         }
         SymbolInfo::Type(index) => {
             let decl = &package.contract.types[index];
-            rename_decl(
+            push_span_edit(state, &decl.spans.name, new_name.to_owned(), &mut edits);
+            decl_ts_edits(
                 state,
                 package,
                 &decl.id,
-                &decl.spans,
                 &decl.rust_name,
                 &decl.ts_name,
                 new_name,
                 &mut edits,
             );
-            semantic = Some((decl.spans.name.clone(), new_name.to_owned()));
         }
         SymbolInfo::Error(index) => {
             let decl = &package.contract.errors[index];
-            rename_decl(
+            push_span_edit(state, &decl.spans.name, new_name.to_owned(), &mut edits);
+            decl_ts_edits(
                 state,
                 package,
                 &decl.id,
-                &decl.spans,
                 &decl.rust_name,
                 &decl.ts_name,
                 new_name,
                 &mut edits,
             );
-            semantic = Some((decl.spans.name.clone(), new_name.to_owned()));
         }
         SymbolInfo::ErrorVariant { error, variant } => {
             let Some(variant) = package.contract.errors[error].variants.get(variant) else {
                 return Ok(None);
             };
-            rename_error_variant(state, package, variant, new_name, &mut edits);
+            push_span_edit(state, &variant.spans.name, new_name.to_owned(), &mut edits);
+            variant_tag_edits(state, package, variant, new_name, &mut edits);
         }
         // The Rust ident edit; derived wire names in the generated files
-        // update via regeneration, and the TS backend below chases the user
+        // update via regeneration, and the plugin below chases the user
         // property accesses (fields, params) the contract cannot see.
         SymbolInfo::Field { .. } | SymbolInfo::Variant { .. } | SymbolInfo::Param { .. } => {
             push_span_edit(state, &symbol.name_span, new_name.to_owned(), &mut edits);
-            ts_property = ts_property_target(state, package, symbol, new_name, from_rust);
+            property_edits(
+                state, plugin, package, symbol, new_name, from_rust, &mut edits,
+            );
         }
-    }
-
-    if let (Some(backend), Some((decl_span, rust_new))) = (backend, semantic) {
-        merge_semantic_edits(state, backend, &decl_span, &rust_new, &mut edits);
-    }
-    if let (Some(backend), Some((kind, ts_new))) = (ts_backend, ts_property) {
-        merge_ts_property_edits(
-            state,
-            backend,
-            snapshot,
-            package,
-            &resolved.id,
-            kind,
-            &ts_new,
-            &mut edits,
-        );
     }
 
     Ok(Some(build_workspace_edit(state, package, edits)))
 }
 
-/// The TS backend target for a field or param symbol: the anchor mark kind
-/// and the new TypeScript property name, when the wire name is derived from
-/// the Rust ident. Variants stay Rust-only (v1).
+/// The TypeScript half of a Rust-initiated rename, as its own workspace
+/// edit (merged into rust-analyzer's response by the proxy). `None` when the
+/// position is not an API symbol or the rename does not touch TypeScript.
+pub fn ts_complement(
+    state: &State,
+    plugin: Option<&PluginHub>,
+    params: &RenameParams,
+) -> Option<WorkspaceEdit> {
+    let position = &params.text_document_position;
+    let resolved = resolve(state, &position.text_document.uri, position.position)?;
+    if !resolved.is_from_rust() {
+        return None;
+    }
+    let snapshot = state.snapshot()?;
+    let package = &snapshot.packages[resolved.package];
+    let symbol = package.symbol_by_id(&resolved.id)?;
+    let new_name = params.new_name.as_str();
+    if !is_identifier(new_name) {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+    match symbol.info {
+        SymbolInfo::Endpoint(index) => {
+            let endpoint = &package.contract.endpoints[index];
+            endpoint_ts_edits(state, package, endpoint, new_name, &mut edits);
+        }
+        SymbolInfo::Type(index) => {
+            let decl = &package.contract.types[index];
+            decl_ts_edits(
+                state,
+                package,
+                &decl.id,
+                &decl.rust_name,
+                &decl.ts_name,
+                new_name,
+                &mut edits,
+            );
+        }
+        SymbolInfo::Error(index) => {
+            let decl = &package.contract.errors[index];
+            decl_ts_edits(
+                state,
+                package,
+                &decl.id,
+                &decl.rust_name,
+                &decl.ts_name,
+                new_name,
+                &mut edits,
+            );
+        }
+        SymbolInfo::ErrorVariant { error, variant } => {
+            let variant = package.contract.errors[error].variants.get(variant)?;
+            variant_tag_edits(state, package, variant, new_name, &mut edits);
+        }
+        SymbolInfo::Field { .. } | SymbolInfo::Variant { .. } | SymbolInfo::Param { .. } => {
+            property_edits(state, plugin, package, symbol, new_name, true, &mut edits);
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    Some(build_workspace_edit(state, package, edits))
+}
+
+/// The planned Rust complement of a TypeScript-initiated rename.
+pub struct RustComplement {
+    /// The new Rust-side name.
+    pub rust_name: String,
+    /// Where to ask rust-analyzer for the semantic rename.
+    pub decl_position: Option<(PathBuf, Position)>,
+    /// The contract-known Rust edits, applied when no rust-analyzer runs.
+    pub fallback_edit: WorkspaceEdit,
+}
+
+/// Maps a TypeScript-initiated rename (reported by the plugin) back to the
+/// Rust side. `None` when the symbol is unknown, the wire name is pinned by
+/// an explicit serde rename, or the new name cannot round-trip.
+pub fn rust_complement(state: &State, symbol: &str, ts_new: &str) -> Option<RustComplement> {
+    if !is_identifier(ts_new) {
+        return None;
+    }
+    let id = SymbolId::new(symbol);
+    let snapshot = state.snapshot()?;
+    let (package, found) = snapshot
+        .packages
+        .iter()
+        .find_map(|package| package.symbol_by_id(&id).map(|symbol| (package, symbol)))?;
+
+    let rust_name = match found.info {
+        SymbolInfo::Endpoint(_) => {
+            let snake = to_snake_case(ts_new);
+            (to_camel_case(&snake) == ts_new).then_some(snake)?
+        }
+        SymbolInfo::Type(index) => {
+            let decl = &package.contract.types[index];
+            (decl.ts_name == decl.rust_name).then(|| ts_new.to_owned())?
+        }
+        SymbolInfo::Error(index) => {
+            let decl = &package.contract.errors[index];
+            (decl.ts_name == decl.rust_name).then(|| ts_new.to_owned())?
+        }
+        SymbolInfo::Field { owner, field } => {
+            let field = field_decl(package, owner, field)?;
+            rust_name_from_wire(&field.rust_name, &field.wire_name, ts_new)?
+        }
+        SymbolInfo::Param {
+            endpoint,
+            query,
+            param,
+        } => {
+            let request = &package.contract.endpoints.get(endpoint)?.request;
+            let param = if query {
+                request.query_params.get(param)
+            } else {
+                request.path_params.get(param)
+            }?;
+            let rust_ident = span_text(state, &found.name_span)?;
+            rust_name_from_wire(&rust_ident, &param.name, ts_new)?
+        }
+        SymbolInfo::Variant { .. } | SymbolInfo::ErrorVariant { .. } => return None,
+    };
+    if !is_identifier(&rust_name) {
+        return None;
+    }
+
+    let decl_path = state.root().join(&found.name_span.file);
+    let decl_position = state.read_text(&decl_path).map(|text| {
+        let position = convert::position_at(&text, found.name_span.start, state.encoding());
+        (decl_path.clone(), position)
+    });
+
+    let mut edits = Vec::new();
+    push_span_edit(state, &found.name_span, rust_name.clone(), &mut edits);
+    if let SymbolInfo::Endpoint(index) = found.info {
+        push_mount_edits(
+            state,
+            &package.contract.endpoints[index],
+            &rust_name,
+            &mut edits,
+        );
+    }
+    let fallback_edit = build_workspace_edit(state, package, edits);
+
+    Some(RustComplement {
+        rust_name,
+        decl_position,
+        fallback_edit,
+    })
+}
+
+/// The Rust ident behind a wire name and a new TypeScript spelling; `None`
+/// when the wire name is pinned by an explicit serde rename.
+fn rust_name_from_wire(rust_name: &str, wire_name: &str, ts_new: &str) -> Option<String> {
+    if wire_name == rust_name {
+        Some(ts_new.to_owned())
+    } else if wire_name == to_camel_case(rust_name) {
+        let snake = to_snake_case(ts_new);
+        (to_camel_case(&snake) == ts_new).then_some(snake)
+    } else {
+        None
+    }
+}
+
+/// Keeps only the Rust-file edits of a workspace edit (the TypeScript side
+/// of a TypeScript-initiated rename was already applied by the editor).
+#[must_use]
+pub fn filter_to_rust(edit: WorkspaceEdit) -> WorkspaceEdit {
+    let is_rust_uri = |uri: &lsp_types::Uri| {
+        uri_to_path(uri).is_some_and(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+        })
+    };
+    let changes = edit.changes.map(|changes| {
+        changes
+            .into_iter()
+            .filter(|(uri, _)| is_rust_uri(uri))
+            .collect()
+    });
+    let document_changes = edit.document_changes.map(|documents| match documents {
+        DocumentChanges::Edits(documents) => DocumentChanges::Edits(
+            documents
+                .into_iter()
+                .filter(|document| is_rust_uri(&document.text_document.uri))
+                .collect(),
+        ),
+        DocumentChanges::Operations(operations) => DocumentChanges::Operations(
+            operations
+                .into_iter()
+                .filter(|operation| match operation {
+                    DocumentChangeOperation::Edit(document) => {
+                        is_rust_uri(&document.text_document.uri)
+                    }
+                    DocumentChangeOperation::Op(_) => false,
+                })
+                .collect(),
+        ),
+    });
+    WorkspaceEdit {
+        changes,
+        document_changes,
+        change_annotations: None,
+    }
+}
+
+/// The new Rust name for an endpoint rename (mapped back from camelCase when
+/// the rename originated in TypeScript).
+fn endpoint_rust_name(
+    _endpoint: &Endpoint,
+    new_name: &str,
+    from_rust: bool,
+) -> Result<String, String> {
+    if from_rust {
+        return Ok(new_name.to_owned());
+    }
+    let snake = to_snake_case(new_name);
+    if to_camel_case(&snake) != new_name {
+        return Err(format!(
+            "ambiguous casing: `{new_name}` does not round-trip through `{snake}`"
+        ));
+    }
+    Ok(snake)
+}
+
+/// Router-mount edits for an endpoint rename.
+fn push_mount_edits(state: &State, endpoint: &Endpoint, rust_new: &str, edits: &mut Vec<Edit>) {
+    for mount in &endpoint.router_mounts {
+        let path = state.root().join(&mount.file);
+        let Some(text) = state.read_text(&path) else {
+            continue;
+        };
+        if let Some((start, end)) = trailing_ident(&text, mount, &endpoint.rust_name) {
+            edits.push(Edit {
+                path,
+                start,
+                end,
+                new_text: rust_new.to_owned(),
+            });
+        }
+    }
+}
+
+/// TypeScript usage edits for an endpoint rename: accessor and route names.
+fn endpoint_ts_edits(
+    state: &State,
+    package: &PackageSnapshot,
+    endpoint: &Endpoint,
+    rust_new: &str,
+    edits: &mut Vec<Edit>,
+) {
+    let ts_new = to_camel_case(rust_new);
+    let route_old = format!("{}Route", endpoint.ts_name);
+    for usage in package.usage.refs_for(&endpoint.id) {
+        match usage.kind {
+            UsageKind::Endpoint => {
+                push_usage_edit(state, usage, &endpoint.ts_name, ts_new.clone(), edits);
+            }
+            UsageKind::Route => {
+                push_usage_edit(state, usage, &route_old, format!("{ts_new}Route"), edits);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// TypeScript usage edits for a type or error rename: the name is the same on
+/// both sides, so usages are edited only when the TS name was derived.
+fn decl_ts_edits(
+    state: &State,
+    package: &PackageSnapshot,
+    id: &SymbolId,
+    rust_name: &str,
+    ts_name: &str,
+    new_name: &str,
+    edits: &mut Vec<Edit>,
+) {
+    if ts_name != rust_name {
+        return;
+    }
+    for usage in package.usage.refs_for(id) {
+        if matches!(usage.kind, UsageKind::Type | UsageKind::Error) {
+            push_usage_edit(state, usage, ts_name, new_name.to_owned(), edits);
+        }
+    }
+}
+
+/// TypeScript tag edits for an error-variant rename. Only derived tags follow
+/// the Rust name; explicit serde renames pin the wire tag.
+fn variant_tag_edits(
+    state: &State,
+    package: &PackageSnapshot,
+    variant: &ErrorVariant,
+    new_name: &str,
+    edits: &mut Vec<Edit>,
+) {
+    let new_tag = if variant.tag == variant.rust_name {
+        new_name.to_owned()
+    } else if variant.tag == to_camel_case(&variant.rust_name) {
+        to_camel_case(new_name)
+    } else {
+        return;
+    };
+    for usage in package.usage.refs_for(&variant.id) {
+        if matches!(usage.kind, UsageKind::ErrorVariant | UsageKind::ErrorTag) {
+            push_usage_edit(state, usage, &variant.tag, new_tag.clone(), edits);
+        }
+    }
+}
+
+/// Semantic property-access edits for a field or param rename, from the
+/// TypeScript plugin running inside the user's tsserver. The plugin is asked
+/// at the generated anchor property; its locations are filtered to user
+/// files. Failures only cost TypeScript coverage.
+fn property_edits(
+    state: &State,
+    plugin: Option<&PluginHub>,
+    package: &PackageSnapshot,
+    symbol: &RustSymbol,
+    new_name: &str,
+    from_rust: bool,
+    edits: &mut Vec<Edit>,
+) {
+    let Some(plugin) = plugin else { return };
+    let Some((kind, ts_new)) = ts_property_target(state, package, symbol, new_name, from_rust)
+    else {
+        return;
+    };
+    let Some(mark) = package
+        .marks
+        .iter()
+        .find(|mark| mark.kind == kind && mark.symbol_id == symbol.id)
+    else {
+        return;
+    };
+    let anchor = package.package_dir.join(&mark.file);
+    let Some(anchor_text) = state.read_text(&anchor) else {
+        return;
+    };
+    let offset = convert::utf16_offset(&anchor_text, mark.start);
+    let locations = match plugin.query_rename_locations(&anchor, offset, plugin_timeout()) {
+        Ok(locations) => locations,
+        Err(message) => {
+            eprintln!("typeweld-ls: TypeScript property rename unavailable: {message}");
+            return;
+        }
+    };
+    let Some(snapshot) = state.snapshot() else {
+        return;
+    };
+    for location in locations {
+        let path = PathBuf::from(&location.file);
+        let generated = snapshot
+            .packages
+            .iter()
+            .any(|package| path.starts_with(&package.package_dir));
+        let is_ts = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "ts" || extension == "tsx");
+        if generated || !is_ts {
+            continue;
+        }
+        let Some(text) = state.read_text(&path) else {
+            continue;
+        };
+        let start = convert::byte_offset_from_utf16(&text, location.start);
+        let end = convert::byte_offset_from_utf16(&text, location.start + location.length);
+        edits.push(Edit {
+            path,
+            start,
+            end,
+            new_text: ts_new.clone(),
+        });
+    }
+}
+
+fn plugin_timeout() -> Duration {
+    std::env::var("TYPEWELD_PLUGIN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(3), Duration::from_secs)
+}
+
+/// The plugin target for a field or param symbol: the anchor mark kind and
+/// the new TypeScript property name, when the wire name is derived from the
+/// Rust ident. Variants stay Rust-only (v1).
 fn ts_property_target(
     state: &State,
     package: &PackageSnapshot,
@@ -245,171 +610,6 @@ fn derived_property(
     }
 }
 
-/// Queries the private rust-analyzer backend at the declaration ident and
-/// merges its Rust-file edits into the plan: the backend wins for `.rs`
-/// spans both sides touch (decl ident, router mounts), typeweld keeps every
-/// non-Rust edit and any span the backend missed. Backend failures only cost
-/// semantic coverage — the contract-based plan still applies unchanged.
-fn merge_semantic_edits(
-    state: &State,
-    backend: &mut RustBackend,
-    decl_span: &Span,
-    new_name: &str,
-    edits: &mut Vec<Edit>,
-) {
-    let path = state.root().join(&decl_span.file);
-    let Some(text) = state.read_text(&path) else {
-        return;
-    };
-    // The backend always speaks UTF-16, independent of the editor encoding.
-    let position = convert::position_at(&text, decl_span.start, Encoding::Utf16);
-    let timeout = RustBackend::request_timeout();
-    let workspace_edit = match backend.rename(&path, position, new_name, timeout) {
-        Ok(Some(workspace_edit)) => workspace_edit,
-        Ok(None) => return,
-        Err(message) => {
-            eprintln!("typeweld-ls: semantic Rust rename unavailable: {message}");
-            return;
-        }
-    };
-    let backend_edits = flatten_backend_edits(state, &workspace_edit, is_rust);
-    if backend_edits.is_empty() {
-        return;
-    }
-    edits.retain(|edit| {
-        !is_rust(&edit.path)
-            || !backend_edits.iter().any(|other| {
-                other.path == edit.path && other.start < edit.end && edit.start < other.end
-            })
-    });
-    edits.extend(backend_edits);
-}
-
-/// Queries the private typescript-language-server backend at the generated
-/// property declaration (the anchor mark) and merges the user-code `.ts`
-/// edits into the plan. Edits inside generated package directories are
-/// dropped — regeneration rewrites the anchor itself. An answer with zero
-/// user-file edits is retried once after a short pause, because tsserver
-/// serves partial answers while the project is still loading (a genuinely
-/// unused property legitimately yields nothing on the retry too). Backend
-/// failures only cost TS coverage — the Rust-side plan applies unchanged.
-#[allow(clippy::too_many_arguments)]
-fn merge_ts_property_edits(
-    state: &State,
-    backend: &mut TsBackend,
-    snapshot: &Snapshot,
-    package: &PackageSnapshot,
-    id: &SymbolId,
-    kind: MarkKind,
-    new_name: &str,
-    edits: &mut Vec<Edit>,
-) {
-    let Some(mark) = package
-        .marks
-        .iter()
-        .find(|mark| mark.kind == kind && &mark.symbol_id == id)
-    else {
-        return;
-    };
-    let anchor = package.package_dir.join(&mark.file);
-    let timeout = TsBackend::request_timeout();
-    let is_user_ts = |path: &Path| {
-        has_extension(path, &["ts", "tsx"])
-            && !snapshot
-                .packages
-                .iter()
-                .any(|package| path.starts_with(&package.package_dir))
-    };
-
-    for retry in [false, true] {
-        let workspace_edit =
-            match backend.rename(&anchor, mark.line, mark.character, new_name, timeout) {
-                Ok(Some(workspace_edit)) => workspace_edit,
-                Ok(None) => WorkspaceEdit::default(),
-                Err(message) => {
-                    eprintln!("typeweld-ls: semantic TypeScript rename unavailable: {message}");
-                    return;
-                }
-            };
-        let backend_edits = flatten_backend_edits(state, &workspace_edit, is_user_ts);
-        if !backend_edits.is_empty() {
-            edits.extend(backend_edits);
-            return;
-        }
-        if retry {
-            return;
-        }
-        // Zero user-file edits: the project may still have been loading.
-        std::thread::sleep(Duration::from_millis(1500));
-    }
-}
-
-fn is_rust(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
-}
-
-fn has_extension(path: &Path, extensions: &[&str]) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extensions.contains(&extension))
-}
-
-/// Flattens a backend `WorkspaceEdit` into byte-range edits over the files
-/// `keep` accepts, decoding the child's UTF-16 ranges against the current
-/// document text. Generated package dirs are additionally filtered in
-/// [`build_workspace_edit`].
-fn flatten_backend_edits(
-    state: &State,
-    workspace_edit: &WorkspaceEdit,
-    keep: impl Fn(&Path) -> bool,
-) -> Vec<Edit> {
-    let mut edits = Vec::new();
-    let mut push = |uri: &Uri, text_edits: &mut dyn Iterator<Item = &TextEdit>| {
-        let Some(path) = uri_to_path(uri) else {
-            return;
-        };
-        if !keep(&path) {
-            return;
-        }
-        let Some(text) = state.read_text(&path) else {
-            return;
-        };
-        for text_edit in text_edits {
-            edits.push(Edit {
-                path: path.clone(),
-                start: convert::offset_at(&text, text_edit.range.start, Encoding::Utf16),
-                end: convert::offset_at(&text, text_edit.range.end, Encoding::Utf16),
-                new_text: text_edit.new_text.clone(),
-            });
-        }
-    };
-
-    if let Some(changes) = &workspace_edit.changes {
-        for (uri, text_edits) in changes {
-            push(uri, &mut text_edits.iter());
-        }
-    }
-    let documents: Vec<&TextDocumentEdit> = match &workspace_edit.document_changes {
-        Some(DocumentChanges::Edits(documents)) => documents.iter().collect(),
-        Some(DocumentChanges::Operations(operations)) => operations
-            .iter()
-            .filter_map(|operation| match operation {
-                DocumentChangeOperation::Edit(document) => Some(document),
-                DocumentChangeOperation::Op(_) => None,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    for document in documents {
-        let mut text_edits = document.edits.iter().map(|edit| match edit {
-            OneOf::Left(text_edit) => text_edit,
-            OneOf::Right(annotated) => &annotated.text_edit,
-        });
-        push(&document.text_document.uri, &mut text_edits);
-    }
-    edits
-}
-
 fn is_identifier(name: &str) -> bool {
     let mut characters = name.chars();
     characters
@@ -449,108 +649,6 @@ fn push_usage_edit(
         end: usage.end,
         new_text: replacement,
     });
-}
-
-/// Renames an endpoint, returning the Rust-side new name (mapped back from
-/// camelCase when the rename originated in TypeScript).
-fn rename_endpoint(
-    state: &State,
-    package: &PackageSnapshot,
-    endpoint: &Endpoint,
-    new_name: &str,
-    from_rust: bool,
-    edits: &mut Vec<Edit>,
-) -> Result<String, String> {
-    let rust_new = if from_rust {
-        new_name.to_owned()
-    } else {
-        let snake = to_snake_case(new_name);
-        if to_camel_case(&snake) != new_name {
-            return Err(format!(
-                "ambiguous casing: `{new_name}` does not round-trip through `{snake}`"
-            ));
-        }
-        snake
-    };
-
-    push_span_edit(state, &endpoint.spans.name, rust_new.clone(), edits);
-    for mount in &endpoint.router_mounts {
-        let path = state.root().join(&mount.file);
-        let Some(text) = state.read_text(&path) else {
-            continue;
-        };
-        if let Some((start, end)) = trailing_ident(&text, mount, &endpoint.rust_name) {
-            edits.push(Edit {
-                path,
-                start,
-                end,
-                new_text: rust_new.clone(),
-            });
-        }
-    }
-
-    let ts_new = to_camel_case(&rust_new);
-    let route_old = format!("{}Route", endpoint.ts_name);
-    for usage in package.usage.refs_for(&endpoint.id) {
-        match usage.kind {
-            UsageKind::Endpoint => {
-                push_usage_edit(state, usage, &endpoint.ts_name, ts_new.clone(), edits);
-            }
-            UsageKind::Route => {
-                push_usage_edit(state, usage, &route_old, format!("{ts_new}Route"), edits);
-            }
-            _ => {}
-        }
-    }
-    Ok(rust_new)
-}
-
-/// Renames a type or error declaration: the name is the same on both sides,
-/// so TS usages are edited only when the TS name was derived (identical).
-#[allow(clippy::too_many_arguments)]
-fn rename_decl(
-    state: &State,
-    package: &PackageSnapshot,
-    id: &SymbolId,
-    spans: &DeclSpans,
-    rust_name: &str,
-    ts_name: &str,
-    new_name: &str,
-    edits: &mut Vec<Edit>,
-) {
-    push_span_edit(state, &spans.name, new_name.to_owned(), edits);
-    if ts_name != rust_name {
-        return;
-    }
-    for usage in package.usage.refs_for(id) {
-        if matches!(usage.kind, UsageKind::Type | UsageKind::Error) {
-            push_usage_edit(state, usage, ts_name, new_name.to_owned(), edits);
-        }
-    }
-}
-
-fn rename_error_variant(
-    state: &State,
-    package: &PackageSnapshot,
-    variant: &ErrorVariant,
-    new_name: &str,
-    edits: &mut Vec<Edit>,
-) {
-    push_span_edit(state, &variant.spans.name, new_name.to_owned(), edits);
-    // Only derived tags follow the Rust name; explicit serde renames pin the
-    // wire tag, so TS stays untouched.
-    let new_tag = if variant.tag == variant.rust_name {
-        new_name.to_owned()
-    } else if variant.tag == to_camel_case(&variant.rust_name) {
-        to_camel_case(new_name)
-    } else {
-        return;
-    };
-    for usage in package.usage.refs_for(&variant.id) {
-        if matches!(usage.kind, UsageKind::ErrorVariant | UsageKind::ErrorTag) {
-            push_usage_edit(state, usage, &variant.tag, new_tag.clone(), edits);
-        }
-    }
 }
 
 fn build_workspace_edit(

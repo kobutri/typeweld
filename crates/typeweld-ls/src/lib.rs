@@ -1,26 +1,33 @@
 //! The typeweld language server.
 //!
-//! A standalone *sidecar* server: the editor keeps running its normal
-//! rust-analyzer and tsserver untouched, while typeweld-ls attaches to both
-//! Rust and TypeScript files and contributes only the cross-language features
-//! the contract makes possible — goto-definition and references across the
-//! Rust/TypeScript boundary, contract hovers, bidirectional rename, live
-//! regeneration of the client package, and extraction diagnostics.
+//! typeweld-ls is the Rust language server the editor runs: behind it lives
+//! the user's real rust-analyzer, transparently proxied, while typeweld
+//! contributes the cross-language features the contract makes possible —
+//! TypeScript halves of renames, TypeScript usages in references, contract
+//! hovers, live regeneration of the client package, and extraction
+//! diagnostics. The TypeScript side is served by `@typeweld/typescript-plugin`
+//! running inside the user's own tsserver, connected back over the discovery
+//! file `target/typeweld/ls.json`.
+//!
+//! Without a usable rust-analyzer the server degrades to engine-only
+//! answers; Rust editing then falls back to whatever the editor has.
 
 mod convert;
 mod features;
-mod rust_backend;
-mod server;
+mod plugin;
+mod proxy;
+mod ra;
 mod state;
-mod ts_backend;
+
+pub use proxy::Options;
 
 /// Runs the language server on stdio.
 ///
 /// # Errors
 /// Returns an error description when the handshake or transport fails.
-pub fn run_stdio() -> Result<(), String> {
+pub fn run_stdio(options: &Options) -> Result<(), String> {
     let (connection, io_threads) = lsp_server::Connection::stdio();
-    let result = server::run(&connection);
+    let result = proxy::run(&connection, options);
     // The writer thread only finishes once the connection's channel closes.
     drop(connection);
     io_threads.join().map_err(|error| error.to_string())?;
@@ -36,5 +43,5 @@ pub fn run_stdio() -> Result<(), String> {
 // By value on purpose: the server owns the connection for its whole lifetime.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run_with_connection(connection: lsp_server::Connection) -> Result<(), String> {
-    server::run(&connection)
+    proxy::run(&connection, &Options::default())
 }

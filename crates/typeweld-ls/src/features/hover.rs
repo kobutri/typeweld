@@ -15,7 +15,41 @@ pub fn handle(state: &State, params: &HoverParams) -> Option<Hover> {
     let snapshot = state.snapshot()?;
     let package = &snapshot.packages[resolved.package];
     let symbol = package.symbol_by_id(&resolved.id)?;
+    let value = markdown_for_symbol(package, symbol)?;
 
+    let text = state.read_text(&resolved.path)?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(convert::range(
+            &text,
+            resolved.start,
+            resolved.end,
+            state.encoding(),
+        )),
+    })
+}
+
+/// The contract hover markdown at a position, for response augmentation.
+pub fn contract_markdown(
+    state: &State,
+    uri: &lsp_types::Uri,
+    position: lsp_types::Position,
+) -> Option<String> {
+    let resolved = resolve(state, uri, position)?;
+    let snapshot = state.snapshot()?;
+    let package = &snapshot.packages[resolved.package];
+    let symbol = package.symbol_by_id(&resolved.id)?;
+    markdown_for_symbol(package, symbol)
+}
+
+/// The contract hover markdown for one symbol.
+pub(crate) fn markdown_for_symbol(
+    package: &PackageSnapshot,
+    symbol: &crate::state::RustSymbol,
+) -> Option<String> {
     let value = match symbol.info {
         SymbolInfo::Endpoint(index) => render_endpoint(package, &package.contract.endpoints[index]),
         SymbolInfo::Type(index) => render_type(package, &package.contract.types[index]),
@@ -46,20 +80,7 @@ pub fn handle(state: &State, params: &HoverParams) -> Option<Hover> {
             render_param(declaration, params.get(param)?, query)
         }
     };
-
-    let text = state.read_text(&resolved.path)?;
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value,
-        }),
-        range: Some(convert::range(
-            &text,
-            resolved.start,
-            resolved.end,
-            state.encoding(),
-        )),
-    })
+    Some(value)
 }
 
 fn field_decl(package: &PackageSnapshot, owner: FieldOwner, field: usize) -> Option<&Field> {
