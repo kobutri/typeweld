@@ -12,6 +12,8 @@ pub struct PrintedMark {
     pub start: u32,
     pub end: u32,
 }
+arts
+arst
 
 pub struct Printer {
     out: String,

@@ -1,6 +1,6 @@
 {
   "name": "typeweld",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "CLI launcher for the Typeweld Rust-to-TypeScript Effect client generator.",
   "license": "MIT OR Apache-2.0",
   "repository": {

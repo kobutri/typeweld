@@ -79,7 +79,10 @@ jobs:
 
           publish_crate() {
             local crate="$1"
-            if curl --silent --fail "https://crates.io/api/v1/crates/$crate/$version" >/dev/null; then
+            # crates.io rejects requests without a descriptive User-Agent.
+            if curl --silent --fail \
+                 --user-agent "typeweld release workflow (github.com/kobutri/typeweld)" \
+                 "https://crates.io/api/v1/crates/$crate/$version" >/dev/null; then
               echo "$crate@$version is already published; skipping"
               return
             fi

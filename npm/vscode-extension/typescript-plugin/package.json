@@ -1,6 +1,6 @@
 {
   "name": "@typeweld/typescript-plugin",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "type": "commonjs",
   "description": "Typeweld tsserver plugin: cross-language navigation, hovers, and renames inside your own TypeScript server.",
   "license": "MIT OR Apache-2.0",
