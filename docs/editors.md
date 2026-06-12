@@ -81,5 +81,8 @@ For TypeScript, configure typescript-language-server with the same
 
 Renames work in-band in every editor: rename a Rust API symbol and the
 response already contains the TypeScript edits; rename in TypeScript and
-typeweld applies the Rust half via `workspace/applyEdit` right after the
-editor applies the TypeScript side.
+typeweld applies the Rust half right after the editor applies the
+TypeScript side — straight to disk for files the editor does not have
+open, via `workspace/applyEdit` for the rest. In VS Code the extension
+then saves the edited documents, matching how the editor saves its own
+rename refactorings.

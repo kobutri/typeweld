@@ -15,6 +15,7 @@
 // directly.
 
 import * as fs from "node:fs"
+import * as net from "node:net"
 import * as path from "node:path"
 
 import * as vscode from "vscode"
@@ -36,7 +37,102 @@ const documentSelector = [{ scheme: "file", language: "rust" }]
 let extensionContext: vscode.ExtensionContext | undefined
 let outputChannel: vscode.LogOutputChannel | undefined
 let client: LanguageClient | undefined
+let daemonLink: DaemonLink | undefined
 let reconcileQueue = Promise.resolve()
+
+/**
+ * A connection to the typeweld language server's local socket (discovered
+ * through `target/typeweld/ls.json`), as an "editor" session. The server
+ * asks us to save the files its cross-language edits touched: VS Code
+ * auto-saves files affected by its own rename refactorings, but a
+ * server-applied `workspace/applyEdit` gets no such treatment.
+ */
+class DaemonLink {
+  private socket: net.Socket | undefined
+  private buffer = ""
+  private readonly timer: NodeJS.Timeout
+
+  constructor(private readonly root: string) {
+    this.connect()
+    this.timer = setInterval(() => {
+      if (this.socket === undefined) {
+        this.connect()
+      }
+    }, 5000)
+  }
+
+  dispose(): void {
+    clearInterval(this.timer)
+    this.socket?.destroy()
+    this.socket = undefined
+  }
+
+  private connect(): void {
+    let discovered: { port?: number; token?: string }
+    try {
+      discovered = JSON.parse(
+        fs.readFileSync(
+          path.join(this.root, "target", "typeweld", "ls.json"),
+          "utf8",
+        ),
+      ) as { port?: number; token?: string }
+    } catch {
+      return
+    }
+    if (typeof discovered.port !== "number" || typeof discovered.token !== "string") {
+      return
+    }
+    const socket = net.connect(discovered.port, "127.0.0.1")
+    socket.setNoDelay(true)
+    socket.on("connect", () => {
+      this.socket = socket
+      this.buffer = ""
+      socket.write(
+        JSON.stringify({
+          method: "hello",
+          kind: "editor",
+          token: discovered.token,
+          pid: process.pid,
+        }) + "\n",
+      )
+      log("Connected to the typeweld language server socket.")
+    })
+    socket.on("data", (data) => this.onData(data.toString()))
+    const drop = () => {
+      if (this.socket === socket) this.socket = undefined
+      socket.destroy()
+    }
+    socket.on("error", drop)
+    socket.on("close", drop)
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk
+    let index: number
+    while ((index = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, index)
+      this.buffer = this.buffer.slice(index + 1)
+      if (line.trim() === "") continue
+      try {
+        this.onMessage(JSON.parse(line) as Record<string, unknown>)
+      } catch {
+        // Malformed message: ignore.
+      }
+    }
+  }
+
+  private onMessage(message: Record<string, unknown>): void {
+    if (message["method"] !== "saveFiles" || !Array.isArray(message["files"])) {
+      return
+    }
+    for (const file of message["files"]) {
+      if (typeof file !== "string") continue
+      void vscode.workspace.save(vscode.Uri.file(file)).then(undefined, () => {
+        // The document may already be closed or saved; nothing to do.
+      })
+    }
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context
@@ -70,6 +166,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export async function deactivate(): Promise<void> {
   extensionContext = undefined
+  daemonLink?.dispose()
+  daemonLink = undefined
   await stopClient()
 }
 
@@ -99,7 +197,13 @@ async function reconcile(): Promise<void> {
       )
       await stopClient()
     }
+    daemonLink?.dispose()
+    daemonLink = undefined
     return
+  }
+  const root = typeweldRoot()
+  if (daemonLink === undefined && root !== undefined) {
+    daemonLink = new DaemonLink(root)
   }
 
   // With the rust-analyzer extension installed, that extension stays the
@@ -243,6 +347,22 @@ async function hasTypeweldWorkspace(): Promise<boolean> {
     1,
   )
   return nested.length > 0
+}
+
+/** The directory containing `typeweld.toml`, from the workspace folders. */
+function typeweldRoot(): string | undefined {
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    let current = path.resolve(folder.uri.fsPath)
+    while (true) {
+      if (fs.existsSync(path.join(current, workspaceMarker))) {
+        return current
+      }
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+  return undefined
 }
 
 function hasMarkerInOrAbove(startDir: string): boolean {

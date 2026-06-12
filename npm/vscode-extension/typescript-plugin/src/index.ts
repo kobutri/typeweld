@@ -253,6 +253,7 @@ class Daemon {
       socket.write(
         JSON.stringify({
           method: "hello",
+          kind: "tsplugin",
           token: discovered.token,
           pid: process.pid,
         }) + "\n",

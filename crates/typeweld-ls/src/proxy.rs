@@ -125,6 +125,7 @@ pub fn run(connection: &Connection, options: &Options) -> Result<(), String> {
         our_diagnostics: HashMap::new(),
         next_internal: 0,
         pushed_generation: 0,
+        pending_saves: HashMap::new(),
         shutting_down: false,
     };
     if let Some(error) = spawn_error {
@@ -187,6 +188,10 @@ struct Proxy<'a> {
     next_internal: u64,
     /// The engine generation last pushed to the plugins.
     pushed_generation: u64,
+    /// Outstanding `workspace/applyEdit` requests and the files to ask the
+    /// editor extension to save once the editor confirms the edit (editors
+    /// auto-save their own rename edits, but not server-applied ones).
+    pending_saves: HashMap<RequestId, Vec<String>>,
     shutting_down: bool,
 }
 
@@ -269,7 +274,21 @@ impl Proxy<'_> {
             Message::Response(response) => {
                 // The editor answering a server-to-client request: ours are
                 // namespaced, everything else belongs to rust-analyzer.
-                if !id_text(&response.id).starts_with("typeweld") {
+                if id_text(&response.id).starts_with("typeweld") {
+                    if let Some(files) = self.pending_saves.remove(&response.id) {
+                        let applied = response
+                            .result
+                            .as_ref()
+                            .and_then(|result| result.get("applied"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        if applied {
+                            if let Some(hub) = &self.plugin {
+                                hub.request_saves(&files);
+                            }
+                        }
+                    }
+                } else {
                     self.forward_to_ra(&Message::Response(response));
                 }
                 false
@@ -430,11 +449,19 @@ impl Proxy<'_> {
             let _ = std::fs::write(&path, text);
         }
         if !open.is_empty() {
-            self.apply_edit(&WorkspaceEdit {
+            let files: Vec<String> = open
+                .iter()
+                .filter_map(|document| uri_to_path(&document.text_document.uri))
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            let id = self.apply_edit(&WorkspaceEdit {
                 changes: None,
                 document_changes: Some(lsp_types::DocumentChanges::Edits(open)),
                 change_annotations: None,
             });
+            if let Some(id) = id {
+                self.pending_saves.insert(id, files);
+            }
         }
         self.state.mark_dirty();
         self.refresh();
@@ -687,17 +714,18 @@ impl Proxy<'_> {
     }
 
     /// Applies a workspace edit through the editor.
-    fn apply_edit(&mut self, edit: &WorkspaceEdit) {
+    fn apply_edit(&mut self, edit: &WorkspaceEdit) -> Option<RequestId> {
         let empty = edit.document_changes.is_none() && edit.changes.is_none();
         if empty {
-            return;
+            return None;
         }
         let id = self.fresh_internal_id("apply");
         self.send(Message::Request(Request::new(
-            id,
+            id.clone(),
             "workspace/applyEdit".to_owned(),
             serde_json::json!({ "edit": edit }),
         )));
+        Some(id)
     }
 
     fn fresh_internal_id(&mut self, kind: &str) -> RequestId {

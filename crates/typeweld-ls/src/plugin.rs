@@ -53,7 +53,17 @@ struct Shared {
     next_query: AtomicI64,
 }
 
+/// Who is on the other end of a session: the tsserver plugin (answers
+/// semantic queries, receives snapshots) or an editor extension (receives
+/// save requests after cross-language edits).
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SessionKind {
+    TsPlugin,
+    Editor,
+}
+
 struct Session {
+    kind: SessionKind,
     writer: Arc<Mutex<TcpStream>>,
     pending: Arc<Mutex<HashMap<i64, crossbeam_channel::Sender<serde_json::Value>>>>,
     alive: Arc<AtomicBool>,
@@ -110,7 +120,23 @@ impl PluginHub {
         *self.shared.snapshot.lock().expect("snapshot lock") = Some(line.clone());
         let sessions = self.shared.sessions.lock().expect("sessions lock");
         for session in sessions.iter() {
-            if session.alive.load(Ordering::Relaxed) {
+            if session.kind == SessionKind::TsPlugin && session.alive.load(Ordering::Relaxed) {
+                let _ = write_line(&session.writer, &line);
+            }
+        }
+    }
+
+    /// Asks connected editor extensions to save `files` — the cross-language
+    /// half of a rename was just applied through `workspace/applyEdit`, which
+    /// editors do not auto-save the way they save their own rename edits.
+    pub fn request_saves(&self, files: &[String]) {
+        if files.is_empty() {
+            return;
+        }
+        let line = serde_json::json!({ "method": "saveFiles", "files": files }).to_string();
+        let sessions = self.shared.sessions.lock().expect("sessions lock");
+        for session in sessions.iter() {
+            if session.kind == SessionKind::Editor && session.alive.load(Ordering::Relaxed) {
                 let _ = write_line(&session.writer, &line);
             }
         }
@@ -140,7 +166,9 @@ impl PluginHub {
             let session = sessions
                 .iter()
                 .rev()
-                .find(|session| session.alive.load(Ordering::Relaxed))
+                .find(|session| {
+                    session.kind == SessionKind::TsPlugin && session.alive.load(Ordering::Relaxed)
+                })
                 .ok_or_else(|| "no TypeScript plugin connected".to_owned())?;
             let (sender, receiver) = crossbeam_channel::bounded(1);
             session
@@ -192,10 +220,17 @@ fn serve_plugin(
     {
         return;
     }
+    let kind = if hello.get("kind").and_then(serde_json::Value::as_str) == Some("editor") {
+        SessionKind::Editor
+    } else {
+        SessionKind::TsPlugin
+    };
 
-    if let Some(snapshot) = shared.snapshot.lock().expect("snapshot lock").clone() {
-        if write_line(&writer, &snapshot).is_err() {
-            return;
+    if kind == SessionKind::TsPlugin {
+        if let Some(snapshot) = shared.snapshot.lock().expect("snapshot lock").clone() {
+            if write_line(&writer, &snapshot).is_err() {
+                return;
+            }
         }
     }
 
@@ -207,6 +242,7 @@ fn serve_plugin(
         .lock()
         .expect("sessions lock")
         .push(Session {
+            kind,
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             alive: Arc::clone(&alive),

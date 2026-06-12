@@ -178,6 +178,48 @@ impl LsClient {
             .expect("send");
     }
 
+    fn open(&self, path: &Path, language: &str, text: &str) {
+        self.notify(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri(path),
+                    "languageId": language,
+                    "version": 1,
+                    "text": text,
+                },
+            }),
+        );
+    }
+
+    /// Waits for a server-initiated request with `method`, answering
+    /// `workspace/applyEdit` with `applied: true` and everything else with
+    /// null. Returns the request params.
+    fn wait_for_request(&mut self, method: &str, timeout: Duration) -> Option<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(message) = self.connection.receiver.recv_timeout(remaining) else {
+                return None;
+            };
+            if let Message::Request(request) = message {
+                let params = request.params.clone();
+                let answer = if request.method == "workspace/applyEdit" {
+                    serde_json::json!({ "applied": true })
+                } else {
+                    serde_json::Value::Null
+                };
+                let _ = self
+                    .connection
+                    .sender
+                    .send(Message::Response(Response::new_ok(request.id, answer)));
+                if request.method == method {
+                    return Some(params);
+                }
+            }
+        }
+    }
+
     fn request_value(
         &mut self,
         method: &str,
@@ -599,4 +641,101 @@ fn plugin_serves_cross_language_features() {
         );
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// A raw daemon-socket session for protocol tests.
+struct RawSession {
+    stream: std::net::TcpStream,
+    reader: BufReader<std::net::TcpStream>,
+}
+
+impl RawSession {
+    fn connect(root: &Path, kind: &str) -> Self {
+        let discovery: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("target/typeweld/ls.json")).expect("ls.json"),
+        )
+        .expect("discovery json");
+        let port = discovery["port"].as_u64().expect("port");
+        let token = discovery["token"].as_str().expect("token");
+        let stream =
+            std::net::TcpStream::connect(("127.0.0.1", u16::try_from(port).expect("port")))
+                .expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("timeout");
+        let reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut session = Self { stream, reader };
+        session.send(&serde_json::json!({
+            "method": "hello",
+            "kind": kind,
+            "token": token,
+            "pid": std::process::id(),
+        }));
+        session
+    }
+
+    fn send(&mut self, message: &serde_json::Value) {
+        let line = format!("{message}\n");
+        self.stream.write_all(line.as_bytes()).expect("write");
+    }
+
+    fn read_message(&mut self) -> serde_json::Value {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).expect("read line");
+        serde_json::from_str(&line).expect("json line")
+    }
+}
+
+/// TypeScript-initiated renames of files the editor has open round-trip
+/// through `workspace/applyEdit` and end with a save request to the editor
+/// session, mirroring how the editor saves its own rename edits.
+#[test]
+fn ts_initiated_rename_saves_open_documents() {
+    let dir = fixture();
+    let root = dir.path();
+    let mut ls = LsClient::start(root);
+    let lib_rs = root.join("server/src/lib.rs");
+    ls.open(&lib_rs, "rust", LIB_RS);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("target/typeweld/ls.json").is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The tsplugin session receives the snapshot on hello; pick a field mark
+    // to impersonate a TypeScript-initiated rename of that field.
+    let mut tsplugin = RawSession::connect(root, "tsplugin");
+    let snapshot = tsplugin.read_message();
+    assert_eq!(snapshot["method"], "snapshot");
+    let symbol = snapshot["marks"]
+        .as_array()
+        .expect("marks")
+        .iter()
+        .find(|mark| mark["kind"] == "Field")
+        .and_then(|mark| mark["symbol"].as_str())
+        .expect("a field mark")
+        .to_owned();
+
+    let mut editor = RawSession::connect(root, "editor");
+    tsplugin.send(&serde_json::json!({
+        "method": "renameLanded",
+        "symbol": symbol,
+        "newName": "nickname",
+    }));
+
+    // lib.rs is open, so the Rust complement arrives as applyEdit…
+    let apply = ls
+        .wait_for_request("workspace/applyEdit", Duration::from_secs(30))
+        .expect("applyEdit for the open document");
+    let rendered = apply.to_string();
+    assert!(rendered.contains("lib.rs"), "complement edit: {rendered}");
+    assert!(rendered.contains("nickname"), "complement edit: {rendered}");
+
+    // …and once the editor confirms it, the editor session is asked to save.
+    let save = editor.read_message();
+    assert_eq!(save["method"], "saveFiles", "got: {save}");
+    assert!(
+        save["files"].to_string().contains("lib.rs"),
+        "save request must cover the edited file: {save}"
+    );
 }
