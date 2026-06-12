@@ -130,7 +130,8 @@ jobs:
       - name: Publish platform binary packages
         run: |
           for dir in dist-platform/*; do
-            npm publish "$dir" --provenance --access public
+            # ./ prefix: a bare a/b argument is parsed as a GitHub repo spec
+            npm publish "./$dir" --provenance --access public
           done
       - name: Inject platform optionalDependencies into the launcher
         run: node scripts/inject-platform-optional-deps.mjs
@@ -159,9 +160,11 @@ jobs:
           path: artifacts
       - run: npm ci
         working-directory: npm
-      - name: Bundle extension with binaries
+      - name: Compile extension
+        run: npm run compile --workspace typeweld-vscode
+        working-directory: npm
+      - name: Bundle binaries into the extension
         run: |
-          npm run compile --workspace typeweld-vscode
           mkdir -p npm/vscode-extension/bin
           cp -r artifacts/typeweld-*/. npm/vscode-extension/bin/
       - name: Package VSIX
