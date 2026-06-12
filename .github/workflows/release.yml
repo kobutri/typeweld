@@ -61,6 +61,7 @@ jobs:
   publish-crates:
     name: Publish crates.io packages
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       id-token: write # crates.io trusted publishing
@@ -110,6 +111,7 @@ jobs:
     name: Publish npm packages
     needs: build-binaries
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       id-token: write # npm provenance
@@ -148,6 +150,7 @@ jobs:
     name: Publish VS Code extension
     needs: build-binaries
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
