@@ -235,6 +235,9 @@ class Daemon {
           method: "renameLanded",
           symbol: pending.symbol,
           newName: name,
+          // The user files the editor's own rename edited; the daemon asks
+          // the editor extension to save them along with the Rust half.
+          files: pending.probes.map((probe) => probe.fileName),
         })
         return
       }

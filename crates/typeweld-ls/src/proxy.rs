@@ -126,6 +126,7 @@ pub fn run(connection: &Connection, options: &Options) -> Result<(), String> {
         next_internal: 0,
         pushed_generation: 0,
         pending_saves: HashMap::new(),
+        pending_ts_saves: HashMap::new(),
         shutting_down: false,
     };
     if let Some(error) = spawn_error {
@@ -192,6 +193,9 @@ struct Proxy<'a> {
     /// editor extension to save once the editor confirms the edit (editors
     /// auto-save their own rename edits, but not server-applied ones).
     pending_saves: HashMap<RequestId, Vec<String>>,
+    /// TypeScript files awaiting a save once the injected rename whose id
+    /// keys them comes back from rust-analyzer.
+    pending_ts_saves: HashMap<RequestId, Vec<String>>,
     shutting_down: bool,
 }
 
@@ -371,7 +375,11 @@ impl Proxy<'_> {
     /// Reacts to a plugin event: a TypeScript-initiated rename of an API
     /// symbol whose Rust complement we now owe.
     fn on_plugin_event(&mut self, event: PluginEvent) {
-        let PluginEvent::RenameLanded { symbol, new_name } = event;
+        let PluginEvent::RenameLanded {
+            symbol,
+            new_name,
+            files,
+        } = event;
         self.state.ensure_fresh();
         let Some(plan) = features::rename::rust_complement(&self.state, &symbol, &new_name) else {
             return;
@@ -380,6 +388,7 @@ impl Proxy<'_> {
             (Some((path, position)), Some(_)) => {
                 let id = self.fresh_internal_id("rename");
                 self.injected_renames.insert(id.clone());
+                self.pending_ts_saves.insert(id.clone(), files);
                 let params = serde_json::json!({
                     "textDocument": { "uri": path_to_uri(path) },
                     "position": position,
@@ -393,12 +402,16 @@ impl Proxy<'_> {
             }
             _ => {
                 // No semantic backend: apply the contract-known Rust edits.
-                self.apply_rust_complement(&plan.fallback_edit);
+                self.apply_rust_complement(&plan.fallback_edit, files);
             }
         }
     }
 
     fn on_injected_rename_response(&mut self, response: Response) {
+        let ts_files = self
+            .pending_ts_saves
+            .remove(&response.id)
+            .unwrap_or_default();
         let Some(result) = response.result else {
             return;
         };
@@ -406,14 +419,18 @@ impl Proxy<'_> {
             return;
         };
         let rust_only = features::rename::filter_to_rust(edit);
-        self.apply_rust_complement(&rust_only);
+        self.apply_rust_complement(&rust_only, ts_files);
     }
 
     /// Applies the Rust complement of a TypeScript-initiated rename: files
     /// the editor has open go through `workspace/applyEdit`; everything else
     /// is written straight to disk so no buffers are left dirty. Regeneration
     /// follows immediately instead of waiting for watcher events.
-    fn apply_rust_complement(&mut self, edit: &WorkspaceEdit) {
+    ///
+    /// `ts_files` are the TypeScript files the editor's own rename edited;
+    /// they are saved together with the Rust half so the whole cross-language
+    /// rename ends clean, the way native renames do.
+    fn apply_rust_complement(&mut self, edit: &WorkspaceEdit, ts_files: Vec<String>) {
         let mut open = Vec::new();
         for document in features::rename::document_edits(edit) {
             let Some(path) = uri_to_path(&document.text_document.uri) else {
@@ -448,12 +465,19 @@ impl Proxy<'_> {
             }
             let _ = std::fs::write(&path, text);
         }
-        if !open.is_empty() {
-            let files: Vec<String> = open
+        if open.is_empty() {
+            // Nothing for the editor to apply; the TypeScript side still
+            // wants saving.
+            if let Some(hub) = &self.plugin {
+                hub.request_saves(&ts_files);
+            }
+        } else {
+            let mut files: Vec<String> = open
                 .iter()
                 .filter_map(|document| uri_to_path(&document.text_document.uri))
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect();
+            files.extend(ts_files);
             let id = self.apply_edit(&WorkspaceEdit {
                 changes: None,
                 document_changes: Some(lsp_types::DocumentChanges::Edits(open)),

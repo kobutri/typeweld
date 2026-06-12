@@ -721,6 +721,7 @@ fn ts_initiated_rename_saves_open_documents() {
         "method": "renameLanded",
         "symbol": symbol,
         "newName": "nickname",
+        "files": [root.join("app/src/main.ts").to_string_lossy()],
     }));
 
     // lib.rs is open, so the Rust complement arrives as applyEdit…
@@ -734,8 +735,13 @@ fn ts_initiated_rename_saves_open_documents() {
     // …and once the editor confirms it, the editor session is asked to save.
     let save = editor.read_message();
     assert_eq!(save["method"], "saveFiles", "got: {save}");
+    let files = save["files"].to_string();
     assert!(
-        save["files"].to_string().contains("lib.rs"),
-        "save request must cover the edited file: {save}"
+        files.contains("lib.rs"),
+        "save request must cover the Rust complement: {save}"
+    );
+    assert!(
+        files.contains("main.ts"),
+        "save request must cover the editor's own TypeScript edits: {save}"
     );
 }

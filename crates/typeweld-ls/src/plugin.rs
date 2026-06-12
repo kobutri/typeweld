@@ -26,8 +26,14 @@ use crossbeam_channel::Receiver;
 #[derive(Debug)]
 pub enum PluginEvent {
     /// The editor applied a TypeScript-side rename of an API symbol; the
-    /// Rust complement still needs to happen.
-    RenameLanded { symbol: String, new_name: String },
+    /// Rust complement still needs to happen. `files` are the TypeScript
+    /// files the editor's own rename edited (saved together with the Rust
+    /// half).
+    RenameLanded {
+        symbol: String,
+        new_name: String,
+        files: Vec<String>,
+    },
 }
 
 /// One rename location reported by the plugin, in UTF-16 code units.
@@ -279,8 +285,22 @@ fn serve_plugin(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let files = message
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(|file| file.as_str().map(ToOwned::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             if !symbol.is_empty() && !new_name.is_empty() {
-                let _ = events.send(PluginEvent::RenameLanded { symbol, new_name });
+                let _ = events.send(PluginEvent::RenameLanded {
+                    symbol,
+                    new_name,
+                    files,
+                });
             }
         }
     }
