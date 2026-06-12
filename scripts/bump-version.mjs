@@ -8,7 +8,7 @@
 // Updates, keeping diffs minimal:
 //   - Cargo.toml          workspace.package version + internal path-dep versions
 //   - Cargo.lock          version of each workspace crate (version.workspace = true)
-//   - npm/*/package.json  version (+ typeweld's @typeweld/cli-* optionalDependencies)
+//   - npm/*/package.json  version
 //   - npm/package-lock.json  regenerated via `npm install --package-lock-only`
 //
 // Example crates under examples/ keep their own independent versions.
@@ -74,11 +74,10 @@ const npmPackages = [
 
 for (const pkg of npmPackages) {
   rewrite(pkg, (text) =>
-    text
-      // The package's own version (first "version" key).
-      .replace(/("version":\s*")[^"]+(")/, `$1${version}$2`)
-      // typeweld launcher pins its platform binaries to the same version.
-      .replace(/("@typeweld\/cli-[^"]*":\s*")[^"]+(")/g, `$1${version}$2`),
+    // The package's own version (first "version" key). The launcher's
+    // @typeweld/cli-* optionalDependencies are not pinned here; the release
+    // workflow injects them via scripts/inject-platform-optional-deps.mjs.
+    text.replace(/("version":\s*")[^"]+(")/, `$1${version}$2`),
   );
 }
 

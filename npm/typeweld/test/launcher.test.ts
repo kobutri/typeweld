@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
@@ -22,7 +23,9 @@ const platformPackage = `@typeweld/cli-${process.platform}-${process.arch}`
 let temp: string
 
 beforeEach(() => {
-  temp = mkdtempSync(join(tmpdir(), "typeweld-launcher-"))
+  // realpath so fixture paths match the launcher's realpathSync output even
+  // when the OS tmpdir is behind a symlink (/var -> /private/var on macOS).
+  temp = realpathSync(mkdtempSync(join(tmpdir(), "typeweld-launcher-")))
 })
 
 afterEach(() => {

@@ -24,7 +24,10 @@ typeweld-syntax = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 trybuild = { workspace = true }
-typeweld = { workspace = true }
+# Path-only (no version) so cargo strips this dev-dep from the published
+# manifest; with a version it would create an unpublishable cycle with the
+# typeweld facade on first publish.
+typeweld = { path = "../typeweld" }
 
 [lints]
 workspace = true
