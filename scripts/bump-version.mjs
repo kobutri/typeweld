@@ -48,9 +48,19 @@ rewrite('Cargo.toml', (text) =>
 );
 
 // --- Cargo.lock: every crate that inherits the workspace version. ---
-const workspaceCrates = readdirSync(join(root, 'crates'), { withFileTypes: true })
-  .filter((entry) => entry.isDirectory())
-  .map((entry) => readFileSync(join(root, 'crates', entry.name, 'Cargo.toml'), 'utf8'))
+const workspaceCrates = ['crates', 'examples']
+  .flatMap((dir) =>
+    readdirSync(join(root, dir), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, dir, entry.name, 'Cargo.toml')),
+  )
+  .flatMap((path) => {
+    try {
+      return [readFileSync(path, 'utf8')];
+    } catch {
+      return [];
+    }
+  })
   .filter((toml) => /version\.workspace\s*=\s*true/.test(toml))
   .map((toml) => toml.match(/^name = "([^"]+)"/m)?.[1])
   .filter(Boolean);

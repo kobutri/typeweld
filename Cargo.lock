@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "typeweld-example-basic"
-version = "0.0.6"
+version = "0.0.8"
 dependencies = [
  "axum",
  "futures-util",
