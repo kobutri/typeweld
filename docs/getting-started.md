@@ -1,166 +1,94 @@
-# Getting Started
+# Getting started
 
-This project turns a Rust API contract into an Effect-native TypeScript package.
-Rust remains the source of truth: endpoint routes, request shapes, response
-types, domain errors, and symbol locations all come from Rust metadata.
-
-## Quick start
-
-Create a starter project with the npm CLI:
+## New project
 
 ```sh
-npx typeweld new my-api --yes
-cd my-api
-npm install
-npm run typeweld:check
-npm run typecheck
+typeweld new my-app
+cd my-app
+typeweld generate        # extract + generate the Effect client
+cargo run -p server      # start the API server
+cd app && npm install && npm run typecheck
 ```
 
-The generated project installs `typeweld` as a dev dependency, so its scripts and
-`.typeweld.json` use `typeweld` directly instead of shelling back into this
-repository. When working on Typeweld itself from this checkout, you can still run
-the same CLI with `cargo run -p typeweld-cli --bin typeweld -- ...`.
+`typeweld new` scaffolds a cargo workspace with a `server` crate, a
+TypeScript `app` wired to the generated bindings via tsconfig `paths`, and a
+`typeweld.toml`.
 
-## 0. Install repository TypeScript tooling
+## Existing project
 
-The repository's JavaScript workspace lives under `npm/` and is locked with
-`npm/package-lock.json`:
-
-```sh
-npm --prefix npm ci
-```
-
-Run the same TypeScript validation command used by CI with:
-
-```sh
-npm --prefix npm test
-```
-
-That command typechecks the runtime and language-server wrapper workspaces,
-typechecks the generated-package fixture against the pinned Effect beta, and
-runs the runtime and wrapper tests. For narrower checks, use
-`npm --prefix npm run typecheck:generated`, `npm --prefix npm run test:runtime`,
-or `npm --prefix npm run test:lsp-wrapper`.
-
-## 1. Define Rust API types
-
-```rust
-use typeweld_axum::{ApiRouter, Json, Path};
-use typeweld_macros::{api, api_router, ApiError, ApiType};
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Deserialize, Serialize, ApiType)]
-#[serde(rename_all = "camelCase")]
-pub struct User {
-    pub id: i64,
-    pub display_name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, ApiError)]
-#[serde(tag = "_tag")]
-pub enum GetUserError {
-    #[api_error(status = 404)]
-    UserNotFound { id: i64 },
-}
-
-#[api(method = "GET", path = "/users/{id}")]
-pub async fn get_user(Path(id): Path<i64>) -> Result<Json<User>, GetUserError> {
-    todo!("load user {id}")
-}
-
-#[api_router]
-pub fn routes() -> ApiRouter {
-    ApiRouter::new("users").endpoint(get_user)
-}
-```
-
-The `ApiRouter` is the export boundary. Only endpoints mounted with
-`.endpoint(handler)` are collected and generated for TypeScript. In runnable
-Axum handlers, import `Json`, `Path`, `Query`, `Body`, `Created`, `NoContent`,
-and `Sse` from `typeweld_axum`; the `typeweld_core` wrappers remain available for
-framework-neutral contract-only code.
-
-## 2. Collect the contract
-
-Declare the TypeScript package name and Rust root function in the Rust package
-metadata:
+1. Add the facade crate: `cargo add typeweld` (features: `uuid`, `chrono`,
+   `decimal`, `json` enable those external types in APIs).
+2. Create `typeweld.toml` next to your workspace `Cargo.toml`:
 
 ```toml
-[package.metadata.rust_ts]
-ts_package = "@workspace/server-api"
-api_root = "server::routes"
-features = []
+[[package]]
+cargo = "server"                  # cargo package containing the API
+ts = "@workspace/server-api"      # generated TypeScript package name
+
+[app]
+src = ["app/src/**/*.ts"]         # scanned for usage lints + references
+
+[lint]
+unused-endpoints = "warn"         # off | warn | deny
 ```
 
-```sh
-npm exec -- typeweld collect \
-  --package server \
-  --out target/api-contract/server-api.json
+3. Annotate your API (see below), run `typeweld generate`, and point your
+   app's tsconfig `paths` at `target/typeweld/packages/<name>/index.ts`.
+
+## Declaring an API
+
+**Types** derive `Api` and use plain serde. The supported serde subset is
+deliberately restricted to attributes whose wire effect is statically
+analyzable: `rename`, `rename_all`, `rename_all_fields`, `tag = "_tag"`
+(enums must be internally tagged), `default`,
+`skip_serializing_if = "Option::is_none"`, `transparent`,
+`deny_unknown_fields`. `flatten`, `untagged`, `skip`, and custom
+serializers are compile errors.
+
+**Errors** derive `ApiError` with a `#[status(...)]` per variant. Each
+variant becomes a TypeScript `TaggedErrorClass` catchable with
+`Effect.catchTag("VariantTag", ...)`.
+
+**Endpoints** are Axum handlers annotated with `#[api(method, "/path")]`
+(methods: `get`, `post`, `put`, `patch`, `delete`, `sse`). Parameters use the
+typeweld extractors:
+
+- `Path<T>` — path parameters (must match `{name}` segments in the route)
+- `Query<T>` — at most one; `T` is a struct whose fields become the query
+  parameters (matching Axum's semantics)
+- `Body<T>` — JSON body (`post`/`put`/`patch` only)
+- `Binary<Bytes>` — raw octet-stream body
+
+Returns: `Json<T>`, `Created<T>`, `NoContent`, `Sse<T, S>`,
+`Binary<Bytes>`, or `Result` of those with an `ApiError` enum.
+
+**Routers**: `#[api_router]` functions build an `ApiRouter`, mounting
+handlers with `.endpoint(handler)`. `.nest("/prefix", other_routes())` and
+`.merge(...)` compose routers and are reflected in generated client routes.
+All other Axum composition (`.layer`, `.route_layer`, `.with_state`,
+`.fallback`, raw `.route`) passes straight through.
+
+## The generated client
+
+One package per `[[package]]` entry:
+
+```
+target/typeweld/packages/@workspace/server-api/
+  schemas.ts            # Schema consts + types
+  errors.ts             # error classes + unions + decoders
+  client.ts             # ApiConfig service + layer(config)
+  endpoints/<module>.ts # one accessor per endpoint
+  index.ts
 ```
 
-`#[api_router]` plus `.endpoint(get_user)` is the API export path. The runtime
-router and generated contract come from the same route tree.
+Accessors return `Effect.Effect<Success, DomainError | ApiClientError,
+ApiConfig>` (or `Stream.Stream` for SSE). Provide configuration once with
+`Effect.provide(layer({ baseUrl, headers?, timeoutMs?, fetch? }))`. Bundles
+stay small: importing one endpoint pulls in only its schemas and the runtime —
+there is no API-wide namespace or service object.
 
-## 3. Generate the hidden TypeScript package
+## Integer precision
 
-```sh
-npm exec -- typeweld gen \
-  --contract target/api-contract/server-api.json \
-  --target-dir target
-```
-
-During local development, use `typeweld watch` to keep the hidden package and symbol
-graph refreshed as Rust source changes:
-
-```sh
-npm exec -- typeweld watch \
-  --package server \
-  --target-dir target
-```
-
-The package is written below
-`target/api-contract/effect-v4/packages/_workspace_server-api`. Keep it hidden
-and generated. Do not commit it.
-
-## 4. Point TypeScript at the package
-
-Add the generated paths file to your TypeScript config flow, or copy the same
-`compilerOptions.paths` entries into your workspace `tsconfig.json`.
-
-```json
-{
-  "extends": "./target/api-contract/effect-v4/packages/_workspace_server-api/tsconfig.paths.json"
-}
-```
-
-## 5. Call the endpoint from Effect
-
-```ts
-import { Effect } from "effect"
-import { ServerApi, users } from "@workspace/server-api"
-
-const program = Effect.gen(function* () {
-  const user = yield* users.getUser({ id: 1 })
-  return user.displayName
-}).pipe(Effect.provide(ServerApi.layer({ baseUrl: "http://localhost:3000" })))
-```
-
-Rust `Result<T, E>` maps to `Effect.Effect<T, E, R>`. Domain errors are in the
-Effect error channel, not thrown promises and not a success-channel `Result`.
-
-## 6. Check generated state and usages
-
-```sh
-npm exec -- typeweld check \
-  --contract target/api-contract/server-api.json \
-  --target-dir target
-
-npm exec -- typeweld check-usages \
-  --contract target/api-contract/server-api.json \
-  --out target/api-contract/graph/effect-usage-index.json \
-  --ts-dir app/src
-```
-
-Use `typeweld doctor` when setup is missing or a workspace cannot be discovered. If
-you use `typeweld-ls`, configure `typeweldWatch` in `.typeweld.json` so the editor starts
-and owns the same watcher for you.
+64-bit integers (`i64`, `u64`, `usize`, ...) map to TypeScript `number` and
+extraction warns about them: JSON numbers lose precision beyond 2^53. Use
+`i32`/`u32` or a string-typed newtype for identifiers.

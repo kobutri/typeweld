@@ -1,5 +1,0 @@
-error: ApiType enum variants must be unit or named-field variants
- --> tests/ui/api_type_tuple_variant.rs:4:5
-  |
-4 |     Renamed(String),
-  |     ^^^^^^^^^^^^^^^

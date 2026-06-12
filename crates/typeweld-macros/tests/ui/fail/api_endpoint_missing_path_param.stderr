@@ -1,0 +1,13 @@
+error: route parameter `id` requires a matching Path<T> argument
+ --> tests/ui/fail/api_endpoint_missing_path_param.rs:3:12
+  |
+3 | #[api(get, "/users/{id}")]
+  |            ^^^^^^^^^^^^^
+
+warning: unused imports: `Json` and `NoContent`
+ --> tests/ui/fail/api_endpoint_missing_path_param.rs:1:21
+  |
+1 | use typeweld::{api, Json, NoContent};
+  |                     ^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,5 @@
+error: serde flatten is not supported by typeweld yet; use a named nested DTO field so the generated schema has an explicit shape
+  --> tests/ui/fail/api_type_flatten.rs:11:13
+   |
+11 |     #[serde(flatten)]
+   |             ^^^^^^^

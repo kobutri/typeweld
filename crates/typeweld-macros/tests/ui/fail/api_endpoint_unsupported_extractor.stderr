@@ -1,0 +1,13 @@
+error: #[api] endpoint parameters must use Path<T>, Query<T>, Body<T>, or Binary<bytes::Bytes> extractors
+ --> tests/ui/fail/api_endpoint_unsupported_extractor.rs:4:30
+  |
+4 | pub async fn list_users(raw: String) -> NoContent {
+  |                              ^^^^^^
+
+warning: unused import: `NoContent`
+ --> tests/ui/fail/api_endpoint_unsupported_extractor.rs:1:21
+  |
+1 | use typeweld::{api, NoContent};
+  |                     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,5 +1,0 @@
-error: ApiType enums support only #[serde(tag = "_tag")] because generated TypeScript schemas use _tag discriminators; found tag `kind`
- --> tests/ui/api_type_unsupported_enum_tag.rs:3:6
-  |
-3 | enum UserEvent {
-  |      ^^^^^^^^^

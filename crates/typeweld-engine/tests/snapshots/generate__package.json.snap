@@ -1,0 +1,11 @@
+---
+source: crates/typeweld-engine/tests/generate.rs
+expression: file.contents
+---
+{
+  "name": "@workspace/server-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false
+}

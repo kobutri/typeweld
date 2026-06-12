@@ -4,27 +4,14 @@
   "type": "module",
   "packageManager": "npm@11.16.0",
   "workspaces": [
-    "cli",
+    "typeweld",
     "effect-runtime",
-    "language-server-wrapper",
-    "semantic-usage-scanner",
-    "vscode-extension"
+    "vscode-extension",
+    "vscode-extension/typescript-plugin"
   ],
   "scripts": {
-    "bump:version": "tsx ../scripts/bump-version.mts",
-    "check:versions": "tsx ../scripts/check-versions.mts",
-    "test": "npm run check:versions && npm run typecheck && npm run test:cli && npm run test:runtime && npm run test:lsp-wrapper && npm run test:vscode",
-    "test:cli": "npm run test:wrapper --workspace typeweld",
-    "test:lsp-wrapper": "npm run test:wrapper --workspace @typeweld/language-server",
-    "test:runtime": "npm run test:runtime --workspace @typeweld/effect-runtime",
-    "test:vscode": "npm run typecheck --workspace typeweld-vscode && npm run compile --workspace typeweld-vscode",
-    "typecheck:cli": "npm run typecheck --workspace typeweld",
-    "typecheck": "npm run typecheck:workspaces && npm run typecheck:generated",
-    "typecheck:generated": "cargo test -p typeweld-gen-effect-v4 generated_package_typecheck_fixture_compiles_against_pinned_effect_beta",
-    "typecheck:lsp-wrapper": "npm run typecheck --workspace @typeweld/language-server",
-    "typecheck:runtime": "npm run typecheck --workspace @typeweld/effect-runtime",
-    "typecheck:vscode": "npm run typecheck --workspace typeweld-vscode",
-    "typecheck:workspaces": "tsc -b --noEmit tsconfig.json && tsc --noEmit -p vscode-extension/typescript-plugin/tsconfig.json"
+    "test": "npm run typecheck && npm run test --workspaces --if-present",
+    "typecheck": "tsc -b --noEmit tsconfig.json && tsc --noEmit -p vscode-extension/typescript-plugin/tsconfig.json"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.78",

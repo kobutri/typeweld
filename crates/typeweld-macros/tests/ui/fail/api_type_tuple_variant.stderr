@@ -1,0 +1,5 @@
+error: Api enum variants must be unit or named-field variants
+ --> tests/ui/fail/api_type_tuple_variant.rs:7:5
+  |
+7 |     Created(String),
+  |     ^^^^^^^^^^^^^^^

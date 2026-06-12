@@ -1,0 +1,36 @@
+{
+  "name": "typeweld",
+  "version": "0.1.0",
+  "description": "CLI launcher for the Typeweld Rust-to-TypeScript Effect client generator.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kobutri/typeweld.git",
+    "directory": "npm/typeweld"
+  },
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "bin": {
+    "typeweld": "./dist/index.js"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "optionalDependencies": {
+    "@typeweld/cli-linux-x64": "0.1.0",
+    "@typeweld/cli-linux-arm64": "0.1.0",
+    "@typeweld/cli-darwin-x64": "0.1.0",
+    "@typeweld/cli-darwin-arm64": "0.1.0",
+    "@typeweld/cli-win32-x64": "0.1.0"
+  }
+}

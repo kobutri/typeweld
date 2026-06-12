@@ -1,0 +1,5 @@
+error: ApiError variants require #[status(...)], e.g. #[status(404)]
+ --> tests/ui/fail/api_error_missing_status.rs:7:5
+  |
+7 |     NotFound { id: i32 },
+  |     ^^^^^^^^^^^^^^^^^^^^

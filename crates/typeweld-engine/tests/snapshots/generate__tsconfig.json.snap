@@ -1,0 +1,23 @@
+---
+source: crates/typeweld-engine/tests/generate.rs
+expression: file.contents
+---
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "plugins": [{ "name": "@typeweld/typescript-plugin" }],
+    "paths": {
+      "@workspace/server-api": ["./index.ts"],
+      "@workspace/server-api/*": ["./*"],
+      "@typeweld/effect-runtime": ["../../../../../app/node_modules/@typeweld/effect-runtime/src/index.ts"],
+      "@typeweld/effect-runtime/compat": ["../../../../../app/node_modules/@typeweld/effect-runtime/src/compat.ts"],
+      "effect": ["../../../../../app/node_modules/effect/dist/index.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts", "../../../../../app/src/**/*.ts"]
+}

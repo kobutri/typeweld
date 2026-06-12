@@ -1,0 +1,22 @@
+[package]
+name = "typeweld-syntax"
+description = "Shared syn-based parsing and validation rules for typeweld macros and the static extractor"
+categories.workspace = true
+documentation.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+quote = { workspace = true }
+
+[lints]
+workspace = true

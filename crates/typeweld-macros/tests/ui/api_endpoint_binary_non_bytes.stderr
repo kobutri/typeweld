@@ -1,5 +1,0 @@
-error: #[api] Binary<T> endpoints currently support bytes::Bytes or axum::body::Bytes only
- --> tests/ui/api_endpoint_binary_non_bytes.rs:7:51
-  |
-7 | async fn download_file() -> typeweld_core::Binary<User> {
-  |                                                   ^^^^

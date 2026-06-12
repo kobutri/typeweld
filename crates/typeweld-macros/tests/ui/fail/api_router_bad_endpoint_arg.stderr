@@ -1,0 +1,13 @@
+error: #[api_router] .endpoint(...) only supports a handler path like `get_user` or `users::get_user`
+  --> tests/ui/fail/api_router_bad_endpoint_arg.rs:10:31
+   |
+10 |     ApiRouter::new().endpoint(|| ping)
+   |                               ^^^^^^^
+
+warning: unused import: `ApiRouter`
+ --> tests/ui/fail/api_router_bad_endpoint_arg.rs:1:33
+  |
+1 | use typeweld::{api, api_router, ApiRouter, NoContent};
+  |                                 ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

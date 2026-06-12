@@ -1,0 +1,5 @@
+error: serde untagged enums are not supported by typeweld because generated schemas require an explicit _tag discriminator
+ --> tests/ui/fail/api_type_untagged.rs:5:9
+  |
+5 | #[serde(untagged)]
+  |         ^^^^^^^^

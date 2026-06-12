@@ -1,0 +1,18 @@
+{
+  "name": "e2e-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@typeweld/effect-runtime": "file:../../../npm/effect-runtime",
+    "effect": "4.0.0-beta.78"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

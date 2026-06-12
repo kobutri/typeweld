@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            platform: darwin-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            platform: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: win32-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - run: cargo build --release -p typeweld-cli --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p staged/bin/${{ matrix.platform }}
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/typeweld.exe staged/bin/${{ matrix.platform }}/
+          else
+            cp target/${{ matrix.target }}/release/typeweld staged/bin/${{ matrix.platform }}/
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: typeweld-${{ matrix.platform }}
+          path: staged/bin
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish npm packages
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: artifacts
+      - run: npm ci
+        working-directory: npm
+      - name: Assemble platform packages
+        run: node scripts/assemble-platform-packages.mts artifacts dist-platform
+      - name: Publish platform binary packages
+        run: |
+          for dir in dist-platform/*; do
+            npm publish "$dir" --provenance --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Build and publish the launcher and runtime
+        run: |
+          npm run build --workspace typeweld
+          npm run build --workspace @typeweld/typescript-plugin
+          npm publish --workspace typeweld --provenance --access public
+          npm publish --workspace @typeweld/effect-runtime --provenance --access public
+          npm publish --workspace @typeweld/typescript-plugin --provenance --access public
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-extension:
+    name: Publish VS Code extension
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: artifacts
+      - run: npm ci
+        working-directory: npm
+      - name: Bundle extension with binaries
+        run: |
+          npm run compile --workspace typeweld-vscode
+          mkdir -p npm/vscode-extension/bin
+          cp -r artifacts/typeweld-*/. npm/vscode-extension/bin/
+      - name: Package VSIX
+        run: npm run package:vsix --workspace typeweld-vscode
+        working-directory: npm
+      - name: Publish to Marketplace and OpenVSX
+        if: ${{ !github.event.release.prerelease }}
+        run: |
+          npx --yes @vscode/vsce publish --packagePath npm/vscode-extension/typeweld.vsix -p "$VSCE_PAT"
+          npx --yes ovsx publish npm/vscode-extension/typeweld.vsix -p "$OVSX_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}

@@ -1,5 +1,0 @@
-error: #[api] endpoint errors must be typed ApiError enums; opaque endpoint error types cannot be represented as generated error channels. Derive ApiError for a domain enum or map the error into one before returning it.
- --> tests/ui/api_endpoint_impl_error.rs:7:58
-  |
-7 | async fn get_user() -> Result<typeweld_core::Json<User>, impl std::error::Error> {
-  |                                                          ^^^^^^^^^^^^^^^^^^^^^^

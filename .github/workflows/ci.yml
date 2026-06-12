@@ -1,155 +1,130 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
-  rust-fmt:
-    name: Rust fmt
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: rustfmt
-      - run: |
-          cargo fmt --all
-          git diff --exit-code -- . ':(exclude)crates/api-test-fixtures/src/lib.rs'
-
-  rust-clippy:
-    name: Rust clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
 
-  rust-test:
+  test-rust:
     name: Rust tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - run: cargo test --workspace
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - name: Unit, snapshot, parity, and macro UI tests
+        run: cargo test --workspace --exclude typeweld-ls
 
-  examples:
-    name: Example (${{ matrix.name }})
+  test-lsp:
+    name: Language server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rust-analyzer
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
+      - name: Build the TypeScript plugin
+        run: npm run build --workspace @typeweld/typescript-plugin
+        working-directory: npm
+      - run: cargo test -p typeweld-ls
+
+  test-npm:
+    name: npm tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+      - run: npm ci
+        working-directory: npm
+      - name: Typecheck and test all npm packages
+        run: npm test
+        working-directory: npm
+
+  e2e:
+    name: End-to-end examples
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: monorepo-basic
-            script: ./examples/monorepo-basic/verify.sh
-          - name: e2e-axum-effect
-            script: ./examples/e2e-axum-effect/verify.sh
+        example: [e2e, monorepo]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
+          workspaces: |
+            .
+            examples/${{ matrix.example }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: npm/package-lock.json
-      - run: npm ci
-        working-directory: npm
-      - run: ${{ matrix.script }}
+      - run: ./examples/${{ matrix.example }}/verify.sh
 
-  npm-test:
-    name: npm tests
+  package:
+    name: Package dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: npm/package-lock.json
       - run: npm ci
         working-directory: npm
-      - name: Run npm checks
+      - name: Build the launcher and pack every publishable package
         run: |
-          npm run check:versions
-          npm run typecheck:workspaces
-          npm run test:cli
-          npm run test:runtime
-          npm run test:lsp-wrapper
-          npm run test:vscode
+          npm run build --workspace typeweld
+          npm pack --workspace typeweld --workspace @typeweld/effect-runtime --dry-run
         working-directory: npm
-
-  package-vsix:
-    name: Package VSIX
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: npm/package-lock.json
-      - run: npm ci
-        working-directory: npm
-      - run: npm run package:vsix --workspace typeweld-vscode -- --target linux-x64 --out out/typeweld-vscode-ci-linux-x64.vsix
+      - name: Bundle and package the VS Code extension
+        run: |
+          npm run compile --workspace typeweld-vscode
+          npm run package:vsix --workspace typeweld-vscode
         working-directory: npm
 
   validate:
-    name: validate
-    runs-on: ubuntu-latest
-    needs:
-      - rust-fmt
-      - rust-clippy
-      - rust-test
-      - examples
-      - npm-test
-      - package-vsix
+    name: Validate
+    needs: [lint, test-rust, test-lsp, test-npm, e2e, package]
     if: always()
+    runs-on: ubuntu-latest
     steps:
-      - name: Check job results
+      - name: Check all jobs succeeded
         run: |
-          failures=0
-
-          check_result() {
-            job="$1"
-            result="$2"
-            echo "$job: $result"
-            if [ "$result" != "success" ]; then
-              failures=1
-            fi
-          }
-
-          check_result rust-fmt '${{ needs.rust-fmt.result }}'
-          check_result rust-clippy '${{ needs.rust-clippy.result }}'
-          check_result rust-test '${{ needs.rust-test.result }}'
-          check_result examples '${{ needs.examples.result }}'
-          check_result npm-test '${{ needs.npm-test.result }}'
-          check_result package-vsix '${{ needs.package-vsix.result }}'
-
-          exit "$failures"
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "false" ]

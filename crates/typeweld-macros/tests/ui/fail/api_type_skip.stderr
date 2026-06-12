@@ -1,0 +1,5 @@
+error: serde skip attributes are not represented in the API contract; remove skipped fields from the exported DTO or use a separate API DTO
+ --> tests/ui/fail/api_type_skip.rs:7:13
+  |
+7 |     #[serde(skip)]
+  |             ^^^^

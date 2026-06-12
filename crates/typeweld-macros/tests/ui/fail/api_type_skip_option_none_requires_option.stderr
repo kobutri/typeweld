@@ -1,0 +1,5 @@
+error: typeweld supports skip_serializing_if = "Option::is_none" only on Option<T> fields
+ --> tests/ui/fail/api_type_skip_option_none_requires_option.rs:6:16
+  |
+6 |     pub value: String,
+  |                ^^^^^^

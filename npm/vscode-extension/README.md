@@ -1,29 +1,28 @@
 # Typeweld for VS Code
 
-This extension starts `typeweld-ls` as the language server for Rust, TypeScript,
-TSX, JavaScript, and JSX files in typeweld workspaces.
+This extension starts `typeweld lsp` as the language server for Rust,
+TypeScript, and TSX files in workspaces that contain a `typeweld.toml`
+manifest.
 
-By default it uses the bundled native `typeweld-ls` binary. For local
-development, build the Rust gateway first:
+The server binary is resolved in this order:
+
+1. the `typeweld.server.path` setting
+2. the `TYPEWELD_LS_BINARY` environment variable
+3. a `typeweld` binary on `PATH`
+4. local cargo builds at `target/{debug,release}/typeweld` (workspace folders
+   and the repository root, for development)
+
+For local development, build the Rust CLI first:
 
 ```sh
-cargo build -p typeweld-ls --bin typeweld-ls
+cargo build -p typeweld-cli --bin typeweld
 ```
 
-If the gateway binary is somewhere else, set:
+Additional arguments for `typeweld lsp` can be configured with
+`typeweld.server.args`, and protocol tracing with `typeweld.trace.server`.
+The client restarts automatically when `typeweld.*` settings change, or on
+demand via the "Typeweld: Restart Language Server" command.
 
-```json
-{
-  "typeweld.languageServer.command": "/absolute/path/to/typeweld-ls"
-}
-```
-
-The extension starts only for workspace folders with `.typeweld.json`,
-`typeweld.json`, or `target/api-contract/effect-v4/packages` in that folder or
-one of its parents. Set `typeweld.languageServer.requiredWorkspaceMarkers` to
-`[]` to opt out of that guard, or add `Cargo.toml` if you want defaults-only
-startup before generation.
-
-`typeweld-ls` owns the Rust Analyzer and TypeScript backend processes internally.
-Disable or scope out duplicate editor-managed Rust and TypeScript language
-servers for workspaces that use this extension.
+The bundled TypeScript server plugin (`@typeweld/typescript-plugin`) filters
+navigation results that point into generated packages under
+`target/typeweld/packages/`.
