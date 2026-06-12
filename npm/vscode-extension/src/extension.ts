@@ -480,6 +480,18 @@ function bundledTypeweldBinary(
     `${process.platform}-${process.arch}`,
     executableName,
   )
+  if (isExecutable(candidate)) {
+    return candidate
+  }
+  // Zip round-trips (artifact upload, vsix install) can strip the executable
+  // bit; restore it rather than silently skipping the bundled binary.
+  try {
+    if (fs.statSync(candidate).isFile()) {
+      fs.chmodSync(candidate, 0o755)
+    }
+  } catch {
+    return undefined
+  }
   return isExecutable(candidate) ? candidate : undefined
 }
 

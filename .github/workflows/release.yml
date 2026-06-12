@@ -170,6 +170,8 @@ jobs:
         run: |
           mkdir -p npm/vscode-extension/bin
           cp -r artifacts/typeweld-*/. npm/vscode-extension/bin/
+          # The artifact zip round-trip strips the executable bit.
+          find npm/vscode-extension/bin -type f ! -name "*.exe" -exec chmod +x {} +
       - name: Package VSIX
         run: npm run package:vsix --workspace typeweld-vscode
         working-directory: npm
