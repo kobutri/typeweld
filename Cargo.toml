@@ -22,15 +22,15 @@ keywords = ["api", "effect", "lsp", "rust", "typescript"]
 license = "MIT OR Apache-2.0"
 readme = "docs/README.md"
 repository = "https://github.com/kobutri/typeweld"
-version = "0.0.10"
+version = "0.0.11"
 
 [workspace.dependencies]
-typeweld = { path = "crates/typeweld", version = "0.0.10" }
-typeweld-axum = { path = "crates/typeweld-axum", version = "0.0.10" }
-typeweld-engine = { path = "crates/typeweld-engine", version = "0.0.10" }
-typeweld-ls = { path = "crates/typeweld-ls", version = "0.0.10" }
-typeweld-macros = { path = "crates/typeweld-macros", version = "0.0.10" }
-typeweld-syntax = { path = "crates/typeweld-syntax", version = "0.0.10" }
+typeweld = { path = "crates/typeweld", version = "0.0.11" }
+typeweld-axum = { path = "crates/typeweld-axum", version = "0.0.11" }
+typeweld-engine = { path = "crates/typeweld-engine", version = "0.0.11" }
+typeweld-ls = { path = "crates/typeweld-ls", version = "0.0.11" }
+typeweld-macros = { path = "crates/typeweld-macros", version = "0.0.11" }
+typeweld-syntax = { path = "crates/typeweld-syntax", version = "0.0.11" }
 
 anyhow = "1"
 axum = "0.8"
