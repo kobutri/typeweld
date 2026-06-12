@@ -374,7 +374,7 @@ impl Proxy<'_> {
             }
             _ => {
                 // No semantic backend: apply the contract-known Rust edits.
-                self.apply_edit(&plan.fallback_edit);
+                self.apply_rust_complement(&plan.fallback_edit);
             }
         }
     }
@@ -387,7 +387,57 @@ impl Proxy<'_> {
             return;
         };
         let rust_only = features::rename::filter_to_rust(edit);
-        self.apply_edit(&rust_only);
+        self.apply_rust_complement(&rust_only);
+    }
+
+    /// Applies the Rust complement of a TypeScript-initiated rename: files
+    /// the editor has open go through `workspace/applyEdit`; everything else
+    /// is written straight to disk so no buffers are left dirty. Regeneration
+    /// follows immediately instead of waiting for watcher events.
+    fn apply_rust_complement(&mut self, edit: &WorkspaceEdit) {
+        let mut open = Vec::new();
+        for document in features::rename::document_edits(edit) {
+            let Some(path) = uri_to_path(&document.text_document.uri) else {
+                continue;
+            };
+            if self.state.version_of(&path).is_some() {
+                open.push(document);
+                continue;
+            }
+            let Some(text) = self.state.read_text(&path) else {
+                continue;
+            };
+            let mut text = text.to_string();
+            let mut spans: Vec<(usize, usize, String)> = document
+                .edits
+                .iter()
+                .map(|edit| {
+                    let edit = match edit {
+                        lsp_types::OneOf::Left(edit) => edit,
+                        lsp_types::OneOf::Right(annotated) => &annotated.text_edit,
+                    };
+                    let start = convert::offset_at(&text, edit.range.start, self.state.encoding());
+                    let end = convert::offset_at(&text, edit.range.end, self.state.encoding());
+                    (start as usize, end as usize, edit.new_text.clone())
+                })
+                .collect();
+            spans.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+            for (start, end, new_text) in spans {
+                if start <= end && end <= text.len() {
+                    text.replace_range(start..end, &new_text);
+                }
+            }
+            let _ = std::fs::write(&path, text);
+        }
+        if !open.is_empty() {
+            self.apply_edit(&WorkspaceEdit {
+                changes: None,
+                document_changes: Some(lsp_types::DocumentChanges::Edits(open)),
+                change_annotations: None,
+            });
+        }
+        self.state.mark_dirty();
+        self.refresh();
     }
 
     /// Augments a rust-analyzer response in place; any failure leaves it
@@ -403,11 +453,6 @@ impl Proxy<'_> {
                     return;
                 };
                 self.state.ensure_fresh();
-                let Some(complement) =
-                    features::rename::ts_complement(&self.state, self.plugin.as_ref(), &params)
-                else {
-                    return;
-                };
                 let base = response.result.take().unwrap_or(serde_json::Value::Null);
                 let parsed = if base.is_null() {
                     Ok(WorkspaceEdit::default())
@@ -415,6 +460,15 @@ impl Proxy<'_> {
                     serde_json::from_value::<WorkspaceEdit>(base.clone())
                 };
                 let Ok(mut edit) = parsed else {
+                    response.result = Some(base);
+                    return;
+                };
+                let Some(complement) = features::rename::ts_complement(
+                    &self.state,
+                    self.plugin.as_ref(),
+                    &params,
+                    Some(&edit),
+                ) else {
                     response.result = Some(base);
                     return;
                 };
@@ -430,6 +484,7 @@ impl Proxy<'_> {
                 let position = &params.text_document_position;
                 let extra = features::references::ts_locations(
                     &self.state,
+                    self.plugin.as_ref(),
                     &position.text_document.uri,
                     position.position,
                 );
@@ -503,12 +558,15 @@ impl Proxy<'_> {
                 let Some(path) = uri_to_path(&params.text_document.uri) else {
                     return;
                 };
-                // Full sync: the last change carries the complete new text.
-                let Some(change) = params.content_changes.into_iter().next_back() else {
+                // In proxy mode the editor negotiated rust-analyzer's
+                // incremental sync, so changes may be ranged edits over the
+                // current overlay; degraded mode advertises full sync and
+                // arrives here with range-less changes.
+                let Some(text) = apply_content_changes(&self.state, &path, params.content_changes)
+                else {
                     return;
                 };
-                self.state
-                    .change(path, change.text, params.text_document.version);
+                self.state.change(path, text, params.text_document.version);
                 self.refresh();
             }
             DidCloseTextDocument::METHOD => {
@@ -671,6 +729,31 @@ impl Proxy<'_> {
     fn send(&self, message: Message) {
         let _ = self.connection.sender.send(message);
     }
+}
+
+/// Applies a didChange content-change sequence over the current document
+/// text. Ranged changes splice into the overlay (or disk text for the first
+/// change after a missed didOpen); range-less changes replace it whole.
+fn apply_content_changes(
+    state: &State,
+    path: &Path,
+    changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+) -> Option<String> {
+    let mut text: Option<String> = state.read_text(path).map(|text| text.to_string());
+    for change in changes {
+        match change.range {
+            None => text = Some(change.text),
+            Some(range) => {
+                let current = text.as_mut()?;
+                let start = convert::offset_at(current, range.start, state.encoding()) as usize;
+                let end = convert::offset_at(current, range.end, state.encoding()) as usize;
+                let start = start.min(current.len());
+                let end = end.clamp(start, current.len());
+                current.replace_range(start..end, &change.text);
+            }
+        }
+    }
+    text
 }
 
 fn id_text(id: &RequestId) -> String {
@@ -864,7 +947,7 @@ fn handle_request(state: &State, plugin: Option<&PluginHub>, request: &Request) 
         }
         References::METHOD => {
             let params: ReferenceParams = parse_params(request)?;
-            to_result(features::references::handle(state, &params))
+            to_result(features::references::handle(state, plugin, &params))
         }
         HoverRequest::METHOD => {
             let params: HoverParams = parse_params(request)?;

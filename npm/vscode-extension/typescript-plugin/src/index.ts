@@ -362,7 +362,12 @@ function discover(start: string): { port: number; token: string } | undefined {
 }
 
 function normalize(fileName: string): string {
-  return fileName.replace(/\\/g, "/")
+  const slashes = fileName.replace(/\\/g, "/")
+  // Windows drive letters compare case-insensitively; tsserver reports them
+  // lowercase, the daemon may not.
+  return /^[A-Za-z]:\//.test(slashes)
+    ? slashes[0]!.toLowerCase() + slashes.slice(1)
+    : slashes
 }
 
 function identifierAt(text: string, span: TextSpan): string {

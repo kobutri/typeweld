@@ -70,7 +70,7 @@ pub fn resolve(state: &State, uri: &Uri, position: Position) -> Option<Resolved>
         return resolve_rust(state, &text, &path, offset);
     }
     if has_extension(&path, &["ts", "tsx"]) {
-        let key = path.to_string_lossy().into_owned();
+        let key = convert::path_key(&path);
         let mut best: Option<Resolved> = None;
         for (index, package) in snapshot.packages.iter().enumerate() {
             if let Some(usage) = package.usage.symbol_at(&key, offset) {
@@ -150,6 +150,79 @@ pub fn trailing_ident(text: &str, mount: &Span, name: &str) -> Option<(u32, u32)
     let length = u32::try_from(name.len()).ok()?;
     let start = mount.end.checked_sub(length)?;
     (text.get(start as usize..mount.end as usize)? == name).then_some((start, mount.end))
+}
+
+/// The semantic TypeScript locations of a field or param property: the
+/// plugin (inside the user's tsserver) is asked at the generated anchor
+/// property; locations are filtered to user `.ts`/`.tsx` files and returned
+/// as byte ranges. The single source for both rename edits and references.
+pub(crate) fn property_locations(
+    state: &State,
+    plugin: Option<&crate::plugin::PluginHub>,
+    package: &crate::state::PackageSnapshot,
+    symbol: &crate::state::RustSymbol,
+) -> Vec<(PathBuf, u32, u32)> {
+    use crate::state::SymbolInfo;
+    use typeweld_engine::gen::MarkKind;
+
+    let Some(plugin) = plugin else {
+        return Vec::new();
+    };
+    let kind = match symbol.info {
+        SymbolInfo::Field { .. } => MarkKind::Field,
+        SymbolInfo::Param { .. } => MarkKind::Param,
+        _ => return Vec::new(),
+    };
+    let Some(mark) = package
+        .marks
+        .iter()
+        .find(|mark| mark.kind == kind && mark.symbol_id == symbol.id)
+    else {
+        return Vec::new();
+    };
+    let anchor = package.package_dir.join(&mark.file);
+    let Some(anchor_text) = state.read_text(&anchor) else {
+        return Vec::new();
+    };
+    let offset = convert::utf16_offset(&anchor_text, mark.start);
+    let locations = match plugin.query_rename_locations(&anchor, offset, plugin_timeout()) {
+        Ok(locations) => locations,
+        Err(message) => {
+            eprintln!("typeweld-ls: semantic TypeScript property lookup unavailable: {message}");
+            return Vec::new();
+        }
+    };
+    let Some(snapshot) = state.snapshot() else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    for location in locations {
+        let path = PathBuf::from(&location.file);
+        let generated = snapshot
+            .packages
+            .iter()
+            .any(|package| path.starts_with(&package.package_dir));
+        if generated || !has_extension(&path, &["ts", "tsx"]) {
+            continue;
+        }
+        let Some(text) = state.read_text(&path) else {
+            continue;
+        };
+        let start = convert::byte_offset_from_utf16(&text, location.start);
+        let end = convert::byte_offset_from_utf16(&text, location.start + location.length);
+        ranges.push((path, start, end));
+    }
+    ranges
+}
+
+fn plugin_timeout() -> std::time::Duration {
+    std::env::var("TYPEWELD_PLUGIN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs,
+        )
 }
 
 /// Builds the snapshot pushed to the TypeScript plugin: every generated-file

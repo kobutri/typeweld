@@ -45,9 +45,7 @@ pub struct Snapshot {
 
 /// Everything the features need to answer requests for one package.
 pub struct PackageSnapshot {
-    /// Generated package name; kept for diagnostics and future multi-package
-    /// disambiguation in the UI.
-    #[allow(dead_code)]
+    /// Generated package name (also the retention key across rebuilds).
     pub ts_package: String,
     /// Absolute directory the generated package is written to.
     pub package_dir: PathBuf,
@@ -193,8 +191,19 @@ impl State {
         self.dirty = false;
         self.generation += 1;
 
+        let previous_diag_files = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.diag_files.clone())
+            .unwrap_or_default();
+        let mut previous_packages = self
+            .snapshot
+            .take()
+            .map(|snapshot| snapshot.packages)
+            .unwrap_or_default();
+
         let mut global_diagnostics = Vec::new();
-        let packages = self.rebuild(&mut global_diagnostics);
+        let packages = self.rebuild(&mut global_diagnostics, &mut previous_packages);
 
         let mut by_file: BTreeMap<PathBuf, Vec<Diagnostic>> = BTreeMap::new();
         let package_diagnostics = packages.iter().flat_map(|package| &package.diagnostics);
@@ -208,10 +217,8 @@ impl State {
 
         let diag_files: HashSet<PathBuf> = by_file.keys().cloned().collect();
         let mut publishes: Vec<(PathBuf, Vec<Diagnostic>)> = by_file.into_iter().collect();
-        if let Some(previous) = &self.snapshot {
-            for stale in previous.diag_files.difference(&diag_files) {
-                publishes.push((stale.clone(), Vec::new()));
-            }
+        for stale in previous_diag_files.difference(&diag_files) {
+            publishes.push((stale.clone(), Vec::new()));
         }
 
         self.snapshot = Some(Snapshot {
@@ -221,7 +228,15 @@ impl State {
         publishes
     }
 
-    fn rebuild(&mut self, diagnostics: &mut Vec<Diagnostic>) -> Vec<PackageSnapshot> {
+    /// Rebuilds every configured package. When a package fails to extract
+    /// (e.g. a mid-edit syntax error), its previous snapshot is retained so
+    /// navigation keeps working and the generated files on disk stay usable;
+    /// only the diagnostics reflect the broken state.
+    fn rebuild(
+        &mut self,
+        diagnostics: &mut Vec<Diagnostic>,
+        previous_packages: &mut Vec<PackageSnapshot>,
+    ) -> Vec<PackageSnapshot> {
         let disk = DiskFileProvider;
         let files = OverlayFileProvider {
             base: &disk,
@@ -272,6 +287,12 @@ impl State {
                 Ok(Ok(extraction)) => extraction,
                 Ok(Err(diagnostic)) => {
                     diagnostics.push(diagnostic);
+                    if let Some(index) = previous_packages
+                        .iter()
+                        .position(|previous| previous.ts_package == package.ts)
+                    {
+                        snapshots.push(previous_packages.swap_remove(index));
+                    }
                     continue;
                 }
                 Err(panic) => std::panic::resume_unwind(panic),
@@ -286,8 +307,18 @@ impl State {
             let failed = has_errors(&package_diagnostics) || has_errors(&generation_diagnostics);
             package_diagnostics.extend(generation_diagnostics);
             if failed {
-                // Keep the previous generated files; navigation still works
-                // over the partial contract.
+                // Keep the previous generated files AND the previous
+                // snapshot: a broken transient buffer must not replace the
+                // last usable contract.
+                if let Some(index) = previous_packages
+                    .iter()
+                    .position(|previous| previous.ts_package == package.ts)
+                {
+                    let mut previous = previous_packages.swap_remove(index);
+                    previous.diagnostics = package_diagnostics;
+                    snapshots.push(previous);
+                    continue;
+                }
             } else if let Err(message) = gen::write_package(package_dir, &generated) {
                 package_diagnostics.push(Diagnostic::error("write-failed", message, None));
             }
@@ -335,7 +366,7 @@ fn collect_ts_sources(
         else {
             return;
         };
-        sources.push((path.to_string_lossy().into_owned(), contents.to_string()));
+        sources.push((crate::convert::path_key(&path), contents.to_string()));
     };
 
     for pattern in &config.app_src {

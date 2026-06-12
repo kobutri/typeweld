@@ -218,32 +218,6 @@ impl LsClient {
             }
         }
     }
-
-    /// Waits for a server-initiated request with `method`, answering it.
-    fn wait_for_request(&mut self, method: &str, timeout: Duration) -> Option<serde_json::Value> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let Ok(message) = self.connection.receiver.recv_timeout(remaining) else {
-                return None;
-            };
-            if let Message::Request(request) = message {
-                let params = request.params.clone();
-                let answer = if request.method == "workspace/applyEdit" {
-                    serde_json::json!({ "applied": true })
-                } else {
-                    serde_json::Value::Null
-                };
-                let _ = self
-                    .connection
-                    .sender
-                    .send(Message::Response(Response::new_ok(request.id, answer)));
-                if request.method == method {
-                    return Some(params);
-                }
-            }
-        }
-    }
 }
 
 impl Drop for LsClient {
@@ -543,7 +517,25 @@ fn plugin_serves_cross_language_features() {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    // 3. TypeScript-initiated rename: tsserver's locations exclude generated
+    // 3. Field references include the semantic TypeScript property access
+    //    (the same plugin channel as rename, shared single source).
+    let references = ls
+        .request_value(
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": uri(&lib_rs) },
+                "position": rename_position,
+                "context": { "includeDeclaration": true },
+            }),
+        )
+        .expect("references");
+    let rendered = references.to_string();
+    assert!(
+        rendered.contains("main.ts"),
+        "field references must include the user property access: {rendered}"
+    );
+
+    // 4. TypeScript-initiated rename: tsserver's locations exclude generated
     //    files; once the edit lands, the daemon applies the Rust complement.
     let (line, offset) = ts_position(MAIN_TS, "displayName");
     let response = tsserver.request(
@@ -593,16 +585,18 @@ fn plugin_serves_cross_language_features() {
         }),
     );
 
-    let apply = ls
-        .wait_for_request("workspace/applyEdit", Duration::from_secs(45))
-        .expect("the daemon must apply the Rust complement");
-    let rendered = apply.to_string();
-    assert!(
-        rendered.contains("lib.rs"),
-        "the Rust complement must edit lib.rs: {rendered}"
-    );
-    assert!(
-        rendered.contains("handle"),
-        "the Rust complement must carry the new name: {rendered}"
-    );
+    // lib.rs is not open in the editor, so the daemon writes the Rust
+    // complement straight to disk (no dirty buffers) instead of applyEdit.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let text = std::fs::read_to_string(root.join("server/src/lib.rs")).expect("lib.rs");
+        if text.contains("pub handle: String") && !text.contains("display_name") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the Rust complement never landed on disk; lib.rs:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }

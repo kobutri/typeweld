@@ -15,10 +15,11 @@ pub enum Encoding {
     Utf16,
 }
 
-/// Converts an absolute path to a `file://` URI.
+/// Converts an absolute path to a `file://` URI. Windows paths use forward
+/// slashes and gain the leading slash (`E:\x` → `file:///E:/x`).
 pub fn path_to_uri(path: &Path) -> Uri {
     let mut encoded = String::from("file://");
-    let text = path.to_string_lossy();
+    let text = path.to_string_lossy().replace('\\', "/");
     if !text.starts_with('/') {
         encoded.push('/');
     }
@@ -39,14 +40,52 @@ pub fn path_to_uri(path: &Path) -> Uri {
         .unwrap_or_else(|_| "file:///".parse().expect("static URI parses"))
 }
 
-/// Converts a `file://` URI back to an absolute path.
+/// Converts a `file://` URI back to an absolute path. On Windows the
+/// decoded `/E:/x` form loses its leading slash (`E:/x`).
 pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     let rest = uri.as_str().strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     if !rest.starts_with('/') {
         return None;
     }
-    percent_decode(rest).map(PathBuf::from)
+    let decoded = percent_decode(rest)?;
+    let decoded = if cfg!(windows) {
+        strip_drive_slash(&decoded).to_owned()
+    } else {
+        decoded
+    };
+    Some(PathBuf::from(decoded))
+}
+
+/// Strips the leading slash of a decoded `/E:/…` drive path; everything else
+/// passes through.
+fn strip_drive_slash(decoded: &str) -> &str {
+    let bytes = decoded.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/');
+    if drive {
+        &decoded[1..]
+    } else {
+        decoded
+    }
+}
+
+/// A platform-stable string key for a path: forward slashes, lowercased
+/// drive letter. Rust-side indexes and the TypeScript plugin compare paths
+/// through this form so Windows spellings (`E:\x` vs `e:/x`) match.
+pub fn path_key(path: &Path) -> String {
+    let mut key = path.to_string_lossy().replace('\\', "/");
+    let drive = {
+        let bytes = key.as_bytes();
+        bytes.len() >= 2 && bytes[0].is_ascii_uppercase() && bytes[1] == b':'
+    };
+    if drive {
+        key[..1].make_ascii_lowercase();
+    }
+    key
 }
 
 fn percent_decode(input: &str) -> Option<String> {
@@ -125,4 +164,34 @@ pub fn byte_offset_from_utf16(text: &str, utf16: u32) -> u32 {
 pub fn root_relative(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_slash_is_stripped_only_for_drive_paths() {
+        assert_eq!(strip_drive_slash("/E:/rust/typeweld"), "E:/rust/typeweld");
+        assert_eq!(strip_drive_slash("/e:/rust"), "e:/rust");
+        assert_eq!(strip_drive_slash("/E:"), "E:");
+        assert_eq!(strip_drive_slash("/home/user"), "/home/user");
+        assert_eq!(strip_drive_slash("/E/no-colon"), "/E/no-colon");
+    }
+
+    #[test]
+    fn path_keys_normalize_separators_and_drive_case() {
+        assert_eq!(
+            path_key(Path::new("E:\\rust\\typeweld")),
+            "e:/rust/typeweld"
+        );
+        assert_eq!(path_key(Path::new("e:/rust/app")), "e:/rust/app");
+        assert_eq!(path_key(Path::new("/home/user/x")), "/home/user/x");
+    }
+
+    #[test]
+    fn windows_paths_round_trip_through_uris() {
+        let uri = path_to_uri(Path::new("E:\\rust\\type weld"));
+        assert_eq!(uri.as_str(), "file:///E%3a/rust/type%20weld");
+    }
 }

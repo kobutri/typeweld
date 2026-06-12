@@ -10,7 +10,11 @@ use lsp_types::{Location, ReferenceParams};
 use crate::features::{location, resolve, span_location, trailing_ident};
 use crate::state::{State, SymbolInfo};
 
-pub fn handle(state: &State, params: &ReferenceParams) -> Option<Vec<Location>> {
+pub fn handle(
+    state: &State,
+    plugin: Option<&crate::plugin::PluginHub>,
+    params: &ReferenceParams,
+) -> Option<Vec<Location>> {
     let position = &params.text_document_position;
     let resolved = resolve(state, &position.text_document.uri, position.position)?;
     let snapshot = state.snapshot()?;
@@ -35,7 +39,7 @@ pub fn handle(state: &State, params: &ReferenceParams) -> Option<Vec<Location>> 
         }
     }
 
-    locations.extend(usage_locations(state, package, &resolved.id));
+    locations.extend(ts_usage_locations(state, plugin, package, &resolved.id));
     (!locations.is_empty()).then_some(locations)
 }
 
@@ -43,6 +47,7 @@ pub fn handle(state: &State, params: &ReferenceParams) -> Option<Vec<Location>> 
 /// cross-language half merged into rust-analyzer's references response.
 pub fn ts_locations(
     state: &State,
+    plugin: Option<&crate::plugin::PluginHub>,
     uri: &lsp_types::Uri,
     position: lsp_types::Position,
 ) -> Vec<Location> {
@@ -53,27 +58,37 @@ pub fn ts_locations(
         return Vec::new();
     };
     let package = &snapshot.packages[resolved.package];
-    usage_locations(state, package, &resolved.id)
+    ts_usage_locations(state, plugin, package, &resolved.id)
 }
 
-fn usage_locations(
+/// Statically indexed usages plus — for fields and params — the semantic
+/// property accesses the plugin sees inside the user's tsserver.
+fn ts_usage_locations(
     state: &State,
+    plugin: Option<&crate::plugin::PluginHub>,
     package: &crate::state::PackageSnapshot,
     id: &typeweld_engine::ir::SymbolId,
 ) -> Vec<Location> {
     let mut locations = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |path: &std::path::Path, start: u32, end: u32, state: &State| {
+        let Some(text) = state.read_text(path) else {
+            return;
+        };
+        if seen.insert((path.to_path_buf(), start, end)) {
+            locations.push(location(path, &text, start, end, state.encoding()));
+        }
+    };
     for usage in package.usage.refs_for(id) {
         let path = PathBuf::from(&usage.file);
-        let Some(text) = state.read_text(&path) else {
-            continue;
-        };
-        locations.push(location(
-            &path,
-            &text,
-            usage.start,
-            usage.end,
-            state.encoding(),
-        ));
+        push(&path, usage.start, usage.end, state);
+    }
+    if let Some(symbol) = package.symbol_by_id(id) {
+        for (path, start, end) in
+            crate::features::property_locations(state, plugin, package, symbol)
+        {
+            push(&path, start, end, state);
+        }
     }
     locations
 }

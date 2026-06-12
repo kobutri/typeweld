@@ -443,6 +443,17 @@ fn proxied_rename_merges_rust_analyzer_and_typescript_edits() {
         in_lib == expected && in_ts
     });
 
+    // Renames initiated at a *usage* (not the declaration) must still get
+    // the TypeScript half: the API symbol is recovered from rust-analyzer's
+    // edit, which covers the declaration ident.
+    let usage = position_of(LIB_RS, "user: User");
+    let usage = Position::new(usage.line, usage.character + 6);
+    rename_until(&mut client, &lib_rs, usage, "Person", |edits| {
+        edits
+            .iter()
+            .any(|(path, old, new)| path == &main_ts && old == "User" && new == "Person")
+    });
+
     // Hover augmentation: rust-analyzer's hover plus the contract block.
     let hover_position = position_of(LIB_RS, "get_user");
     let hover = client

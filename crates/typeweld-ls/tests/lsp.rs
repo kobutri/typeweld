@@ -512,6 +512,101 @@ fn hover_shows_method_and_route() {
 }
 
 #[test]
+fn incremental_changes_splice_the_overlay() {
+    let dir = fixture();
+    let mut client = Client::start(dir.path());
+    let lib_rs = dir.path().join("server/src/lib.rs");
+    client.open(&lib_rs, "rust", LIB_RS);
+
+    // A ranged didChange replacing exactly the route string, the way an
+    // incremental-sync editor (the proxy relays rust-analyzer's negotiated
+    // sync) sends edits.
+    let needle = "/users/{id}";
+    let start = position_of(LIB_RS, needle, 0);
+    let end = Position::new(
+        start.line,
+        start.character + u32::try_from(needle.len()).expect("len"),
+    );
+    client.notify(
+        DidChangeTextDocument::METHOD,
+        serde_json::json!({
+            "textDocument": { "uri": uri(&lib_rs), "version": 2 },
+            "contentChanges": [{
+                "range": { "start": start, "end": end },
+                "text": "/people/{id}",
+            }],
+        }),
+    );
+
+    let position = position_of(LIB_RS, "pub async fn get_user", 0);
+    let position = Position::new(position.line, position.character + 14);
+    let hover: Option<Hover> = client.request::<HoverRequest>(
+        serde_json::from_value(position_params(&lib_rs, position)).expect("params"),
+    );
+    let text = hover_text(hover);
+    assert!(
+        text.contains("/people/"),
+        "the spliced overlay must drive regeneration: {text}"
+    );
+}
+
+#[test]
+fn broken_buffers_keep_the_last_usable_snapshot() {
+    let dir = fixture();
+    let mut client = Client::start(dir.path());
+    let lib_rs = dir.path().join("server/src/lib.rs");
+    let main_ts = dir.path().join("app/src/main.ts");
+    let schemas = dir
+        .path()
+        .join("target/typeweld/packages/@workspace/test-api/schemas.ts");
+    client.open(&lib_rs, "rust", LIB_RS);
+    client.open(&main_ts, "typescript", MAIN_TS);
+
+    // The initial refresh runs after the handshake; wait for the package.
+    let deadline = Instant::now() + TIMEOUT;
+    while !schemas.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let generated_before = std::fs::read_to_string(&schemas).expect("generated package");
+
+    // A mid-edit buffer that no longer parses.
+    client.change(&lib_rs, 2, "pub struct Broken {");
+    let diagnostics = client.wait_diagnostics(&lib_rs);
+    assert!(
+        !diagnostics.diagnostics.is_empty(),
+        "the broken buffer must produce diagnostics"
+    );
+
+    // Navigation still answers from the retained snapshot, and the generated
+    // package was not replaced by the broken transient state.
+    let position = position_of(MAIN_TS, "getUser", 0);
+    let definition: Option<GotoDefinitionResponse> = client.request::<GotoDefinition>(
+        serde_json::from_value(position_params(&main_ts, position)).expect("params"),
+    );
+    let locations = definition_locations(definition);
+    assert!(
+        locations
+            .iter()
+            .any(|location| location_path(location) == lib_rs),
+        "definition must keep working over the retained snapshot: {locations:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&schemas).expect("generated package"),
+        generated_before,
+        "the generated package must not change while the buffer is broken"
+    );
+
+    // Restoring the buffer clears the diagnostics.
+    client.change(&lib_rs, 3, LIB_RS);
+    let diagnostics = client.wait_diagnostics(&lib_rs);
+    assert!(
+        diagnostics.diagnostics.is_empty(),
+        "diagnostics must clear: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+#[test]
 fn did_change_regenerates_and_updates_hover() {
     let dir = fixture();
     let mut client = Client::start(dir.path());

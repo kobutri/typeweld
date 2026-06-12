@@ -10,8 +10,9 @@ import * as fs from "node:fs"
 import { createRequire } from "node:module"
 import * as os from "node:os"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 
-const extension = path.join(path.dirname(new URL(import.meta.url).pathname), "..")
+const extension = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
 const staged = fs.mkdtempSync(path.join(os.tmpdir(), "typeweld-vsix-"))
 
 try {

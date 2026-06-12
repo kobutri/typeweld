@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use lsp_types::{
     DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
@@ -26,7 +25,7 @@ use typeweld_engine::usage::{UsageKind, UsageRef};
 use typeweld_syntax::{to_camel_case, to_snake_case};
 
 use crate::convert::{self, path_to_uri, uri_to_path};
-use crate::features::{resolve, trailing_ident};
+use crate::features::{resolve, trailing_ident, Resolved};
 use crate::plugin::PluginHub;
 use crate::state::{FieldOwner, PackageSnapshot, RustSymbol, State, SymbolInfo};
 
@@ -139,12 +138,15 @@ pub fn ts_complement(
     state: &State,
     plugin: Option<&PluginHub>,
     params: &RenameParams,
+    ra_edit: Option<&WorkspaceEdit>,
 ) -> Option<WorkspaceEdit> {
     let position = &params.text_document_position;
-    let resolved = resolve(state, &position.text_document.uri, position.position)?;
-    if !resolved.is_from_rust() {
-        return None;
-    }
+    // Renames initiated at a usage rather than the declaration resolve
+    // through rust-analyzer's edit instead: one of its edited ranges is the
+    // API declaration ident.
+    let resolved = resolve(state, &position.text_document.uri, position.position)
+        .filter(Resolved::is_from_rust)
+        .or_else(|| ra_edit.and_then(|edit| symbol_at_edit(state, edit)))?;
     let snapshot = state.snapshot()?;
     let package = &snapshot.packages[resolved.package];
     let symbol = package.symbol_by_id(&resolved.id)?;
@@ -195,6 +197,105 @@ pub fn ts_complement(
         return None;
     }
     Some(build_workspace_edit(state, package, edits))
+}
+
+/// Resolves the API symbol a rust-analyzer rename edit touches: one of the
+/// edited ranges must be exactly a known declaration ident span.
+fn symbol_at_edit(state: &State, edit: &WorkspaceEdit) -> Option<Resolved> {
+    let snapshot = state.snapshot()?;
+    for (path, range) in edit_ranges(edit) {
+        let Some(relative) = crate::convert::root_relative(state.root(), &path) else {
+            continue;
+        };
+        let Some(text) = state.read_text(&path) else {
+            continue;
+        };
+        let start = crate::convert::offset_at(&text, range.start, state.encoding());
+        let end = crate::convert::offset_at(&text, range.end, state.encoding());
+        for (index, package) in snapshot.packages.iter().enumerate() {
+            for symbol in &package.symbols {
+                let span = &symbol.name_span;
+                if span.file == relative && span.start == start && span.end == end {
+                    return Some(Resolved {
+                        package: index,
+                        id: symbol.id.clone(),
+                        path: path.clone(),
+                        start,
+                        end,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The per-document edits of a workspace edit, normalized to
+/// `TextDocumentEdit`s (the `changes` map form is converted).
+pub fn document_edits(edit: &WorkspaceEdit) -> Vec<TextDocumentEdit> {
+    let mut documents = Vec::new();
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            documents.push(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: None,
+                },
+                edits: edits.iter().cloned().map(OneOf::Left).collect(),
+            });
+        }
+    }
+    match &edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => documents.extend(edits.iter().cloned()),
+        Some(DocumentChanges::Operations(operations)) => {
+            for operation in operations {
+                if let DocumentChangeOperation::Edit(document) = operation {
+                    documents.push(document.clone());
+                }
+            }
+        }
+        None => {}
+    }
+    documents
+}
+
+/// Every `(path, range)` a workspace edit touches.
+fn edit_ranges(edit: &WorkspaceEdit) -> Vec<(PathBuf, lsp_types::Range)> {
+    let mut ranges = Vec::new();
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            let Some(path) = uri_to_path(uri) else {
+                continue;
+            };
+            for edit in edits {
+                ranges.push((path.clone(), edit.range));
+            }
+        }
+    }
+    let documents: Vec<&TextDocumentEdit> = match &edit.document_changes {
+        Some(DocumentChanges::Edits(documents)) => documents.iter().collect(),
+        Some(DocumentChanges::Operations(operations)) => operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DocumentChangeOperation::Edit(document) => Some(document),
+                DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for document in documents {
+        let Some(path) = uri_to_path(&document.text_document.uri) else {
+            continue;
+        };
+        for edit in &document.edits {
+            let edit = match edit {
+                OneOf::Left(edit) => edit,
+                OneOf::Right(annotated) => &annotated.text_edit,
+            };
+            ranges.push((path.clone(), edit.range));
+        }
+    }
+    ranges
 }
 
 /// The planned Rust complement of a TypeScript-initiated rename.
@@ -454,51 +555,10 @@ fn property_edits(
     from_rust: bool,
     edits: &mut Vec<Edit>,
 ) {
-    let Some(plugin) = plugin else { return };
-    let Some((kind, ts_new)) = ts_property_target(state, package, symbol, new_name, from_rust)
-    else {
+    let Some((_, ts_new)) = ts_property_target(state, package, symbol, new_name, from_rust) else {
         return;
     };
-    let Some(mark) = package
-        .marks
-        .iter()
-        .find(|mark| mark.kind == kind && mark.symbol_id == symbol.id)
-    else {
-        return;
-    };
-    let anchor = package.package_dir.join(&mark.file);
-    let Some(anchor_text) = state.read_text(&anchor) else {
-        return;
-    };
-    let offset = convert::utf16_offset(&anchor_text, mark.start);
-    let locations = match plugin.query_rename_locations(&anchor, offset, plugin_timeout()) {
-        Ok(locations) => locations,
-        Err(message) => {
-            eprintln!("typeweld-ls: TypeScript property rename unavailable: {message}");
-            return;
-        }
-    };
-    let Some(snapshot) = state.snapshot() else {
-        return;
-    };
-    for location in locations {
-        let path = PathBuf::from(&location.file);
-        let generated = snapshot
-            .packages
-            .iter()
-            .any(|package| path.starts_with(&package.package_dir));
-        let is_ts = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension == "ts" || extension == "tsx");
-        if generated || !is_ts {
-            continue;
-        }
-        let Some(text) = state.read_text(&path) else {
-            continue;
-        };
-        let start = convert::byte_offset_from_utf16(&text, location.start);
-        let end = convert::byte_offset_from_utf16(&text, location.start + location.length);
+    for (path, start, end) in crate::features::property_locations(state, plugin, package, symbol) {
         edits.push(Edit {
             path,
             start,
@@ -506,13 +566,6 @@ fn property_edits(
             new_text: ts_new.clone(),
         });
     }
-}
-
-fn plugin_timeout() -> Duration {
-    std::env::var("TYPEWELD_PLUGIN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|seconds| seconds.parse().ok())
-        .map_or(Duration::from_secs(3), Duration::from_secs)
 }
 
 /// The plugin target for a field or param symbol: the anchor mark kind and
