@@ -155,6 +155,7 @@ class Daemon {
   private buffer = ""
   private pending: PendingRename | undefined
   private readonly timer: ReturnType<typeof setInterval>
+  private fastTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(private readonly info: PluginCreateInfo) {
     this.connect()
@@ -213,11 +214,30 @@ class Daemon {
       probes: [...starts].map(([fileName, start]) => ({ fileName, start })),
       startedAt: Date.now(),
     }
+    // The editor applies the edit within tens of milliseconds of asking for
+    // the locations; poll quickly only while a rename is in flight so the
+    // Rust complement and the saves follow without a visible pause.
+    this.fastTimer ??= setInterval(() => this.checkPendingRename(), 100)
+    this.fastTimer.unref?.()
+  }
+
+  /** Cheap when idle; called from decorated hooks to react to editor
+   * activity (diagnostics, highlights) right after the rename applies. */
+  pollPendingRename(): void {
+    if (this.pending !== undefined) {
+      this.checkPendingRename()
+    }
   }
 
   private checkPendingRename(): void {
     const pending = this.pending
-    if (pending === undefined) return
+    if (pending === undefined) {
+      if (this.fastTimer !== undefined) {
+        clearInterval(this.fastTimer)
+        this.fastTimer = undefined
+      }
+      return
+    }
     if (Date.now() - pending.startedAt > 30_000) {
       this.pending = undefined
       return
@@ -391,6 +411,7 @@ function init() {
           typeof value === "function" ? value.bind(languageService) : value
       }
 
+      const nudge = () => daemon.pollPendingRename()
       const sourceText = (fileName: string): string | undefined =>
         languageService.getProgram?.()?.getSourceFile(fileName)?.text
 
@@ -429,8 +450,10 @@ function init() {
 
       if (languageService.getDefinitionAtPosition !== undefined) {
         const prior = languageService.getDefinitionAtPosition.bind(languageService)
-        proxy.getDefinitionAtPosition = (fileName, position) =>
-          remapDefinitions(prior(fileName, position))
+        proxy.getDefinitionAtPosition = (fileName, position) => {
+          nudge()
+          return remapDefinitions(prior(fileName, position))
+        }
       }
 
       if (languageService.getDefinitionAndBoundSpan !== undefined) {
@@ -542,6 +565,7 @@ function init() {
       if (languageService.getQuickInfoAtPosition !== undefined) {
         const prior = languageService.getQuickInfoAtPosition.bind(languageService)
         proxy.getQuickInfoAtPosition = (fileName, position, maximumLength) => {
+          nudge()
           const result = prior(fileName, position, maximumLength)
           // Contract hover for marks (in generated files, or where the
           // definition of the symbol under the cursor is a generated mark).

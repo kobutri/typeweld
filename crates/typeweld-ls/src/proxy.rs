@@ -1037,3 +1037,68 @@ fn to_result(value: impl serde::Serialize) -> RequestResult {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with(path: &Path, text: &str) -> State {
+        let mut state = State::new(PathBuf::from("/ws"), Encoding::Utf16);
+        state.open(path.to_path_buf(), text.to_owned(), 1);
+        state
+    }
+
+    #[test]
+    fn ranged_changes_splice_into_the_overlay() {
+        let path = Path::new("/ws/src/lib.rs");
+        let state = state_with(path, "fn get_user() {}\n");
+        let text = apply_content_changes(
+            &state,
+            path,
+            vec![lsp_types::TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(
+                    lsp_types::Position::new(0, 3),
+                    lsp_types::Position::new(0, 11),
+                )),
+                range_length: None,
+                text: "fetch_user".to_owned(),
+            }],
+        );
+        assert_eq!(text.as_deref(), Some("fn fetch_user() {}\n"));
+    }
+
+    #[test]
+    fn rangeless_changes_replace_the_document() {
+        let path = Path::new("/ws/src/lib.rs");
+        let state = state_with(path, "old text");
+        let text = apply_content_changes(
+            &state,
+            path,
+            vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "new text".to_owned(),
+            }],
+        );
+        assert_eq!(text.as_deref(), Some("new text"));
+    }
+
+    #[test]
+    fn out_of_bounds_ranges_clamp_instead_of_panicking() {
+        let path = Path::new("/ws/src/lib.rs");
+        let state = state_with(path, "short");
+        let text = apply_content_changes(
+            &state,
+            path,
+            vec![lsp_types::TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(
+                    lsp_types::Position::new(9, 0),
+                    lsp_types::Position::new(9, 50),
+                )),
+                range_length: None,
+                text: "!".to_owned(),
+            }],
+        );
+        assert_eq!(text.as_deref(), Some("short!"));
+    }
+}
