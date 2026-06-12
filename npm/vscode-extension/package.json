@@ -73,7 +73,7 @@
         "typeweld.server.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the typeweld binary. Leave empty to discover it via TYPEWELD_LS_BINARY, PATH, or local cargo builds."
+          "description": "Path to the typeweld binary. Leave empty to discover it via TYPEWELD_LS_BINARY, PATH, the binary bundled with the extension, or local cargo builds."
         },
         "typeweld.server.args": {
           "type": "array",

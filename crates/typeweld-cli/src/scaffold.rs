@@ -8,6 +8,7 @@ use std::path::Path;
 ///
 /// # Errors
 /// Fails when the target directory already exists or files cannot be written.
+#[allow(clippy::too_many_lines)] // a linear sequence of file templates
 pub fn new_project(name: &str) -> anyhow::Result<()> {
     if !name
         .chars()
@@ -23,6 +24,9 @@ pub fn new_project(name: &str) -> anyhow::Result<()> {
 
     let ts_package = format!("@{name}/api");
     let package_path = format!("target/typeweld/packages/@{name}/api");
+    // Pin generated dependencies to the version this CLI was built from, so
+    // scaffold output, runtime, and plugin always match.
+    let version = env!("CARGO_PKG_VERSION");
 
     write(
         &root.join("Cargo.toml"),
@@ -40,9 +44,11 @@ pub fn new_project(name: &str) -> anyhow::Result<()> {
     // Server crate.
     write(
         &root.join("server/Cargo.toml"),
-        "[package]\nname = \"server\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\
-         axum = \"0.8\"\nserde = { version = \"1\", features = [\"derive\"] }\ntokio = { version \
-         = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\"] }\ntypeweld = \"0.1\"\n",
+        &format!(
+            "[package]\nname = \"server\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\
+             axum = \"0.8\"\nserde = {{ version = \"1\", features = [\"derive\"] }}\ntokio = {{ version \
+             = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\"] }}\ntypeweld = \"{version}\"\n"
+        ),
     )?;
     write(
         &root.join("server/src/main.rs"),
@@ -106,14 +112,23 @@ async fn main() {
 "#,
     )?;
 
+    // Workspace root package.json so `npm install` works from the project root.
+    write(
+        &root.join("package.json"),
+        &format!(
+            "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"workspaces\": [\"app\"],\n  \
+             \"scripts\": {{\n    \"typecheck\": \"npm run typecheck --workspaces\"\n  }}\n}}\n"
+        ),
+    )?;
+
     // TypeScript app.
     write(
         &root.join("app/package.json"),
         &format!(
             "{{\n  \"name\": \"{name}-app\",\n  \"private\": true,\n  \"type\": \"module\",\n  \
              \"scripts\": {{\n    \"typecheck\": \"tsc --noEmit\"\n  }},\n  \"dependencies\": \
-             {{\n    \"@typeweld/effect-runtime\": \"^0.1.0\",\n    \"effect\": \
-             \"4.0.0-beta.78\"\n  }},\n  \"devDependencies\": {{\n    \"@typeweld/typescript-plugin\": \"^0.1.0\",\n    \"typescript\": \"^5.9\"\n  }}\n}}\n"
+             {{\n    \"@typeweld/effect-runtime\": \"^{version}\",\n    \"effect\": \
+             \"4.0.0-beta.78\"\n  }},\n  \"devDependencies\": {{\n    \"@typeweld/typescript-plugin\": \"^{version}\",\n    \"typescript\": \"^5.9\"\n  }}\n}}\n"
         ),
     )?;
     write(
@@ -124,10 +139,13 @@ async fn main() {
              \"bundler\",\n    \"skipLibCheck\": true,\n    \"paths\": {{\n      \
              \"{ts_package}\": [\"../{package_path}/index.ts\"],\n      \"{ts_package}/*\": \
              [\"../{package_path}/*\"],\n      \"@typeweld/effect-runtime\": \
-             [\"./node_modules/@typeweld/effect-runtime/src/index.ts\"],\n      \
+             [\"../node_modules/@typeweld/effect-runtime/src/index.ts\", \
+             \"./node_modules/@typeweld/effect-runtime/src/index.ts\"],\n      \
              \"@typeweld/effect-runtime/compat\": \
-             [\"./node_modules/@typeweld/effect-runtime/src/compat.ts\"],\n      \"effect\": \
-             [\"./node_modules/effect/dist/index.d.ts\"]\n    }}\n  }},\n  \"include\": [\"src\", \
+             [\"../node_modules/@typeweld/effect-runtime/src/compat.ts\", \
+             \"./node_modules/@typeweld/effect-runtime/src/compat.ts\"],\n      \"effect\": \
+             [\"../node_modules/effect/dist/index.d.ts\", \
+             \"./node_modules/effect/dist/index.d.ts\"]\n    }}\n  }},\n  \"include\": [\"src\", \
              \"../{package_path}\"]\n}}\n"
         ),
     )?;
@@ -153,7 +171,7 @@ Effect.runPromise(program).catch(console.error)
     println!("  cd {name}");
     println!("  typeweld generate        # extract + generate the Effect client");
     println!("  cargo run -p server      # start the API server");
-    println!("  cd app && npm install && npm run typecheck");
+    println!("  npm install && npm run typecheck");
     Ok(())
 }
 
