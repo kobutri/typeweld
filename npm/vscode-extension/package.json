@@ -2,7 +2,7 @@
   "name": "typeweld-vscode",
   "displayName": "Typeweld",
   "description": "VS Code client for the Typeweld language server.",
-  "version": "0.1.0",
+  "version": "0.0.6",
   "private": true,
   "publisher": "kobutri",
   "license": "MIT OR Apache-2.0",

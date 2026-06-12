@@ -1,6 +1,6 @@
 {
   "name": "@typeweld/effect-runtime",
-  "version": "0.1.0",
+  "version": "0.0.6",
   "description": "Runtime helpers for Typeweld-generated Effect clients.",
   "license": "MIT OR Apache-2.0",
   "repository": {
